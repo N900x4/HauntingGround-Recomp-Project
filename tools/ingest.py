@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Disc ingestion: open your own PS2 ISO (or a .zip containing one) read-only, walk ISO9660, identify the game
-by SYSTEM.CNF + ELF hash, locate DATA.CVM, and optionally copy the two files the build needs into OUTDIR.
+by SYSTEM.CNF + ELF hash, locate DATA.CVM, and optionally copy what the build needs into OUTDIR:
+the boot ELF, DATA.CVM (skipped if an identical-size copy exists) and MODULES/ (IOP modules for the sound runtime).
 usage: ingest.py <disc.iso|disc.zip> [OUTDIR]   (e.g. ../game)"""
 import sys, struct, hashlib, zipfile, io, time
 KNOWN = {"3b374d53a499d2c17b205274ee9eb34280768f294f970ebf6ae6731f6a2dacb8": "Haunting Ground NTSC-U SLUS-21075 v1.01"}
@@ -48,7 +49,12 @@ def main(path, outdir=None):
         if h not in KNOWN: sys.exit('refusing to extract: unsupported or modified disc')
         import os; os.makedirs(outdir, exist_ok=True)
         open(os.path.join(outdir, boot), 'wb').write(elf)
-        copy_out(f, *ent['DATA.CVM'], os.path.join(outdir, 'DATA.CVM'))
-        print(f"copied {boot} and DATA.CVM to {outdir}")
+        dst = os.path.join(outdir, 'DATA.CVM')
+        if os.path.exists(dst) and os.path.getsize(dst) == ent['DATA.CVM'][1]: print("DATA.CVM already present (same size), not copied")
+        else: copy_out(f, *ent['DATA.CVM'], dst)
+        os.makedirs(os.path.join(outdir, 'MODULES'), exist_ok=True)
+        mods = [(p, l, s) for p, l, s, d in files if p.upper().startswith('MODULES/') and not d]
+        for p, l, s in mods: copy_out(f, l, s, os.path.join(outdir, 'MODULES', p.split('/', 1)[1]))
+        print(f"copied {boot}, DATA.CVM and {len(mods)} files of MODULES/ to {outdir}")
     print(f"elapsed {time.time()-t0:.2f}s")
 if __name__ == '__main__': main(*sys.argv[1:3])

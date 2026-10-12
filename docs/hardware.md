@@ -69,7 +69,7 @@ The game has 19 VU1 microprograms. They are all in the ELF and none are on the d
 | `XGKICK` | Exactly 1 per program |
 | `XTOP` | 1–2 per program |
 | `XITOP` | None |
-| EFU (`ESIN`/`EATAN`/`EEXP`/`ERSQRT`) | None |
+| EFU (`ESIN`/`EATAN`/`EEXP`/`ERSQRT`) | None of these, but **`ERLENG` is used** (108 K times in the first room; found by the VU1 interpreter 2026-10-12, the static scan missed it) |
 | `ILWR`/`ISWR`, `LQI`/`SQD` | None (only one `SQI`) |
 | `MFP` | 3–8 per lit program. [UNK] No EFU op writes P; possibly harmless compiler output. |
 | Lit variants | `MAXx vf, vf, vf0` (N·L clamp) and `MINIi 255` colour clamp |

@@ -27,9 +27,11 @@ obj/dmac.o: dmac.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/host_sdl.o: host_sdl.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) $(SDL_CFLAGS) -c $< -o $@
+obj/vu1.o: vu1.c ee_runtime.h hle.h
+	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -c $< -o $@
 obj/interp.o: interp.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-hgboot: $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o obj/iop_pad_mc.o obj/overrides.o obj/gs.o obj/dmac.o obj/host_sdl.o
+hgboot: $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o obj/iop_pad_mc.o obj/overrides.o obj/gs.o obj/dmac.o obj/host_sdl.o obj/vu1.o
 	$(CC) -rdynamic -o $@ $^ -lm $(SDL_LIBS)
 clean:
 	rm -rf obj hgboot

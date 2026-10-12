@@ -528,6 +528,7 @@ static void packed(int r, const uint64_t q[2]) {
     }
 }
 static uint64_t n_gif_tags;
+int gif_path_done(int path) { GifPath *g = &gpath[path & 3]; return !g->in_packet && g->eop; }
 void gif_qword(int path, const uint64_t q[2]) {
     GifPath *g = &gpath[path & 3];
     if (!g->in_packet) { gif_tag(g, q); n_gif_tags++; return; }

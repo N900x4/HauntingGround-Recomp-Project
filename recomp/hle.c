@@ -363,7 +363,7 @@ void rec_syscall(Ctx *ctx, uint32_t pc) {
         if (th[cur].prio == (int)a0) th[cur].seq = seqno++;
         else { int b = 0; for (int i = 1; i < MAXT; i++) if (th[i].used && th[i].status == THS_READY && th[i].prio == (int)a0 && (!b || th[i].seq < th[b].seq)) b = i; if (b) th[b].seq = seqno++; }
         quiet = 1; ctx->r[2].s64[0] = 0; if (num > 0) schedule(); return; }
-    case 0x2f: ret = cur; quiet = 1; break;                                  /* GetThreadId */
+    case 0x2f: case -0x2f: ret = cur; quiet = 1; break;                      /* GetThreadId / iGetThreadId */
     case 0x30: case -0x31: { int id = tid(a0); Thread *t = &th[id]; if (!t->used) { ret = -1; break; }
         if (a1) { W32(a1, t->status); W32(a1 + 4, t->entry); W32(a1 + 8, t->stack); W32(a1 + 12, t->stack_size); W32(a1 + 16, t->gp);
                   W32(a1 + 20, t->init_prio); W32(a1 + 24, t->prio); W32(a1 + 28, t->attr); W32(a1 + 32, t->option);
@@ -461,7 +461,7 @@ uint64_t hle_gs_read(uint32_t pa, uint64_t v, int size) {
 void hle_gs_write(uint32_t pa, uint64_t v, int size, uint8_t *gs) { (void)pa; (void)v; (void)size; if (!gs_ready++) gs_init(gs); }
 
 void hle_dump(void) {
-    gs_dump_stats(); dma_dump_stats();
+    gs_dump_stats(); dma_dump_stats(); vu1_dump_stats();
     L("CD: %llu read calls, %llu sectors from DATA.CVM\n", (unsigned long long)n_cdreads, (unsigned long long)cd_sectors_read);
     L("IOP RPC: %d servers bound, %llu calls\n", nbinds, (unsigned long long)n_rpc_calls);
     for (int i = 0; i < nbinds; i++) L("  sid 0x%08x (%s): %llu calls\n", binds[i].sid, sidname(binds[i].sid), (unsigned long long)binds[i].calls);

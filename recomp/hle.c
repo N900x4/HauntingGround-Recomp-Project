@@ -135,6 +135,7 @@ static void fire_vblank(void) {
     for (int c = 0; c < 16; c++) if (dma_pending[c] && c != 5) { dma_pending[c] = 0; raise_dmac(c); }
     iop_flush_idle();
     host_vblank(vblank_count);
+    iop_vblank();
     pad_vblank(vblank_count);
     gs_vblank(vblank_count);
     raise_intc(2);   /* VBLANK start */
@@ -161,11 +162,11 @@ static int cd_read(uint32_t lsn, uint32_t n, uint32_t ee) {   /* 2048-byte secto
 }
 /* ------------------------------------------------------------------ IOP HLE (SIF command layer only) */
 #define IOP_CMDBUF 0x0001F000u
-static uint8_t iop_ram[2 << 20];
+uint8_t iop_ram[2 << 20];
 static uint32_t sifdma_id, ee_sbuf;
 typedef struct { int len; uint32_t w[32]; } IopPkt;
 static IopPkt iopq[256]; static int iopq_n;
-typedef struct { uint32_t sid, server; uint64_t calls; } Bind;
+typedef struct { uint32_t sid, server, buf, cbuf; int real; uint64_t calls; } Bind;
 static Bind binds[64]; static int nbinds;
 static uint64_t n_rpc_calls;
 static void iop_reply(uint32_t cid, const uint32_t *pl, int n) {
@@ -222,11 +223,25 @@ static void iop_rpc(Bind *b, uint32_t fn, uint32_t sbuf, uint32_t ssize, uint32_
         else if (fn == 0x04) v = 0;        /* GetError: none */
         if (recv) W32(recv, v);
         break; }
+    case 0x80000003:   /* IOP heap: fn 1 alloc(size) -> addr, fn 2 free(addr) */
+        if (fn == 1 && recv) { uint32_t a = iop_heap_alloc(*(uint32_t *)S); L("IOP: AllocIopHeap(0x%x) -> 0x%x\n", *(uint32_t *)S, a); W32(recv, a); }
+        else if (fn == 2 && recv) W32(recv, iop_heap_free(*(uint32_t *)S));
+        break;
     case 0x80000006:   /* LOADFILE */
         if (fn == 0xff && recv) memcpy(gptr(recv), "3000", 4);                     /* version */
-        else if (fn == 0 || fn == 1) { L("IOP: LoadModule \"%s\"\n", (char *)S + 8); if (recv) { W32(recv, 0x100 + (uint32_t)b->calls); if (rsize >= 8) W32(recv + 4, 0); } }
+        else if (fn == 0 || fn == 1) {
+            uint32_t alen = *(uint32_t *)S;   /* struct _lf_module_load_arg: { arg_len/result, modres, path[252], args[252] } */ int id = iop_load_module((char *)S + 8, (char *)S + 0x104, alen < 252 ? (int)alen : 0);
+            L("IOP: LoadModule \"%s\" (%u arg bytes)%s\n", (char *)S + 8, alen, id > 0 ? " (emulated)" : id < 0 ? " (FAILED in emulator)" : "");
+            if (recv) { W32(recv, id > 0 ? (uint32_t)id : 0x100 + (uint32_t)b->calls); if (rsize >= 8) W32(recv + 4, 0); } }
         break;
     }
+}
+void hle_iop_rpc_end(const uint32_t endpkt[8]) { iop_reply(0x80000008, endpkt, 8); }
+void hle_iop_send_cmd(uint32_t cid, const uint32_t *payload, int n) { iop_reply(cid, payload, n); }
+int hle_cd_read_iop(uint32_t lsn, uint32_t n, uint32_t iop_addr) {
+    if (lsn < CVM_LSN || !cvm_size() || (iop_addr & 0x1FFFFF) + (uint64_t)n * 2048 > sizeof iop_ram) return -1;
+    fseeko(cvm_f, (long long)(lsn - CVM_LSN) * 2048, SEEK_SET); cd_sectors_read += n;
+    return fread(iop_ram + (iop_addr & 0x1FFFFF), 1, (size_t)n * 2048, cvm_f) == (size_t)n * 2048 ? 0 : -1;
 }
 static void iop_sifdma(uint32_t src, uint32_t dst, uint32_t size, uint32_t attr) {
     if (size > 0x100000) size = 0x100000;
@@ -245,21 +260,28 @@ static void iop_sifdma(uint32_t src, uint32_t dst, uint32_t size, uint32_t attr)
     case 0x80000009: {                 /* RPC BIND: rec_id pkt_addr rpc_id client sid */
         uint32_t sid = w[8]; Bind *b = 0;
         for (int i = 0; i < nbinds; i++) if (binds[i].sid == sid) b = &binds[i];
-        if (!b) { b = &binds[nbinds++]; b->sid = sid; b->server = 0x00040000u + 0x100u * nbinds; }
-        L("IOP: RPC bind sid 0x%08x (%s) client 0x%x -> server 0x%x\n", sid, sidname(sid), w[7], b->server);
-        uint32_t pl[8] = {w[4], w[5], w[6], w[7], 0x80000009, b->server, b->server + 0x10000u, b->server + 0x20000u};
+        if (!b) { b = &binds[nbinds++]; b->sid = sid; b->server = 0x001C0000u + 0x1000u * nbinds; b->buf = b->server + 0x100; b->cbuf = b->server + 0x800; }
+        uint32_t sd, sb, scb;
+        if (!b->real && iop_rpc_find(sid, &sd, &sb, &scb)) { b->real = 1; b->server = sd; b->buf = sb; b->cbuf = scb; }
+        if (!b->real && iop_serves_sid(sid)) {          /* module loaded in the IOP emulator but its server is not up yet: EE retries */
+            L("IOP: RPC bind sid 0x%08x: server not registered yet\n", sid);
+            uint32_t pl0[8] = {w[4], w[5], w[6], w[7], 0x80000009, 0, 0, 0}; iop_reply(0x80000008, pl0, 8); break; }
+        L("IOP: RPC bind sid 0x%08x (%s) client 0x%x -> server 0x%x%s\n", sid, sidname(sid), w[7], b->server, b->real ? " (emulated IOP module)" : "");
+        uint32_t pl[8] = {w[4], w[5], w[6], w[7], 0x80000009, b->server, b->buf, b->cbuf};
         iop_reply(0x80000008, pl, 8); break; }
     case 0x8000000A: {                 /* RPC CALL: rec_id pkt_addr rpc_id client fn ssize recv rsize rmode server */
         Bind *b = 0; for (int i = 0; i < nbinds; i++) if (binds[i].server == w[13]) b = &binds[i];
         if (!b) { L("IOP: RPC call to unknown server 0x%x\n", w[13]); static Bind dummy; b = &dummy; }
-        iop_rpc(b, w[8], b->server + 0x10000u, w[9], w[10], w[11]);
         uint32_t pl[8] = {w[4], w[5], w[6], w[7], 0x8000000A, w[13], 0, 0};
+        if (b->real) { b->calls++; n_rpc_calls++; if (iop_rpc_call(b->server, w[8], w[9], w[10], w[11], pl)) break; }
+        iop_rpc(b, w[8], b->buf, w[9], w[10], w[11]);
         iop_reply(0x80000008, pl, 8); break; }
     case 0x8000000C: {                 /* GETOTHERDATA: copy IOP memory to EE */
         uint32_t s = w[8], d = w[9], n = w[10];
         if (n < 0x100000) memcpy(gptr(d), iop_ram + (s & 0x1FFFFF), n);
         uint32_t pl[8] = {w[4], w[5], w[6], w[7], 0x8000000C, 0, 0, 0};
         iop_reply(0x80000008, pl, 8); break; }
+    case 0x80000008: iop_ee_rpc_end(w); break;   /* RPC END from an EE server to an emulated IOP client */
     case 0x80000000:                   /* CHANGE_SADDR: EE tells the IOP where its command buffer is */
         ee_sbuf = w[4]; L("IOP: CHANGE_SADDR EE buffer 0x%x (word there 0x%x)\n", w[4], R32(w[4])); break;
     default:
@@ -461,7 +483,7 @@ uint64_t hle_gs_read(uint32_t pa, uint64_t v, int size) {
 void hle_gs_write(uint32_t pa, uint64_t v, int size, uint8_t *gs) { (void)pa; (void)v; (void)size; if (!gs_ready++) gs_init(gs); }
 
 void hle_dump(void) {
-    gs_dump_stats(); dma_dump_stats(); vu1_dump_stats();
+    gs_dump_stats(); dma_dump_stats(); vu1_dump_stats(); iop_dump();
     L("CD: %llu read calls, %llu sectors from DATA.CVM\n", (unsigned long long)n_cdreads, (unsigned long long)cd_sectors_read);
     L("IOP RPC: %d servers bound, %llu calls\n", nbinds, (unsigned long long)n_rpc_calls);
     for (int i = 0; i < nbinds; i++) L("  sid 0x%08x (%s): %llu calls\n", binds[i].sid, sidname(binds[i].sid), (unsigned long long)binds[i].calls);

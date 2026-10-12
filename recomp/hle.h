@@ -26,6 +26,20 @@ void dma_run(int ch, uint8_t *hwreg);
 void gif_fifo_write(uint32_t off, uint64_t v);
 void dma_dump_stats(void);
 void vu1_dump_stats(void);
+/* iop_kernel.c: emulated IOP running the game's sound modules */
+int iop_load_module(const char *path, const char *args, int arg_len);
+int iop_rpc_find(uint32_t sid, uint32_t *sd, uint32_t *buf, uint32_t *cbuf);
+int iop_rpc_call(uint32_t sd, uint32_t fno, uint32_t size, uint32_t recv, uint32_t rsize, const uint32_t endpkt[8]);
+void iop_vblank(void);
+int iop_serves_sid(uint32_t sid);
+uint32_t iop_heap_alloc(uint32_t size);   /* IOP memory for sceSifAllocIopHeap */
+int iop_heap_free(uint32_t addr);   /* sid belongs to a module running in the IOP emulator */
+void iop_dump(void);
+/* hle.c services for the IOP */
+void hle_iop_rpc_end(const uint32_t endpkt[8]);
+void hle_iop_send_cmd(uint32_t cid, const uint32_t *payload, int n);   /* IOP -> EE SIF command */
+void iop_ee_rpc_end(const uint32_t *pkt);                                  /* EE -> IOP RPC END */
+int hle_cd_read_iop(uint32_t lsn, uint32_t n, uint32_t iop_addr);
 /* host_sdl.c: window + live input (no-ops when built without SDL or run with HG_WINDOW=0) */
 int host_window_wanted(void);
 void host_vblank(uint64_t vblank);   /* $HG_GAME_DIR/name, default ../game/name */

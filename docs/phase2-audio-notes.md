@@ -38,10 +38,18 @@ The IOP runs in lock-step with the EE VBlank: 1/59.94 s of IOP time per VBlank, 
 - Title sound effect (SNDDRV voices) against `SYSTEM/TITLE.BD` samples decoded independently with `tools/formats/hdbd.py`: per-channel correlation 0.65–0.78 at the expected start. One channel is phase-inverted, which is the game's Dolby Pro Logic II surround placement.
 - Title music stream against `ADX01/AD_51.ADX` decoded with `tools/formats/adx.py`: correlation 0.78. Stage ambience against `ADX00/AD_22.ADX`: correlation 0.50 at gain 0.99.
 - The streaming handshake runs every frame while a stream plays. It stops when the game stops the stream (leaving the title).
+- **Stage 1 ambience, bit-exact:** CRI's PCM output captured with `HG_ADMAWAV` matches `ADX00/AD_22.ADX` decoded independently with correlation 1.0000 and gain 1.000 over 30 s. The stream loops (1,537 sectors read of 911).
+- Stage 1 plays continuous sound from load to the end of a 90 s capture, with output RMS 1,000–2,900 (voices, stream and reverb).
+
+## Bugs found on the way (fixed)
+
+- An exponential envelope decrease must use an arithmetic shift (`step * level >> 15`). Truncating division stalls release at level 1, so ENVX never reaches 0 and SNDDRV never frees the voice.
+- `ReferThreadStatus` on the EE must report SUSPEND (8) / WAITSUSPEND (0xC). CRI's EE helpers resume their server thread only when they see those values. Without them, ADX streaming stalled after the first buffer.
+- Scripted input must be timed in emulated VBlanks. A Start press meant for the title paused the stage, and pausing mutes all sound.
 
 ## Known gaps
 
 - Reverb is implemented from the PS1 formula with the PS2 register mapping, but it is not yet compared against hardware. The 24 kHz resampling uses the documented FIR.
 - No reference recordings yet (PCSX2 + the user's BIOS planned) to compare full mixes.
 - SNDDRV's BGM sequences (`BGM/*.SQ`) are loaded in stage 1 but not yet heard or verified.
-- Speed: in 3D the whole system runs at about 0.55x real time, so live audio would underrun. Headless WAV capture is unaffected.
+- Speed: in 3D the host runs below real time (the software GS dominates; see the README). Headless WAV capture is unaffected because time is emulated.

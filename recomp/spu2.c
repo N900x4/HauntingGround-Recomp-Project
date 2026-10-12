@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "ee_runtime.h"
 #include "hle.h"
 #include "iop.h"
@@ -74,7 +75,7 @@ static void env_step(Env *e, int shift, int stepv, int exponential, int decreasi
     uint32_t inc = 0x8000u >> (shift - 11 > 0 ? shift - 11 : 0);
     if (exponential && !decreasing && e->level > 0x6000) {
         if (shift < 10) step >>= 2; else if (shift >= 11) inc >>= 2; else { step >>= 1; inc >>= 1; }
-    } else if (exponential && decreasing) step = (int32_t)((int64_t)step * e->level / 0x8000);
+    } else if (exponential && decreasing) step = (int32_t)(((int64_t)step * e->level) >> 15);   /* arithmetic shift: floors to -1, so release reaches 0 */
     if ((stepv | (shift << 2)) != 0x7F && inc == 0) inc = 1;
     if ((stepv | (shift << 2)) == 0x7F) return;              /* all-ones rate: never steps */
     e->counter += inc;
@@ -305,6 +306,15 @@ int spu2_dma(int core, uint8_t *mem, uint32_t halfwords, int to_spu) {
         Adma *s = &adma[core];
         for (uint32_t k = 0; k < halfwords; k++) { int16_t v; memcpy(&v, mem + 2 * k, 2); s->buf[(s->wr + k) & (ADMA_CAP - 1)] = v; }
         s->wr += halfwords; n_dma_hw[core] += halfwords; s->pending = 1;
+        if (getenv("HG_ADMAWAV") && core == 0) {   /* raw stream PCM (L block, R block per 1 KB) -> interleaved stereo WAV */
+            static FILE *af; if (!af) { af = fopen(getenv("HG_ADMAWAV"), "wb"); }
+            if (af) for (uint32_t b = 0; b + 512 <= halfwords; b += 512) for (int i = 0; i < 256; i++) {
+                int16_t lr[2]; memcpy(&lr[0], mem + 2 * (b + i), 2); memcpy(&lr[1], mem + 2 * (b + 256 + i), 2); fwrite(lr, 2, 2, af); }
+            if (af) fflush(af);
+        }
+        if (getenv("HG_ADMALOG")) {   /* level of the PCM the IOP driver sends, once per second of stream */
+            static double e; static uint64_t n; for (uint32_t k = 0; k < halfwords; k++) { double v = (int16_t)((uint16_t *)mem)[k]; e += v * v; }
+            n += halfwords; if (n >= 96000) { L("SPU2: ADMA core %d input rms %.1f (at sample %llu)\n", core, sqrt(e / n), (unsigned long long)n_samples); e = 0; n = 0; } }
         adma_check_done(core);
         return 0;
     }
@@ -422,6 +432,11 @@ void spu2_dump_stats(void) {
     int active = 0; for (int c = 0; c < 2; c++) for (int n = 0; n < 24; n++) active += voice[c][n].phase != PH_OFF;
     L("SPU2: %llu samples, %llu key-ons, %d voices active, %llu IRQs, DMA core0 %llu / core1 %llu halfwords\n", (unsigned long long)n_samples,
       (unsigned long long)n_keyon, active, (unsigned long long)n_irq, (unsigned long long)n_dma_hw[0], (unsigned long long)n_dma_hw[1]);
+    for (int c = 0; c < 2; c++) {
+        double e = 0; for (int k = 0; k < 1024; k++) { double v = (int16_t)spu_ram[0x2000 + 0x400 * c + k]; e += v * v; }
+        L("  SPU2 core %d: AVOL %04x/%04x, input-area rms %.1f; voice env/vol:", c, (uint16_t)preg(c, 8), (uint16_t)preg(c, 0xA), sqrt(e / 1024));
+        for (int n = 0; n < 24; n++) if (voice[c][n].phase != PH_OFF) L(" v%d env %d vol %04x/%04x", n, voice[c][n].adsr.level, reg[VREG(c, n, 0)], reg[VREG(c, n, 2)]);
+        L("\n"); }
     for (int c = 0; c < 2; c++) L("  SPU2 core %d: ATTR 0x%04x IRQA 0x%05x armed %d MMIX 0x%04x ADMAS 0x%x MVOL %04x/%04x BVOL %04x/%04x EVOL %04x/%04x ESA 0x%05x input pos %u queued %u\n", c,
         reg[CORE(c, 0x19A)], pair(c, 0x19C), irq_armed[c], reg[CORE(c, 0x198)], reg[CORE(c, 0x1B0)], (uint16_t)preg(c, 0), (uint16_t)preg(c, 2), (uint16_t)preg(c, 0xC), (uint16_t)preg(c, 0xE),
         (uint16_t)preg(c, 4), (uint16_t)preg(c, 6), pair(c, 0x2E0), in_pos[c], adma_queued(c));

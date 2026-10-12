@@ -2,7 +2,7 @@
 
 A static recompiler that turns **your own copy** of *Haunting Ground* (PS2, NTSC-U SLUS-21075) into a native PC program, with the long-term goal of a remastered Windows and Linux version: 4K rendering, high-resolution textures, 60 fps, and Hewie voiced with real dog recordings.
 
-> **Status: early research.** The recompiled game boots natively through the logos, the title screen and the main menu, and starts a new game. Graphics are drawn by a software GS into an SDL window (or image files when headless), the first room's 3D is now drawn through a VU1 interpreter (accuracy not yet checked against a reference), movies are skipped and there is no sound. It is **not playable**. See the [roadmap](#roadmap) and [phase 1 notes](docs/phase1-runtime-notes.md).
+> **Status: early research.** The recompiled game boots through the logos, title and menu into the first room, where Fiona can be walked around. The 3D is drawn by a software GS through a VU1 interpreter. Sound comes from the game's own IOP sound drivers (Capcom SNDDRV, CRI ADX) running on an emulated IOP with an SPU2 core; the stage ambience is bit-exact against an independent decode. Movies are skipped, graphics accuracy is not yet checked against reference frames, and 3D runs below real time. It is **not playable** yet. See the [roadmap](#roadmap), [phase 1 notes](docs/phase1-runtime-notes.md) and [audio notes](docs/phase2-audio-notes.md).
 
 ## How it works
 

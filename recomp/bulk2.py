@@ -7,7 +7,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rec2 as rec, r5900 as R
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, '..', 'data')
-EXE = os.path.join(HERE, '..', 'game', 'SLUS_210.75')
+GAME = os.environ.get('HG_GAME_DIR', os.path.join(HERE, '..', 'game'))
+EXE = os.path.join(GAME, 'SLUS_210.75')
 out = sys.argv[1]; nparts = int(sys.argv[2]) if len(sys.argv) > 2 else 16
 os.makedirs(out, exist_ok=True)
 blob = R.load(EXE); W = R.words(blob)

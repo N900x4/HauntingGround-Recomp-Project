@@ -260,7 +260,7 @@ class Unit:
 
 def main():
     poc = os.path.dirname(os.path.abspath(__file__))
-    exe = os.path.join(poc, '..', 'game', 'SLUS_210.75')
+    exe = os.path.join(os.environ.get('HG_GAME_DIR', os.path.join(poc, '..', 'game')), 'SLUS_210.75')
     blob = R.load(exe)
     S = os.environ.get('SCRATCH', os.path.join(poc, '..', 'data'))
     ends = {}

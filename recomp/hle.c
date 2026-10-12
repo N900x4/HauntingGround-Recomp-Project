@@ -144,7 +144,7 @@ static void fire_vblank(void) {
 #define CVM_LSN 0x1000u
 static FILE *cvm_f; static long long cvm_sz = -1;
 static long long cvm_size(void) {
-    if (cvm_sz < 0) { const char *p = getenv("HG_CVM") ? getenv("HG_CVM") : "../game/DATA.CVM"; cvm_f = fopen(p, "rb");
+    if (cvm_sz < 0) { const char *p = getenv("HG_CVM") ? getenv("HG_CVM") : game_path("DATA.CVM"); cvm_f = fopen(p, "rb");
         if (cvm_f) { fseeko(cvm_f, 0, SEEK_END); cvm_sz = ftello(cvm_f); } else cvm_sz = 0; }
     return cvm_sz;
 }

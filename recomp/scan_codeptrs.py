@@ -5,7 +5,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import r5900 as R
 H = os.path.dirname(os.path.abspath(__file__))
-blob = R.load(os.path.join(H, '../game/SLUS_210.75')); W = R.words(blob)
+blob = R.load(os.path.join(os.environ.get('HG_GAME_DIR', os.path.join(H, '../game')), 'SLUS_210.75')); W = R.words(blob)
 starts = set(int(x, 16) for x in open(os.path.join(H, '../data/mystarts.txt')).read().split())
 def s16(x): return x - 0x10000 if x & 0x8000 else x
 lui = {}; found = {}

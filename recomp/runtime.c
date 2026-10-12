@@ -39,6 +39,10 @@ static int first_order[MAXF], n_first;
 static double t_start;
 int bg_verbose = 1;
 
+const char *game_path(const char *name) {
+    static char buf[4][1024]; static int k; char *b = buf[k++ & 3];
+    snprintf(b, 1024, "%s/%s", getenv("HG_GAME_DIR") ? getenv("HG_GAME_DIR") : "../game", name); return b;
+}
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static long log_bytes; static int log_capped;
 #define LOG_CAP (8L << 20)            /* cap per run; the stop summary bypasses it */
@@ -191,7 +195,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "-t") && i + 1 < argc) time_limit = atof(argv[++i]);
         else if (!strcmp(argv[i], "-q")) bg_verbose = 0;
     }
-    const char *exe = getenv("HG_ELF") ? getenv("HG_ELF") : "../game/SLUS_210.75";
+    const char *exe = getenv("HG_ELF") ? getenv("HG_ELF") : game_path("SLUS_210.75");
     ee_ram = mmap(0, 32 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     FILE *f = fopen(exe, "rb"); if (!f) { perror(exe); return 1; }
     fseek(f, 0x80, SEEK_SET);

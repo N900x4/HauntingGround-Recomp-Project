@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """List ISO9660 extents inside game/DATA.CVM (after its 3-sector CVM header) and map CD reads in a run log
 (IOP: sceCdRead(lsn ...)) to file names. usage: isomap.py RUNLOG"""
-import struct, sys, re, collections
-ISO = '../game/DATA.CVM'; HDR = 3; VLSN = 0x1000   # HDR = CVM header sectors, skipped in sec()
+import os, struct, sys, re, collections
+ISO = os.path.join(os.environ.get('HG_GAME_DIR', '../game'), 'DATA.CVM'); HDR = 3; VLSN = 0x1000   # HDR = CVM header sectors, skipped in sec()
 f = open(ISO, 'rb')
 def sec(n, c=1): f.seek((n + HDR) * 2048); return f.read(2048 * c)
 pvd = sec(16); root = pvd[156:156 + 34]

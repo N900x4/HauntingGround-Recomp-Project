@@ -100,7 +100,23 @@ void host_vblank(uint64_t vb) {
     SDL_RenderClear(ren); SDL_RenderCopy(ren, tex, 0, 0); SDL_RenderPresent(ren);
     (void)vb;
 }
+static SDL_AudioDeviceID adev; static int audio_state;   /* 0 = not tried, 1 = open, -1 = unavailable */
+void host_audio_push(const int16_t *s, int frames) {
+    if (!audio_state) {
+        const char *a = getenv("HG_AUDIO");
+        if ((a && !strcmp(a, "0")) || !(active == 1 || (a && !strcmp(a, "1")))) { audio_state = -1; return; }
+        if (!SDL_WasInit(SDL_INIT_AUDIO) && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) { L("host: no audio: %s\n", SDL_GetError()); audio_state = -1; return; }
+        SDL_AudioSpec want = { 0 }, got; want.freq = 48000; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 1024;
+        adev = SDL_OpenAudioDevice(0, 0, &want, &got, 0);
+        if (!adev) { L("host: no audio device: %s\n", SDL_GetError()); audio_state = -1; return; }
+        SDL_PauseAudioDevice(adev, 0); audio_state = 1; L("host: audio open (48 kHz stereo)\n");
+    }
+    if (audio_state < 0) return;
+    if (SDL_GetQueuedAudioSize(adev) > 48000 * 4 / 6) return;      /* more than ~160 ms queued: drop to keep latency low */
+    SDL_QueueAudio(adev, s, (Uint32)frames * 4);
+}
 #else
+void host_audio_push(const int16_t *s, int frames) { (void)s; (void)frames; }
 int host_window_wanted(void) { return 0; }
 int host_window_active(void) { return 0; }
 void host_vblank(uint64_t vb) { (void)vb; }

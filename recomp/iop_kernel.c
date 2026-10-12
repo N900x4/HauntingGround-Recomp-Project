@@ -82,14 +82,15 @@ enum { W_NONE = 0, W_SEMA, W_EVENT, W_DELAY, W_VBLANK, W_RPC, W_SLEEP, W_START, 
 typedef struct {
     int status, prio, wait, wait_id; uint32_t entry, stack, stack_size, gp, attr, option;
     uint32_t ev_bits, ev_mode, ev_res; uint64_t wake; uint64_t seq; int wakeups;
-    IopCpu ctx; int exit_code; int is_loader; uint32_t rpc_qd;
+    IopCpu ctx; int exit_code; int is_loader; uint32_t rpc_qd; int ie;   /* ie: interrupt enable (part of the thread context) */
 } Th;
 #define MAXTH 64
 static Th th[MAXTH]; static int cur = 0;
-static int live;    /* 1 while the CPU registers belong to thread cur (else th[cur].ctx is authoritative) */ static uint64_t seqc = 1; static int in_intr; static int intr_enabled = 1;
+static int live;    /* 1 while the CPU registers belong to thread cur (else th[cur].ctx is authoritative) */ static uint64_t seqc = 1; static int in_intr;
 static uint64_t nswitch;
-static void th_save(int i) { if (i > 0) { uint32_t c0[32]; memcpy(c0, iop.cop0, sizeof c0); th[i].ctx = iop; (void)c0; } }
-static void th_load(int i) { uint32_t c0[32]; memcpy(c0, iop.cop0, sizeof c0); iop = th[i].ctx; memcpy(iop.cop0, c0, sizeof c0); iop.yield = 0; }
+static int intr_enabled = 1;
+static void th_save(int i) { if (i > 0) { th[i].ctx = iop; th[i].ie = intr_enabled; } }
+static void th_load(int i) { uint32_t c0[32]; memcpy(c0, iop.cop0, sizeof c0); iop = th[i].ctx; memcpy(iop.cop0, c0, sizeof c0); iop.yield = 0; intr_enabled = th[i].ie; }
 static void make_ready(int i) { th[i].status = TS_READY; th[i].wait = W_NONE; th[i].seq = seqc++; }
 static int pick_thread(void) {
     int b = 0;
@@ -103,7 +104,7 @@ static int th_alloc(void) { for (int i = 1; i < MAXTH; i++) if (th[i].status == 
 static void th_start(int i, uint32_t a0) {
     Th *t = &th[i]; memset(&t->ctx, 0, sizeof t->ctx);
     t->ctx.pc = t->entry; t->ctx.r[4] = a0; t->ctx.r[28] = t->gp; t->ctx.r[29] = (t->stack + t->stack_size - 0x30) & ~15u; t->ctx.r[31] = TRAP(T_THREADEXIT);
-    t->wakeups = 0; make_ready(i);
+    t->wakeups = 0; t->ie = 1; make_ready(i);
 }
 
 /* ---------------------------------------------------------------- semaphores / event flags */
@@ -134,10 +135,10 @@ static uint32_t iop_call(uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2) {  
     memset(iop.r, 0, sizeof iop.r);
     iop.r[4] = a0; iop.r[5] = a1; iop.r[6] = a2; iop.r[28] = save.r[28]; iop.r[29] = INTR_STACK - 0x40 * in_intr; iop.r[31] = TRAP(T_CALLRET);
     iop.pc = fn; iop.in_delay = 0; iop.yield = 0;
-    int saved_done = call_done; call_done = 0; in_intr++;
+    int saved_done = call_done, saved_ie = intr_enabled; call_done = 0; in_intr++;
     long guard = 0;
     while (!call_done && guard < 50000000) { guard += iop_exec(10000); if (iop.yield && !call_done) { iop.yield = 0; } }
-    in_intr--; call_done = saved_done;
+    in_intr--; call_done = saved_done; intr_enabled = saved_ie;   /* the kernel restores the interrupt state on handler exit */
     uint32_t ret = iop.r[2];
     uint32_t c0[32]; memcpy(c0, iop.cop0, sizeof c0); iop = save; memcpy(iop.cop0, c0, sizeof c0);
     if (guard >= 50000000) L("IOP: nested call to 0x%08x did not return\n", fn);
@@ -321,7 +322,7 @@ static void rpc_return(void) {             /* server function returned: v0 = rep
     if (r->recv && r->rsize && data) { uint8_t *p = iop_ptr(data); if (p) memcpy(gptr(r->recv), p, r->rsize); }
     hle_iop_rpc_end(r->endpkt);
     n_iop_rpc++;
-    if (getenv("HG_RPCLOG")) L("IOP: RPC done sid 0x%08x fn 0x%x (thread %d) reply 0x%x\n", srv[r->srv].sid, r->fno, cur, data);
+    if (getenv("HG_RPCLOG")) L("IOP: RPC done sid 0x%08x fn 0x%x (thread %d) reply 0x%x -> %08x\n", srv[r->srv].sid, r->fno, cur, data, data ? RD32(data) : 0);
     serve_next(cur);
 }
 /* ---- sifman */
@@ -609,7 +610,8 @@ int iop_rpc_find(uint32_t sid, uint32_t *sd, uint32_t *buf, uint32_t *cbuf) {
 int iop_rpc_call(uint32_t sd, uint32_t fno, uint32_t size, uint32_t recv, uint32_t rsize, const uint32_t endpkt[8]) {
     int s = -1; for (int i = 0; i < nsrv; i++) if (srv[i].sd == sd) s = i;
     if (s < 0 || nrq >= 64) return 0;
-    if (getenv("HG_RPCLOG")) L("IOP: RPC queued sid 0x%08x fn 0x%x size %u rsize %u\n", srv[s].sid, fno, size, rsize);
+    if (getenv("HG_RPCLOG")) L("IOP: RPC queued sid 0x%08x fn 0x%x size %u rsize %u  [%08x %08x %08x %08x] vb %llu\n", srv[s].sid, fno, size, rsize,
+        RD32(srv[s].buf), RD32(srv[s].buf + 4), RD32(srv[s].buf + 8), RD32(srv[s].buf + 12), (unsigned long long)vblanks);
     Req *r = &rq[nrq++]; r->srv = s; r->fno = fno; r->size = size; r->recv = recv; r->rsize = rsize; memcpy(r->endpkt, endpkt, 32);
     for (int i = 1; i < MAXTH; i++) if (th[i].status == TS_WAIT && th[i].wait == W_RPC && th[i].rpc_qd == srv[s].qd) { serve_next(i); break; }
     iop_run_until(now, 2000000);
@@ -626,10 +628,14 @@ void iop_vblank(void) {
 }
 void iop_dump(void) {
     if (!nmods) return;
+    L("IOP: interrupts %s, pending 0x%llx\n", intr_enabled ? "enabled" : "DISABLED", (unsigned long long)irq_pending);
     L("IOP: %d modules, %llu instructions, %llu switches, %.2f s of IOP time, %llu RPCs served, %llu timer calls\n", nmods, (unsigned long long)iop_insns,
       (unsigned long long)nswitch, now / IOP_CLOCK, (unsigned long long)n_iop_rpc, (unsigned long long)ntimer_calls);
     for (int i = 1; i < MAXTH; i++) if (th[i].status != TS_FREE)
-        L("  IOP thread %d: entry 0x%x prio %d %s wait %d pc 0x%x\n", i, th[i].entry, th[i].prio, th[i].status == TS_READY ? "READY" : th[i].status == TS_WAIT ? "WAIT" : "DORMANT", th[i].wait, i == cur ? iop.pc : th[i].ctx.pc);
+        L("  IOP thread %d: entry 0x%x prio %d %s wait %d/%d pc 0x%x ra 0x%x\n", i, th[i].entry, th[i].prio, th[i].status == TS_READY ? "READY" : th[i].status == TS_WAIT ? "WAIT" : "DORMANT", th[i].wait, th[i].wait_id,
+          (i == cur && live) ? iop.pc : th[i].ctx.pc, (i == cur && live) ? iop.r[31] : th[i].ctx.r[31]);
+    for (int i = 1; i < 128; i++) if (sem[i].used) L("  IOP sema %d: count %d max %d\n", i, sem[i].count, sem[i].max);
+    for (int i = 1; i < 64; i++) if (evf[i].used) L("  IOP event flag %d: bits 0x%x\n", i, evf[i].bits);
     L("  IOP HLE calls:"); for (int k = 0; k < NHLE; k++) if (hle_count[k]) L(" %s=%llu", hle_fns[k].name, (unsigned long long)hle_count[k]); L("\n");
     spu2_dump_stats();
 }

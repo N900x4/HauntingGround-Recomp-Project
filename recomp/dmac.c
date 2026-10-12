@@ -153,7 +153,9 @@ static void feed(int ch, uint32_t madr, uint32_t qwc) {
 }
 static uint32_t R32h(uint8_t *hw, uint32_t off) { uint32_t v; memcpy(&v, hw + off, 4); return v; }
 static void W32h(uint8_t *hw, uint32_t off, uint32_t v) { memcpy(hw + off, &v, 4); }
-void dma_run(int ch, uint8_t *hw) {
+static void dma_run_inner(int ch, uint8_t *hw);
+void dma_run(int ch, uint8_t *hw) { double t0 = host_now(); double v0 = tprof[0] + tprof[1]; dma_run_inner(ch, hw); tprof[4] += host_now() - t0 - (tprof[0] + tprof[1] - v0); }
+static void dma_run_inner(int ch, uint8_t *hw) {
     uint32_t base = ch == 1 ? 0x9000 : 0xA000;
     uint32_t chcr = R32h(hw, base), madr = R32h(hw, base + 0x10), qwc = R32h(hw, base + 0x20) & 0xFFFF, tadr = R32h(hw, base + 0x30);
     int mode = (chcr >> 2) & 3, tte = (chcr >> 6) & 1;

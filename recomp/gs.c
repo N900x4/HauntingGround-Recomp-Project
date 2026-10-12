@@ -393,12 +393,14 @@ static void vertex_kick(Vtx v, int draw) {
         uint64_t off = d.c->xyoffset; int ox = BITS(off, 0, 16), oy = BITS(off, 32, 16);
         Vtx w[3]; for (int i = 0; i < nvq; i++) { w[i] = vq[i]; w[i].x -= ox; w[i].y -= oy; }
         n_prims++; n_kicks_frame++;
+        double t0 = host_now();
         switch (prim) {
         case 0: pixel(&d, w[0].x >> 4, w[0].y >> 4, w[0].z, shade(&d, w[0].rgba, w[0].u, w[0].v, w[0].f)); break;
         case 1: case 2: draw_line(&d, &w[0], &w[1]); break;
         case 3: case 4: case 5: draw_triangle(&d, &w[0], &w[1], &w[2]); break;
         case 6: draw_sprite(&d, &w[0], &w[1]); break;
         }
+        tprof[1] += host_now() - t0;
     }
     switch (prim) {
     case 2: vq[0] = vq[1]; nvq = 1; break;

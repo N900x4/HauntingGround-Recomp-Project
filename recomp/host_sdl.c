@@ -61,6 +61,16 @@ static uint8_t axis8(Sint16 v) { int a = (v + 32768) >> 8; return a < 0 ? 0 : a 
 void host_vblank(uint64_t vb) {
     if (active < 0) active = host_init();
     if (!active) return;
+    {   /* keep emulated time at real-time pace while a window is open (emulated VBlanks are 1/59.94 s) */
+        extern int timing_wall; static Uint64 t0; static uint64_t vb0;
+        if (!timing_wall) {
+            Uint64 now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
+            if (!t0 || vb < vb0) { t0 = now; vb0 = vb; }
+            double due = (double)(vb - vb0) / 59.94, el = (double)(now - t0) / f;
+            if (due > el + 0.002) SDL_Delay((Uint32)((due - el) * 1000));
+            else if (el - due > 0.25) { t0 = now; vb0 = vb; }     /* running slow: do not try to catch up */
+        }
+    }
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) stop("window closed");

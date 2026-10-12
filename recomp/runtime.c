@@ -43,6 +43,8 @@ const char *game_path(const char *name) {
     static char buf[4][1024]; static int k; char *b = buf[k++ & 3];
     snprintf(b, 1024, "%s/%s", getenv("HG_GAME_DIR") ? getenv("HG_GAME_DIR") : "../game", name); return b;
 }
+double tprof[8];
+double host_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static long log_bytes; static int log_capped;
 #define LOG_CAP (8L << 20)            /* cap per run; the stop summary bypasses it */
@@ -91,6 +93,8 @@ void dump_stats(const char *why) {
     if (pt) { L("profile samples %llu, top:\n", (unsigned long long)pt);
         for (int k = 0; k < 15; k++) { int b = -1; for (int i = 0; i < rec_nfuncs; i++) if (prof_hist[i] && (b < 0 || prof_hist[i] > prof_hist[b])) b = i;
             if (b < 0) break; L("  0x%08x %llu\n", rec_table[b].addr, (unsigned long long)prof_hist[b]); prof_hist[b] = 0; } }
+    { double tot = now() - t_start; L("host time: total %.1fs, VU1 %.1fs, GS draw %.1fs, IOP+SPU2 %.1fs (SPU2 mix %.1fs), DMA/VIF %.1fs, rest (EE code, HLE, output) %.1fs\n",
+        tot, tprof[0], tprof[1], tprof[2], tprof[3], tprof[4], tot - tprof[0] - tprof[1] - tprof[2] - tprof[4]); }
     hle_dump();
     if (getenv("HG_PEEK")) { char *p = getenv("HG_PEEK"); while (*p) { uint32_t a = strtoul(p, &p, 16); uint32_t v; memcpy(&v, ee_ram + (a & 0x1FFFFFF), 4); L("peek %08x = %08x\n", a, v); while (*p == ',') p++; } }
 }
@@ -103,6 +107,8 @@ void rec_first(int i) { if (n_first < MAXF) first_order[n_first++] = i; }
 
 /* ------------------------------------------------------------------ dispatcher */
 volatile int vblank_due;
+uint64_t ee_cycles, ee_next_vb = 1ull << 62, ee_vb_period;
+int timing_wall;   /* HG_TIMING=wall: VBlank from the host clock (old behaviour) */
 extern void hle_async_tick(void);
 void rec_call(Ctx *ctx, uint32_t addr) {
     if (__builtin_expect(vblank_due, 0)) hle_async_tick();
@@ -164,7 +170,7 @@ uint8_t *gptr(uint32_t a) { if (a < 0x02000000) return ee_ram + a; uint8_t *p = 
 /* ------------------------------------------------------------------ profiling + time limit */
 static void on_prof(int sig) { (void)sig; int i = func_containing(rec_cur); if (i < 0) i = func_index(rec_cur); if (i >= 0) prof_hist[i]++; }
 static double time_limit = -1;   /* -t seconds; default 60 headless, unlimited with a window */
-static void on_alarm(int sig) { (void)sig; vblank_due = 1; if (time_limit > 0 && now() - t_start > time_limit) { void *bt[64]; int n = backtrace(bt, 64); fprintf(logf_, "host backtrace (guest call chain, innermost first):\n"); fflush(logf_); backtrace_symbols_fd(bt, n, fileno(logf_)); dump_stats("wall-clock time limit (probably a busy-wait loop; see profile)"); _exit(0); } }
+static void on_alarm(int sig) { (void)sig; if (timing_wall) vblank_due = 1; if (time_limit > 0 && now() - t_start > time_limit) { void *bt[64]; int n = backtrace(bt, 64); fprintf(logf_, "host backtrace (guest call chain, innermost first):\n"); fflush(logf_); backtrace_symbols_fd(bt, n, fileno(logf_)); dump_stats("wall-clock time limit (probably a busy-wait loop; see profile)"); _exit(0); } }
 
 /* ------------------------------------------------------------------ main */
 extern void hle_init(void);
@@ -196,6 +202,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-q")) bg_verbose = 0;
     }
     if (time_limit < 0) time_limit = host_window_wanted() ? 0 : 60;
+    timing_wall = getenv("HG_TIMING") && !strcmp(getenv("HG_TIMING"), "wall");
+    { double ips = getenv("HG_EE_MIPS") ? atof(getenv("HG_EE_MIPS")) * 1e6 : 150e6;   /* guest instructions per second (EE ~294.9 MHz at ~2 CPI) */
+      ee_vb_period = (uint64_t)(ips / 59.94); ee_next_vb = timing_wall ? (1ull << 62) : ee_vb_period; }
     const char *exe = getenv("HG_ELF") ? getenv("HG_ELF") : game_path("SLUS_210.75");
     ee_ram = mmap(0, 32 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     FILE *f = fopen(exe, "rb"); if (!f) { perror(exe); return 1; }

@@ -413,7 +413,9 @@ void spu2_write(uint32_t off, uint32_t v, int size) {
 
 void spu2_run(uint64_t samples) {
     static int init; if (!init) { init = 1; wav_open(); }
+    double t0 = host_now();
     for (uint64_t s = 0; s < samples; s++) { adma_step(0); adma_step(1); mix_sample(); }
+    tprof[3] += host_now() - t0;
     n_samples += samples;
 }
 void spu2_dump_stats(void) {

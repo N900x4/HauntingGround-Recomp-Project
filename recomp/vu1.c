@@ -262,7 +262,11 @@ static int lower(uint32_t l, uint32_t pc, int *wrote_vf, int *wrote_vi, uint16_t
 }
 
 /* ---------------------------------------------------------------- run */
+static void vu1_run_inner(uint32_t start);
 void vu1_run(uint32_t start) {
+    double t0 = host_now(); vu1_run_inner(start); tprof[0] += host_now() - t0;
+}
+static void vu1_run_inner(uint32_t start) {
     n_runs++;
     uint32_t pc = start & 2047;
     int ebit_pending = 0, branch_pending = 0; uint32_t branch_tgt = 0;

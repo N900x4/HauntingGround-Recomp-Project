@@ -333,7 +333,7 @@ static void f_sceSifInit(void) { R[2] = 0; }
 static void f_sceSifSetDma(void) {
     uint32_t d = R[4]; int n = R[5];
     for (int i = 0; i < n; i++) { uint32_t src = RD32(d + 16 * i), dst = RD32(d + 16 * i + 4), size = RD32(d + 16 * i + 8), attr = RD32(d + 16 * i + 12);
-        static int nlog, nb; if (getenv("HG_BLKLOG") && size == 2176 && RD32(src) && nb++ < 400) {
+        static int nlog, nb; if (getenv("HG_BLKLOG") && size == 2176 && RD32(src) && vblanks > (uint64_t)atoi(getenv("HG_BLKLOG")) && nb++ < 800) {
             L("IOP->EE blk src 0x%x vb %llu count %u:", src, (unsigned long long)vblanks, RD32(src)); for (int k = 4; k < 16; k++) L(" %08x", RD32(src + 4 * k)); L("\n"); }
         if (getenv("HG_SIFLOG") && nlog++ < 300) L("IOP SIF DMA -> EE: src 0x%x dst 0x%x size %u attr 0x%x (thread %d, ra 0x%x) first %08x %08x %08x %08x\n", src, dst, size, attr, cur, R[31], RD32(src), RD32(src + 4), RD32(src + 8), RD32(src + 12));
         uint8_t *p = iop_ptr(src); if (p && size < 0x100000) memcpy(gptr(dst & 0x1FFFFFFF), p, size); }
@@ -629,7 +629,9 @@ void iop_vblank(void) {
     iop_raise_irq(IOP_IRQ_VBLANK);
     static uint64_t vtarget; if (!vtarget) vtarget = now;
     vtarget += (uint64_t)(IOP_CLOCK / 59.94);
+    double t0 = host_now();
     if (now < vtarget) iop_run_until(vtarget, 8000000);
+    tprof[2] += host_now() - t0;
 }
 void iop_dump(void) {
     if (!nmods) return;

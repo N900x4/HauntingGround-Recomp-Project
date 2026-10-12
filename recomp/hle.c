@@ -129,9 +129,13 @@ static void raise_dmac(int ch) {
     if (!((dmac_mask >> ch) & 1)) return;
     for (int i = 0; i < 64; i++) if (dmac[i].used && dmac[i].cause == ch) call_handler(&dmac[i], ch);
 }
+extern uint64_t ee_cycles, ee_next_vb, ee_vb_period; extern int timing_wall;
 static void fire_vblank(void) {
     if (in_intr) return;
     vblank_count++;
+    if (!timing_wall) { if (ee_cycles < ee_next_vb) ee_cycles = ee_next_vb; ee_next_vb += ee_vb_period; }
+    { static long maxvb = -1; if (maxvb < 0) maxvb = getenv("HG_MAXVB") ? atol(getenv("HG_MAXVB")) : 0;
+      if (maxvb && (long)vblank_count >= maxvb) stop("reached HG_MAXVB=%ld", maxvb); }
     for (int c = 0; c < 16; c++) if (dma_pending[c] && c != 5) { dma_pending[c] = 0; raise_dmac(c); }
     iop_flush_idle();
     host_vblank(vblank_count);
@@ -247,7 +251,7 @@ static void iop_sifdma(uint32_t src, uint32_t dst, uint32_t size, uint32_t attr)
     if (size > 0x100000) size = 0x100000;
     if (dst != IOP_CMDBUF) {           /* plain data (RPC send buffer etc): keep a copy in IOP RAM */
         memcpy(iop_ram + (dst & 0x1FFFFF), gptr(src), (dst & 0x1FFFFF) + size <= sizeof iop_ram ? size : 0);
-        static int nb; if (getenv("HG_BLKLOG") && size == 0x880 && R32(src) && nb++ < 400) {
+        static int nb; if (getenv("HG_BLKLOG") && size == 0x880 && R32(src) && vblank_count > (uint64_t)atoi(getenv("HG_BLKLOG")) && nb++ < 800) {
             L("EE->IOP blk dst 0x%x vb %llu count %u:", dst, (unsigned long long)vblank_count, R32(src)); for (int k = 4; k < 16; k++) L(" %08x", R32(src + 4 * k)); L("\n"); }
         static int nl; if (bg_verbose > 1 || (getenv("HG_SIFLOG") && nl++ < 400000 && (size > 0x880 || nl < 400))) L("EE SIF DMA -> IOP: src 0x%x dst 0x%x size 0x%x first %08x %08x\n", src, dst, size, R32(src), R32(src + 4));
         return;
@@ -389,10 +393,13 @@ void rec_syscall(Ctx *ctx, uint32_t pc) {
         quiet = 1; ctx->r[2].s64[0] = 0; if (num > 0) schedule(); return; }
     case 0x2f: case -0x2f: ret = cur; quiet = 1; break;                      /* GetThreadId / iGetThreadId */
     case 0x30: case -0x31: { int id = tid(a0); Thread *t = &th[id]; if (!t->used) { ret = -1; break; }
-        if (a1) { W32(a1, t->status); W32(a1 + 4, t->entry); W32(a1 + 8, t->stack); W32(a1 + 12, t->stack_size); W32(a1 + 16, t->gp);
+        /* kernel status codes: RUN 1, READY 2, WAIT 4, SUSPEND 8, WAITSUSPEND 0xC, DORMANT 0x10; suspension is reported in the status */
+        uint32_t st = t->status;
+        if (t->suspended && st != THS_DORMANT) st = (st == THS_WAIT) ? 0xC : 8;
+        if (a1) { W32(a1, st); W32(a1 + 4, t->entry); W32(a1 + 8, t->stack); W32(a1 + 12, t->stack_size); W32(a1 + 16, t->gp);
                   W32(a1 + 20, t->init_prio); W32(a1 + 24, t->prio); W32(a1 + 28, t->attr); W32(a1 + 32, t->option);
                   W32(a1 + 36, t->wait_type); W32(a1 + 40, t->wait_id); W32(a1 + 44, t->wakeup); }
-        ret = t->status; quiet = 1; break; }
+        ret = st; quiet = 1; break; }
     case 0x32: /* SleepThread */
         if (th[cur].wakeup > 0) { th[cur].wakeup--; ret = cur; break; }
         th[cur].status = THS_WAIT; th[cur].wait_type = WT_SLEEP; schedule(); ctx->r[2].s64[0] = cur; return;
@@ -455,7 +462,7 @@ uint64_t hle_hw_read(uint32_t pa, uint64_t v, int size) {
     if (is_chcr(pa)) return v & ~0x100ull;
     switch (pa) {
     case 0x10000000: case 0x10000800: case 0x10001000: case 0x10001800: return (timer_tick += 0x40) & 0xFFFF;
-    case 0x1000F000: if ((++nhwpoll & 255) == 0) fire_vblank(); return v | 0xC;                   /* INTC_STAT: VBlank pending */
+    case 0x1000F000: if (timing_wall) { if ((++nhwpoll & 255) == 0) fire_vblank(); } else REC_CYC(64); return v | 0xC;   /* INTC_STAT: VBlank pending; polling burns time */
     case 0x1000E010: return v | 0x3FF;                          /* D_STAT: all channels done */
     case 0x10003020: case 0x10003800: case 0x10003C00: return 0;  /* GIF/VIF0/VIF1 STAT idle */
     case 0x10002010: return v & ~0x80000000ull;                 /* IPU_CTRL not busy */
@@ -479,7 +486,7 @@ void hle_hw_write(uint32_t pa, uint64_t v, int size, uint8_t *hw) {
 static uint64_t csr_reads;
 static int gs_ready;
 uint64_t hle_gs_read(uint32_t pa, uint64_t v, int size) {
-    if (pa == 0x12001000) { csr_reads++; if ((csr_reads & 63) == 0) fire_vblank(); return (v & ~0x200ull) | 0x8 | 0x2 | ((csr_reads & 1) << 13); }
+    if (pa == 0x12001000) { csr_reads++; if (timing_wall) { if ((csr_reads & 63) == 0) fire_vblank(); } else REC_CYC(64); return (v & ~0x200ull) | 0x8 | 0x2 | ((csr_reads & 1) << 13); }
     return v;
 }
 void hle_gs_write(uint32_t pa, uint64_t v, int size, uint8_t *gs) { (void)pa; (void)v; (void)size; if (!gs_ready++) gs_init(gs); }

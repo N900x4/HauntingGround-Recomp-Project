@@ -140,6 +140,9 @@ void rec_first(int i);
     if (__builtin_expect(rec_hook[i] != 0, 0) && rec_hook[i](ctx)) { ctx->ret = ctx->r[31].u32[0]; return; } } while (0)
 extern volatile int vblank_due;
 void hle_async_tick(void);
+/* emulated time: instructions executed (estimated per basic block); VBlank is due every ee_vb_period */
+extern uint64_t ee_cycles, ee_next_vb;
+#define REC_CYC(n) do { if (__builtin_expect((ee_cycles += (n)) >= ee_next_vb, 0)) vblank_due = 1; } while (0)
 #define REC_POLL() do { if (__builtin_expect(vblank_due, 0)) hle_async_tick(); } while (0)
 #define REC_CHKRET(e) do { if (__builtin_expect(ctx->ret != (e), 0)) rec_ret_mismatch(ctx, (e)); } while (0)
 #define REC_FALLTHROUGH(from, to) do { rec_fallthrough(ctx, from, to); return; } while (0)

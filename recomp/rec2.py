@@ -197,7 +197,16 @@ class Unit:
     def func(self, start, end=None, idx=0):
         self.reach_extra = set()
         Rs = self.reach(start); self.last_end = max(Rs) + 4
-        out = [f'void {fname(start)}(Ctx *ctx) {{', f'  REC_ENTER({idx}, 0x{start:x}u);']
+        XFER = set(COND) | {'j', 'jal', 'jr', 'jalr', 'eret'}
+        def runlen(f):     # instructions executed from f to the next control transfer (with its delay slot): the block cost
+            n = 0
+            while f in Rs and n < 128:
+                n += 1
+                if R.decode(self.w(f)) in XFER: return n + 1
+                f += 4
+            return max(n, 1)
+        def cyc(f): return f'REC_CYC({runlen(f)}); '
+        out = [f'void {fname(start)}(Ctx *ctx) {{', f'  REC_ENTER({idx}, 0x{start:x}u); REC_CYC({runlen(start)});']
         order = sorted(Rs); i = 0; emitted_ds = set()
         def fall(f, nxt):   # control continues at f after the instruction just emitted
             if f not in Rs: out.append(f'  REC_FALLTHROUGH(0x{start:x}u, 0x{f:x}u); /* runs into the next function */')
@@ -221,14 +230,17 @@ class Unit:
                     else:
                         code = f'{{ int c = {cond};{link} {ds} if (c) goto L_{t:x}; }}'
                     if t not in Rs: code = code.replace(f'goto L_{t:x};', f'{{ {self.call(t)} return; }}')
-                    elif t <= a: code = code.replace(f'goto L_{t:x};', f'{{ REC_POLL(); goto L_{t:x}; }}')   # loop back-edge = interrupt safe point
+                    elif t <= a: code = code.replace(f'goto L_{t:x};', f'{{ {cyc(t)}REC_POLL(); goto L_{t:x}; }}')   # loop back-edge = interrupt safe point
+                    else: code = code.replace(f'goto L_{t:x};', f'{{ {cyc(t)}goto L_{t:x}; }}')
                     ft = a + 8
+                    if a + 8 in Rs: code += f' {cyc(a + 8)}' if m not in R.LIKELY else ''
+                    if m in R.LIKELY and a + 8 in Rs: code = code + f' else {{ {cyc(a + 8)}}}' 
                 elif m == 'j':
                     t = (a & 0xf0000000) | ((x & 0x3ffffff) << 2)
-                    code = (f'{ds} ' + ('REC_POLL(); ' if t <= a else '') + f'goto L_{t:x};') if t in Rs else f'{ds} {self.call(t)} return; /* tail call */'
+                    code = (f'{ds} {cyc(t)}' + ('REC_POLL(); ' if t <= a else '') + f'goto L_{t:x};') if t in Rs else f'{ds} {self.call(t)} return; /* tail call */'
                 elif m == 'jal':
                     t = (a & 0xf0000000) | ((x & 0x3ffffff) << 2)
-                    code = f'ctx->r[31].u64[0] = 0x{a+8:x}; {ds} {self.call(t)} REC_CHKRET(0x{a+8:x}u);'
+                    code = f'ctx->r[31].u64[0] = 0x{a+8:x}; {ds} {self.call(t)} REC_CHKRET(0x{a+8:x}u); {cyc(a + 8) if a + 8 in Rs else ""}'
                     ft = a + 8
                 elif m == 'jr' and rs == 31:
                     code = f'{{ uint32_t t = {U32(31)}; {ds} ctx->ret = t; return; }}'
@@ -243,7 +255,7 @@ class Unit:
                 else:  # jalr
                     rd = (x >> 11) & 31
                     chk = f' REC_CHKRET(0x{a+8:x}u);' if rd == 31 else ''
-                    code = f'{{ uint32_t t = {U32(rs)}; ctx->r[{rd}].u64[0] = 0x{a+8:x}; {ds} rec_call(ctx, t);{chk} }}'
+                    code = f'{{ uint32_t t = {U32(rs)}; ctx->r[{rd}].u64[0] = 0x{a+8:x}; {ds} rec_call(ctx, t);{chk} {cyc(a + 8) if a + 8 in Rs else ""}}}'
                     ft = a + 8
                 out.append(f'  {lbl} {code}')
                 if a + 4 in self.targets and a + 4 in Rs:   # a branch enters this delay slot (libkernel 0x26f74c)

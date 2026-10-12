@@ -2,7 +2,7 @@
 
 A static recompiler that turns **your own copy** of *Haunting Ground* (PS2, NTSC-U SLUS-21075) into a native PC program, with the long-term goal of a remastered Windows and Linux version: 4K rendering, high-resolution textures, 60 fps, and Hewie voiced with real dog recordings.
 
-> **Status: early research.** The recompiled game boots natively and reaches the game's boot screens, but nothing is drawn yet and there is no sound. It is **not playable**. See the [roadmap](#roadmap).
+> **Status: early research.** The recompiled game boots natively through the logos, the title screen and the main menu, and starts a new game. Graphics are drawn by a software GS into image files (no window yet), 3D is not drawn, movies are skipped and there is no sound. It is **not playable**. See the [roadmap](#roadmap) and [phase 1 notes](docs/phase1-runtime-notes.md).
 
 ## How it works
 
@@ -19,9 +19,10 @@ No game code or data is ever distributed. You supply your disc image, and the to
 Measured in the [boot test](docs/boot-test-report.md):
 
 - The recompiled code runs natively from the PS2 entry point. It gets through the C++ static constructors, `main` and the loading of all 12 IOP modules, mounts `DATA.CVM`, and reads real game files from it.
-- The game's frame loop runs and builds real graphics command lists. Nothing renders them yet.
-- 1,104 distinct game functions have run natively, with no mistranslated returns in about 1 billion calls.
-- It stops at the boot notice screen, which waits for a controller press, and then at a later step that probably needs the memory card or the CRI logo movie.
+- Controller (DBCMAN/libpad2) and memory card (MCSERV/libmc, backed by a host folder) are emulated at the IOP level. Input is scripted for now (`HG_PAD`).
+- Movies are skipped at the CRI MWPLY level, as if each one had finished.
+- A software GS renders the 2D front end: CRI and Dolby logos, the violence notice, the title animation, the title screen and the main menu. Pressing Start and Cross starts a new game and stage 1 loads.
+- 3D is not drawn yet: the game's VU1 microprograms are not executed.
 
 ## Building (Linux, experimental)
 
@@ -31,7 +32,9 @@ python3 tools/ingest.py /path/to/your/HauntingGround.iso game   # NTSC-U v1.01 o
 cd recomp
 python3 bulk2.py gen 16          # generate C (~15–40 s)
 make -j2                         # compile (~1–3 min)
-./hgboot -q -t 60 > run.log      # run for 60 s; a summary is printed at the end of the log
+mkdir -p /tmp/frames
+HG_FRAMES=/tmp/frames HG_PAD=600:cross,900:cross,1200:cross,1500:cross,2300:start,2700:cross \
+  ./hgboot -q -t 60 > run.log    # run for 60 s; frames go to /tmp/frames, a summary ends the log
 ```
 
 Requirements: Python 3 (with numpy for the format tools), gcc or clang, about 2 GB of free disk space. No PS2 BIOS is needed.
@@ -40,7 +43,7 @@ Requirements: Python 3 (with numpy for the format tools), gcc or clang, about 2 
 
 | Phase | Goal | Gate |
 |---|---|---|
-| 1 | Title screen: controller and memory card, CRI logo movie, 2D graphics | Title screen renders with controller input |
+| 1 | Title screen: controller and memory card, CRI logo movie, 2D graphics | Title screen renders with controller input (**reached headless**; window and live controller still to do) |
 | 2 | First controllable room: VU1, full 3D graphics, ADX streaming, Capcom sound driver | Fiona walks in the first room |
 | 3 | One-click tool: launcher for Windows and Linux that picks the ISO, builds and runs, plus a mod hook system | A stock Windows PC builds from its own ISO |
 | 4 | Full playthrough, then remaster features: 4K and effect rewrites, 60 fps through render interpolation, texture and audio replacement | Credits roll and saves load |
@@ -49,7 +52,7 @@ Requirements: Python 3 (with numpy for the format tools), gcc or clang, about 2 
 
 | Path | Contents |
 |---|---|
-| `recomp/` | Translator (`rec2.py`, `bulk2.py`, `r5900.py`), function-discovery scans, and the runtime (C) |
+| `recomp/` | Translator (`rec2.py`, `bulk2.py`, `r5900.py`), function-discovery scans, and the runtime (C): CPU glue and kernel (`runtime.c`, `hle.c`, `interp.c`), controller and memory card (`iop_pad_mc.c`), GS and DMA (`gs.c`, `dmac.c`), game-function overrides (`overrides.c`) |
 | `data/` | Per-version metadata: function starts, jump tables, syscall map. Addresses only, no game bytes |
 | `tools/ingest.py` | Disc reader and verifier |
 | `tools/formats/` | Format tools: Sony HD/BD sound banks (`hdbd.py`, `vagenc.py`), CRI ADX (`adx.py`), textures (`tex_hg.py`) |

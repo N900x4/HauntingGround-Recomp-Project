@@ -12,9 +12,11 @@ obj/runtime.o: runtime.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/hle.o: hle.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
+obj/iop_pad_mc.o: iop_pad_mc.c ee_runtime.h hle.h
+	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/interp.o: interp.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-hgboot: $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o
+hgboot: $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o obj/iop_pad_mc.o
 	$(CC) -rdynamic -o $@ $^ -lm
 clean:
 	rm -rf obj hgboot

@@ -134,6 +134,7 @@ static void fire_vblank(void) {
     vblank_count++;
     for (int c = 0; c < 16; c++) if (dma_pending[c] && c != 5) { dma_pending[c] = 0; raise_dmac(c); }
     iop_flush_idle();
+    pad_vblank(vblank_count);
     raise_intc(2);   /* VBLANK start */
     if (vsync_flag_addr) { W32(vsync_flag_addr, 1); if (vsync_data_addr) W64(vsync_data_addr, (vblank_count & 1) << 13); }
     raise_intc(3);   /* VBLANK end */
@@ -175,7 +176,8 @@ static const char *sidname(uint32_t sid) {
     switch (sid) { case 0x80000001: return "FILEIO"; case 0x80000003: return "IOP_HEAP"; case 0x80000006: return "LOADFILE";
         case 0x80000592: return "CDVD_INIT"; case 0x80000593: return "CDVD_S_CMD"; case 0x80000595: return "CDVD_N_CMD"; case 0x80000596: return "CDVD_SEARCH";
         case 0x80000597: return "CDVD_SEARCHFILE"; case 0x8000059A: return "CDVD_POFF"; case 0x80000400: return "MCSERV"; case 0x80000100: return "PADMAN";
-        case 0x80000101: return "PADMAN_EXT"; case 0x80000901: return "MTAP"; } return "?";
+        case 0x80000101: return "PADMAN_EXT"; case 0x80000901: return "MTAP";
+        case 0x80001300: return "DBCMAN"; case 0x8000131c: case 0x8000131e: case 0x8000131f: return "DBCMAN_SUB"; case 0x90000200: return "CRI_ADX"; case 0x77777777: case 0x77777778: return "SNDDRV"; } return "?";
 }
 /* per-server RPC behaviour: fill the EE receive buffer the way the real IOP module would (minimal) */
 static void iop_rpc(Bind *b, uint32_t fn, uint32_t sbuf, uint32_t ssize, uint32_t recv, uint32_t rsize) {
@@ -192,6 +194,7 @@ static void iop_rpc(Bind *b, uint32_t fn, uint32_t sbuf, uint32_t ssize, uint32_
     if (getenv("HG_DUMPSID") && strtoul(getenv("HG_DUMPSID"), 0, 16) == b->sid) {
         L("  send dump:"); for (uint32_t k = 0; k < ssize && k < 320; k += 4) L("%s%08x", k % 32 ? " " : "\n   ", *(uint32_t *)(S + k)); L("\n");
     }
+    if (pad_rpc(b->sid, fn, S, ssize, recv, rsize) || mc_rpc(b->sid, fn, S, ssize, recv, rsize)) return;
     switch (b->sid) {
     case 0x80000597: { /* sceCdSearchFile: cdlFILE result -> EE dest at +0x124; recv[0] = 1 found / 0 not */
         const char *name = (const char *)S + 0x24; uint32_t dest = *(uint32_t *)(S + 0x124);

@@ -134,6 +134,7 @@ static void fire_vblank(void) {
     vblank_count++;
     for (int c = 0; c < 16; c++) if (dma_pending[c] && c != 5) { dma_pending[c] = 0; raise_dmac(c); }
     iop_flush_idle();
+    host_vblank(vblank_count);
     pad_vblank(vblank_count);
     gs_vblank(vblank_count);
     raise_intc(2);   /* VBLANK start */

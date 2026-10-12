@@ -163,8 +163,8 @@ uint8_t *gptr(uint32_t a) { if (a < 0x02000000) return ee_ram + a; uint8_t *p = 
 
 /* ------------------------------------------------------------------ profiling + time limit */
 static void on_prof(int sig) { (void)sig; int i = func_containing(rec_cur); if (i < 0) i = func_index(rec_cur); if (i >= 0) prof_hist[i]++; }
-static double time_limit = 60;
-static void on_alarm(int sig) { (void)sig; vblank_due = 1; if (now() - t_start > time_limit) { void *bt[64]; int n = backtrace(bt, 64); fprintf(logf_, "host backtrace (guest call chain, innermost first):\n"); fflush(logf_); backtrace_symbols_fd(bt, n, fileno(logf_)); dump_stats("wall-clock time limit (probably a busy-wait loop; see profile)"); _exit(0); } }
+static double time_limit = -1;   /* -t seconds; default 60 headless, unlimited with a window */
+static void on_alarm(int sig) { (void)sig; vblank_due = 1; if (time_limit > 0 && now() - t_start > time_limit) { void *bt[64]; int n = backtrace(bt, 64); fprintf(logf_, "host backtrace (guest call chain, innermost first):\n"); fflush(logf_); backtrace_symbols_fd(bt, n, fileno(logf_)); dump_stats("wall-clock time limit (probably a busy-wait loop; see profile)"); _exit(0); } }
 
 /* ------------------------------------------------------------------ main */
 extern void hle_init(void);
@@ -195,6 +195,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "-t") && i + 1 < argc) time_limit = atof(argv[++i]);
         else if (!strcmp(argv[i], "-q")) bg_verbose = 0;
     }
+    if (time_limit < 0) time_limit = host_window_wanted() ? 0 : 60;
     const char *exe = getenv("HG_ELF") ? getenv("HG_ELF") : game_path("SLUS_210.75");
     ee_ram = mmap(0, 32 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     FILE *f = fopen(exe, "rb"); if (!f) { perror(exe); return 1; }

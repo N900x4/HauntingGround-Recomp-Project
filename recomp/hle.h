@@ -24,6 +24,9 @@ void gs_vblank(uint64_t vblank);
 void gs_dump_stats(void);
 void dma_run(int ch, uint8_t *hwreg);
 void gif_fifo_write(uint32_t off, uint64_t v);
-void dma_dump_stats(void);   /* $HG_GAME_DIR/name, default ../game/name */
+void dma_dump_stats(void);
+/* host_sdl.c: window + live input (no-ops when built without SDL or run with HG_WINDOW=0) */
+int host_window_wanted(void);
+void host_vblank(uint64_t vblank);   /* $HG_GAME_DIR/name, default ../game/name */
 void hle_run_main(uint32_t entry) __attribute__((noreturn));
 #endif

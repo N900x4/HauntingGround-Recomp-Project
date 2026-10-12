@@ -65,7 +65,7 @@ HG_PAD=600:cross,900:cross,1200:cross,1500:cross,2300:start,2700:cross,2900:cros
 
 ## Open items
 
-1. Window and real controller: no SDL2/SDL3 development package is installed (`libsdl2-dev` needed).
+1. Window and live input (`recomp/host_sdl.c`, SDL2) added 2026-10-12. Window output verified by screenshot; live keyboard/gamepad input not yet tried by a person.
 2. Audio: SNDDRV and CRI ADX still get stub RPC replies, so there is no sound.
 3. VU1 microprograms and UNPACK into VU1 memory (phase 2, 3D).
 4. Save-game write path (memory card) is untested.

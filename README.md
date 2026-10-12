@@ -2,7 +2,7 @@
 
 A static recompiler that turns **your own copy** of *Haunting Ground* (PS2, NTSC-U SLUS-21075) into a native PC program, with the long-term goal of a remastered Windows and Linux version: 4K rendering, high-resolution textures, 60 fps, and Hewie voiced with real dog recordings.
 
-> **Status: early research.** The recompiled game boots natively through the logos, the title screen and the main menu, and starts a new game. Graphics are drawn by a software GS into image files (no window yet), 3D is not drawn, movies are skipped and there is no sound. It is **not playable**. See the [roadmap](#roadmap) and [phase 1 notes](docs/phase1-runtime-notes.md).
+> **Status: early research.** The recompiled game boots natively through the logos, the title screen and the main menu, and starts a new game. Graphics are drawn by a software GS into an SDL window (or image files when headless), 3D is not drawn, movies are skipped and there is no sound. It is **not playable**. See the [roadmap](#roadmap) and [phase 1 notes](docs/phase1-runtime-notes.md).
 
 ## How it works
 
@@ -37,13 +37,23 @@ HG_FRAMES=/tmp/frames HG_PAD=600:cross,900:cross,1200:cross,1500:cross,2300:star
   ./hgboot -q -t 60 > run.log    # run for 60 s; frames go to /tmp/frames, a summary ends the log
 ```
 
-Requirements: Python 3 (with numpy for the format tools), gcc or clang, about 2 GB of free disk space. No PS2 BIOS is needed.
+With SDL2 installed (`libsdl2-dev`) the build opens a window and takes live input; just run `./hgboot` (no time limit when windowed, Esc quits, F11 toggles fullscreen). `HG_WINDOW=0` forces headless mode.
+
+| PS2 | Keyboard | Gamepad |
+|---|---|---|
+| D-pad | arrow keys | D-pad |
+| Cross / Circle / Square / Triangle | X / C / Z / S | A / B / X / Y |
+| Start / Select | Enter / Right Shift | Start / Back |
+| L1 / R1 / L2 / R2 | Q / E / 1 / 3 | shoulders / triggers |
+| Left stick | I J K L | left stick (right stick too) |
+
+Requirements: Python 3 (with numpy for the format tools), gcc or clang, optionally SDL2, about 2 GB of free disk space. No PS2 BIOS is needed.
 
 ## Roadmap
 
 | Phase | Goal | Gate |
 |---|---|---|
-| 1 | Title screen: controller and memory card, CRI logo movie, 2D graphics | Title screen renders with controller input (**reached headless**; window and live controller still to do) |
+| 1 | Title screen: controller and memory card, CRI logo movie, 2D graphics | Title screen renders with controller input (**reached**: window with keyboard/gamepad input) |
 | 2 | First controllable room: VU1, full 3D graphics, ADX streaming, Capcom sound driver | Fiona walks in the first room |
 | 3 | One-click tool: launcher for Windows and Linux that picks the ISO, builds and runs, plus a mod hook system | A stock Windows PC builds from its own ISO |
 | 4 | Full playthrough, then remaster features: 4K and effect rewrites, 60 fps through render interpolation, texture and audio replacement | Credits roll and saves load |

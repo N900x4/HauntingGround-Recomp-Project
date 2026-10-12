@@ -550,25 +550,36 @@ void gif_qword(int path, const uint64_t q[2]) {
 
 /* ================================================================== display output */
 static uint64_t frames_written;
-static void dump_frame(uint64_t vb) {
-    const char *dir = getenv("HG_FRAMES"); if (!dir || !gspriv) return;
+/* Copy the displayed picture (read circuit from PMODE, DISPFB/DISPLAY) into out as 0x00BBGGRR words.
+   Returns 0 when nothing displayable is set up. */
+int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
+    if (!gspriv) return 0;
     uint64_t pmode, dispfb, display;
     memcpy(&pmode, gspriv + 0x00, 8);
     int c2 = (pmode >> 1) & 1;
     memcpy(&dispfb, gspriv + (c2 ? 0x90 : 0x70), 8); memcpy(&display, gspriv + (c2 ? 0xa0 : 0x80), 8);
     uint32_t fbp = BITS(dispfb, 0, 9) * 32, fbw = BITS(dispfb, 9, 6), psm = BITS(dispfb, 15, 5), dbx = BITS(dispfb, 32, 11), dby = BITS(dispfb, 43, 11);
     int magh = BITS(display, 23, 4) + 1, dw = BITS(display, 32, 12) + 1, dh = BITS(display, 44, 11) + 1;
-    int w = dw / magh, h = dh; if (w > 1024) w = 1024; if (h > 1024) h = 1024; if (w <= 0 || h <= 0) return;
+    int w = dw / magh, h = dh; if (w > maxw) w = maxw; if (h > maxh) h = maxh;
+    if (w <= 1 || h <= 1) return 0;
+    int is16 = psm == 2 || psm == 10;
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        uint32_t c = read_px(fbp, fbw, is16 ? (int)psm : CT32, dbx + x, dby + y);
+        if (is16) c = c16to32(c, 0, 0, 0x80);
+        out[y * w + x] = c & 0xFFFFFF;
+    }
+    *pw = w; *ph = h; return 1;
+}
+static void dump_frame(uint64_t vb) {
+    const char *dir = getenv("HG_FRAMES"); if (!dir) return;
+    static uint32_t buf[1024 * 1024]; int w, h;
+    if (!gs_display(buf, 1024, 1024, &w, &h)) return;
     char path[1024]; snprintf(path, sizeof path, "%s/frame_%06llu.ppm", dir, (unsigned long long)vb);
     FILE *f = fopen(path, "wb"); if (!f) return;
     fprintf(f, "P6\n%d %d\n255\n", w, h);
     uint8_t *row = malloc((size_t)w * 3);
     for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            uint32_t c = read_px(fbp, fbw, psm == 2 || psm == 10 ? (int)psm : CT32, dbx + x, dby + y);
-            if (psm == 2 || psm == 10) c = c16to32(c, 0, 0, 0x80);
-            row[x * 3] = c; row[x * 3 + 1] = c >> 8; row[x * 3 + 2] = c >> 16;
-        }
+        for (int x = 0; x < w; x++) { uint32_t c = buf[y * w + x]; row[x * 3] = c; row[x * 3 + 1] = c >> 8; row[x * 3 + 2] = c >> 16; }
         fwrite(row, 1, (size_t)w * 3, f);
     }
     free(row); fclose(f); frames_written++;

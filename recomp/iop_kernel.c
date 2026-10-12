@@ -291,12 +291,14 @@ static void f_sceSifCallRpc(void) {
     WR32(cd + 0x1c, endf); WR32(cd + 0x20, endp);
     uint32_t pl[10] = { 0, cd, 0, cd, fno, ssize, recv, rsize, 1, RD32(cd + 0x24) };
     hle_iop_send_cmd(0x8000000A, pl, 10); n_ee_rpc++;
+    if (n_ee_rpc < 50 || getenv("HG_RPCLOG")) L("IOP: sceSifCallRpc to EE: cd 0x%x fn 0x%x mode %u send %u -> recv 0x%x/%u server 0x%x (thread %d, ra 0x%x)\n", cd, fno, mode, ssize, recv, rsize, RD32(cd + 0x24), cur, R[31]);
     R[2] = 0;
     if (!(mode & 1)) block(W_SIFC, (int)cd);
 }
 /* RPC END from the EE (words = whole packet): bind result or call completion */
 void iop_ee_rpc_end(const uint32_t *w) {
     uint32_t cd = w[7], cid = w[8];
+    static int ne; if (ne++ < 50 || getenv("HG_RPCLOG")) L("IOP: RPC END from EE: cd 0x%x cid 0x%x\n", cd, cid);
     if (cid == 0x80000009) { WR32(cd + 0x24, w[9]); WR32(cd + 0x14, w[10]); WR32(cd + 0x18, w[11]);
         L("IOP: bind from IOP client 0x%x -> EE server 0x%x\n", cd, w[9]); }
     else if (cid == 0x8000000A) { uint32_t f = RD32(cd + 0x1c); if (f) iop_call(f, RD32(cd + 0x20), 0, 0); }
@@ -330,7 +332,10 @@ static uint32_t sifdma_id = 1;
 static void f_sceSifInit(void) { R[2] = 0; }
 static void f_sceSifSetDma(void) {
     uint32_t d = R[4]; int n = R[5];
-    for (int i = 0; i < n; i++) { uint32_t src = RD32(d + 16 * i), dst = RD32(d + 16 * i + 4), size = RD32(d + 16 * i + 8);
+    for (int i = 0; i < n; i++) { uint32_t src = RD32(d + 16 * i), dst = RD32(d + 16 * i + 4), size = RD32(d + 16 * i + 8), attr = RD32(d + 16 * i + 12);
+        static int nlog, nb; if (getenv("HG_BLKLOG") && size == 2176 && RD32(src) && nb++ < 400) {
+            L("IOP->EE blk src 0x%x vb %llu count %u:", src, (unsigned long long)vblanks, RD32(src)); for (int k = 4; k < 16; k++) L(" %08x", RD32(src + 4 * k)); L("\n"); }
+        if (getenv("HG_SIFLOG") && nlog++ < 300) L("IOP SIF DMA -> EE: src 0x%x dst 0x%x size %u attr 0x%x (thread %d, ra 0x%x) first %08x %08x %08x %08x\n", src, dst, size, attr, cur, R[31], RD32(src), RD32(src + 4), RD32(src + 8), RD32(src + 12));
         uint8_t *p = iop_ptr(src); if (p && size < 0x100000) memcpy(gptr(dst & 0x1FFFFFFF), p, size); }
     R[2] = sifdma_id++;
 }

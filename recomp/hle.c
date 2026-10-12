@@ -247,7 +247,9 @@ static void iop_sifdma(uint32_t src, uint32_t dst, uint32_t size, uint32_t attr)
     if (size > 0x100000) size = 0x100000;
     if (dst != IOP_CMDBUF) {           /* plain data (RPC send buffer etc): keep a copy in IOP RAM */
         memcpy(iop_ram + (dst & 0x1FFFFF), gptr(src), (dst & 0x1FFFFF) + size <= sizeof iop_ram ? size : 0);
-        if (bg_verbose > 1) L("SIF DMA data 0x%x -> IOP 0x%x size 0x%x\n", src, dst, size);
+        static int nb; if (getenv("HG_BLKLOG") && size == 0x880 && R32(src) && nb++ < 400) {
+            L("EE->IOP blk dst 0x%x vb %llu count %u:", dst, (unsigned long long)vblank_count, R32(src)); for (int k = 4; k < 16; k++) L(" %08x", R32(src + 4 * k)); L("\n"); }
+        static int nl; if (bg_verbose > 1 || (getenv("HG_SIFLOG") && nl++ < 400000 && (size > 0x880 || nl < 400))) L("EE SIF DMA -> IOP: src 0x%x dst 0x%x size 0x%x first %08x %08x\n", src, dst, size, R32(src), R32(src + 4));
         return;
     }
     uint32_t w[16]; for (int i = 0; i < 16; i++) w[i] = R32(src + 4 * i);

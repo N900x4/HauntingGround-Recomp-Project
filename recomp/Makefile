@@ -16,9 +16,13 @@ obj/iop_pad_mc.o: iop_pad_mc.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/overrides.o: overrides.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
+obj/gs.o: gs.c ee_runtime.h hle.h
+	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -c $< -o $@
+obj/dmac.o: dmac.c ee_runtime.h hle.h
+	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/interp.o: interp.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-hgboot: $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o obj/iop_pad_mc.o obj/overrides.o
+hgboot: $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o obj/iop_pad_mc.o obj/overrides.o obj/gs.o obj/dmac.o
 	$(CC) -rdynamic -o $@ $^ -lm
 clean:
 	rm -rf obj hgboot

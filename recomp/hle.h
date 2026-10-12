@@ -17,6 +17,13 @@ const char *game_path(const char *name);
 int pad_rpc(uint32_t sid, uint32_t fn, const uint8_t *S, uint32_t ssize, uint32_t recv, uint32_t rsize);
 int mc_rpc(uint32_t sid, uint32_t fn, const uint8_t *S, uint32_t ssize, uint32_t recv, uint32_t rsize);
 void pad_vblank(uint64_t vblank);
-void pad_set_input(uint16_t held, const uint8_t analog[4]);   /* $HG_GAME_DIR/name, default ../game/name */
+void pad_set_input(uint16_t held, const uint8_t analog[4]);
+/* gs.c / dmac.c: GS, GIF, DMA channels 1-2, VIF1 */
+void gs_init(uint8_t *gspriv);
+void gs_vblank(uint64_t vblank);
+void gs_dump_stats(void);
+void dma_run(int ch, uint8_t *hwreg);
+void gif_fifo_write(uint32_t off, uint64_t v);
+void dma_dump_stats(void);   /* $HG_GAME_DIR/name, default ../game/name */
 void hle_run_main(uint32_t entry) __attribute__((noreturn));
 #endif

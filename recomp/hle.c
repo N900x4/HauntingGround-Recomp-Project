@@ -135,6 +135,7 @@ static void fire_vblank(void) {
     for (int c = 0; c < 16; c++) if (dma_pending[c] && c != 5) { dma_pending[c] = 0; raise_dmac(c); }
     iop_flush_idle();
     pad_vblank(vblank_count);
+    gs_vblank(vblank_count);
     raise_intc(2);   /* VBLANK start */
     if (vsync_flag_addr) { W32(vsync_flag_addr, 1); if (vsync_data_addr) W64(vsync_data_addr, (vblank_count & 1) << 13); }
     raise_intc(3);   /* VBLANK end */
@@ -443,19 +444,23 @@ void hle_hw_write(uint32_t pa, uint64_t v, int size, uint8_t *hw) {
         int ch = chan_of(pa); uint32_t base = pa & 0xFFFF;
         uint32_t madr, qwc, tadr; memcpy(&madr, hw + base + 0x10, 4); memcpy(&qwc, hw + base + 0x20, 4); memcpy(&tadr, hw + base + 0x30, 4);
         if (dma_kicks[ch]++ < 20) L("DMA kick ch%d chcr 0x%llx madr 0x%x qwc 0x%x tadr 0x%x [in 0x%x]\n", ch, (unsigned long long)v, madr, qwc & 0xffff, tadr, rec_cur);
-        uint32_t c = (uint32_t)v & ~0x100u; memcpy(hw + base, &c, 4);
+        if (ch == 1 || ch == 2) dma_run(ch, hw);   /* VIF1 / GIF: run the transfer now (clears STR) */
+        else { uint32_t c = (uint32_t)v & ~0x100u; memcpy(hw + base, &c, 4); }
         dma_pending[ch] = 1;
     }
     if (pa == 0x1000E010) { uint32_t s; memcpy(&s, hw + 0xE010, 4); }
+    if (pa >= 0x10006000 && pa < 0x10006010 && size == 8) gif_fifo_write(pa & 15, v);
 }
 static uint64_t csr_reads;
+static int gs_ready;
 uint64_t hle_gs_read(uint32_t pa, uint64_t v, int size) {
     if (pa == 0x12001000) { csr_reads++; if ((csr_reads & 63) == 0) fire_vblank(); return (v & ~0x200ull) | 0x8 | 0x2 | ((csr_reads & 1) << 13); }
     return v;
 }
-void hle_gs_write(uint32_t pa, uint64_t v, int size, uint8_t *gs) { (void)pa; (void)v; (void)size; (void)gs; }
+void hle_gs_write(uint32_t pa, uint64_t v, int size, uint8_t *gs) { (void)pa; (void)v; (void)size; if (!gs_ready++) gs_init(gs); }
 
 void hle_dump(void) {
+    gs_dump_stats(); dma_dump_stats();
     L("CD: %llu read calls, %llu sectors from DATA.CVM\n", (unsigned long long)n_cdreads, (unsigned long long)cd_sectors_read);
     L("IOP RPC: %d servers bound, %llu calls\n", nbinds, (unsigned long long)n_rpc_calls);
     for (int i = 0; i < nbinds; i++) L("  sid 0x%08x (%s): %llu calls\n", binds[i].sid, sidname(binds[i].sid), (unsigned long long)binds[i].calls);

@@ -41,7 +41,7 @@ static inline Vec *vmem(uint32_t qaddr) { return (Vec *)(vu1_mem + ((qaddr & 0x3
 
 /* MAC flags: bit 3-i = zero(field i), 7-i = sign, 11-i = underflow, 15-i = overflow (field 0 = x) */
 static uint32_t new_mac;
-static void flag_field(int i, float v) {
+static inline __attribute__((always_inline)) void flag_field(int i, float v) {
     if (v == 0.0f) new_mac |= 1u << (3 - i);
     if (signbit(v) && v != 0.0f) new_mac |= 1u << (7 - i);
     if (fabsf(v) == FLT_MAX) new_mac |= 1u << (15 - i);

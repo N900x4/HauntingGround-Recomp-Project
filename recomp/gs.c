@@ -67,14 +67,20 @@ static int check_bijective(void) {
     return 0;
 }
 
-/* bw = buffer width in 64-pixel units; return element index in the format's unit (word, halfword, byte, nibble) */
+/* bw = buffer width in 64-pixel units; return element index in the format's unit (word, halfword, byte, nibble).
+   32-bit layouts: the x contribution only depends on y mod 32, so it is tabulated (xoff32 / xoff32z, x < 2048). */
+static uint32_t xoff32[32][2048], xoff32z[32][2048];
+static void build_xoff(void) {
+    for (int y = 0; y < 32; y++) for (int x = 0; x < 2048; x++) {
+        xoff32[y][x] = (x >> 6) * 2048 + blockTable32[(y >> 3) & 3][(x >> 3) & 7] * 64 + columnTable32[y & 7][x & 7];
+        xoff32z[y][x] = (x >> 6) * 2048 + blockTable32Z[(y >> 3) & 3][(x >> 3) & 7] * 64 + columnTable32[y & 7][x & 7];
+    }
+}
 static inline uint32_t addr32(uint32_t bp, uint32_t bw, int x, int y) {
-    uint32_t page = (x >> 6) + (y >> 5) * bw;
-    return ((bp + page * 32 + blockTable32[(y >> 3) & 3][(x >> 3) & 7]) * 64 + columnTable32[y & 7][x & 7]) & 0xFFFFF;
+    return (bp * 64 + (uint32_t)(y >> 5) * bw * 2048 + xoff32[y & 31][x & 2047]) & 0xFFFFF;
 }
 static inline uint32_t addr32z(uint32_t bp, uint32_t bw, int x, int y) {
-    uint32_t page = (x >> 6) + (y >> 5) * bw;
-    return ((bp + page * 32 + blockTable32Z[(y >> 3) & 3][(x >> 3) & 7]) * 64 + columnTable32[y & 7][x & 7]) & 0xFFFFF;
+    return (bp * 64 + (uint32_t)(y >> 5) * bw * 2048 + xoff32z[y & 31][x & 2047]) & 0xFFFFF;
 }
 static inline uint32_t addr16(uint32_t bp, uint32_t bw, int x, int y, const uint8_t bt[8][4]) {
     uint32_t page = (x >> 6) + (y >> 6) * bw;
@@ -92,7 +98,7 @@ static inline uint32_t addr4(uint32_t bp, uint32_t bw, int x, int y) {
 enum { CT32 = 0x00, CT24 = 0x01, CT16 = 0x02, CT16S = 0x0a, T8 = 0x13, T4 = 0x14, T8H = 0x1b, T4HL = 0x24, T4HH = 0x2c,
        Z32 = 0x30, Z24 = 0x31, Z16 = 0x32, Z16S = 0x3a };
 
-static uint32_t read_px(uint32_t bp, uint32_t bw, int psm, int x, int y) {
+static inline uint32_t read_px(uint32_t bp, uint32_t bw, int psm, int x, int y) {
     switch (psm) {
     case CT32: case CT24: return vm[addr32(bp, bw, x, y)];
     case CT16: return VM16[addr16(bp, bw, x, y, blockTable16)];
@@ -145,7 +151,9 @@ static float st_q = 1.0f;
 static uint32_t clut[256];
 static uint32_t cbp0, cbp1;
 static uint8_t *gspriv;
-static uint64_t n_prims, n_pixels, n_xfer_qw, n_kicks_frame;
+static uint64_t n_prims, n_pixels, n_xfer_qw, n_kicks_frame, n_visits;
+static void *gs_sprhist_ptr; static int gs_sprhist_n;
+static uint64_t st_prims[3], st_px[3], st_visits[3], st_tex[3], st_blend[3], st_z[3]; static double st_time[3];
 
 #define BITS(v, lo, n) ((uint32_t)(((v) >> (lo)) & ((1ull << (n)) - 1)))
 
@@ -196,7 +204,7 @@ static inline int wrap(int v, int size, int mode, int mn, int mx) {
     default: return (v & mn) | mx;
     }
 }
-static uint32_t texel(const TexState *t, int u, int v) {
+static inline uint32_t texel(const TexState *t, int u, int v) {
     u = wrap(u, t->tw, t->wms, t->minu, t->maxu); v = wrap(v, t->th, t->wmt, t->minv, t->maxv);
     switch (t->psm) {
     case CT32: return read_px(t->tbp, t->tbw, CT32, u, v);
@@ -208,16 +216,16 @@ static uint32_t texel(const TexState *t, int u, int v) {
     return read_px(t->tbp, t->tbw, CT32, u, v);
 }
 /* u, v in 1/16 texel units */
-static uint32_t sample(const TexState *t, int u16, int v16) {
+static inline uint32_t sample(const TexState *t, int u16, int v16) {
     if (!t->bilinear) return texel(t, u16 >> 4, v16 >> 4);
     int u = u16 - 8, v = v16 - 8, fu = u & 15, fv = v & 15; u >>= 4; v >>= 4;
-    uint32_t c00 = texel(t, u, v), c10 = texel(t, u + 1, v), c01 = texel(t, u, v + 1), c11 = texel(t, u + 1, v + 1), out = 0;
-    for (int s = 0; s < 32; s += 8) {
-        int a = (c00 >> s) & 255, b = (c10 >> s) & 255, c = (c01 >> s) & 255, d = (c11 >> s) & 255;
-        int top = a * (16 - fu) + b * fu, bot = c * (16 - fu) + d * fu;
-        out |= (uint32_t)(((top * (16 - fv) + bot * fv) >> 8) & 255) << s;
-    }
-    return out;
+    if (!fu && !fv) return texel(t, u, v);                     /* exact texel: other weights are zero */
+    uint32_t c00 = texel(t, u, v), c10 = fu ? texel(t, u + 1, v) : 0, c01 = fv ? texel(t, u, v + 1) : 0, c11 = (fu && fv) ? texel(t, u + 1, v + 1) : 0;
+    /* packed: two 8-bit channels per lane; same integer result as the per-channel form (sum of weights = 256) */
+    uint32_t w00 = (16 - fu) * (16 - fv), w10 = fu * (16 - fv), w01 = (16 - fu) * fv, w11 = fu * fv;
+    uint32_t rb = ((c00 & 0xFF00FF) * w00 + (c10 & 0xFF00FF) * w10 + (c01 & 0xFF00FF) * w01 + (c11 & 0xFF00FF) * w11) >> 8;
+    uint32_t ag = (((c00 >> 8) & 0xFF00FF) * w00 + ((c10 >> 8) & 0xFF00FF) * w10 + ((c01 >> 8) & 0xFF00FF) * w01 + ((c11 >> 8) & 0xFF00FF) * w11) >> 8;
+    return (rb & 0xFF00FF) | ((ag & 0xFF00FF) << 8);
 }
 
 /* ================================================================== pixel pipeline */
@@ -227,6 +235,7 @@ typedef struct {
     int scx0, scx1, scy0, scy1;
     int ate, atst, aref, afail, date, datm, zte, ztst;
     int a, b, cc, d, fix, pabe, fba, colclamp;
+    int need_dst, zread, fb16;     /* derived: destination needed, Z must be read, 16-bit frame buffer */
 } Draw;
 static void draw_setup(Draw *d) {
     int ctxt = BITS(r_prmodecont ? r_prim : r_prmode, 9, 1);
@@ -241,9 +250,13 @@ static void draw_setup(Draw *d) {
     d->date = BITS(c->test, 14, 1); d->datm = BITS(c->test, 15, 1); d->zte = BITS(c->test, 16, 1); d->ztst = BITS(c->test, 17, 2);
     d->a = BITS(c->alpha, 0, 2); d->b = BITS(c->alpha, 2, 2); d->cc = BITS(c->alpha, 4, 2); d->d = BITS(c->alpha, 6, 2); d->fix = BITS(c->alpha, 32, 8);
     d->pabe = r_pabe & 1; d->fba = c->fba & 1; d->colclamp = r_colclamp & 1;
+    d->fb16 = d->fpsm == CT16 || d->fpsm == CT16S;
+    d->need_dst = d->abe || d->date || d->fbmsk || (d->ate && d->afail == 3) || d->fpsm == CT24 || d->fb16;
+    d->zread = d->zte && d->ztst >= 2;
 }
 static inline int clamp255(int v, int cc) { return cc ? (v < 0 ? 0 : v > 255 ? 255 : v) : (v & 255); }
-static void pixel(const Draw *d, int x, int y, uint32_t z, uint32_t col /* rgba8, a 0x80 = 1.0 */) {
+static inline __attribute__((always_inline)) void pixel(const Draw *d, int x, int y, uint32_t z, uint32_t col /* rgba8, a 0x80 = 1.0 */) {
+    n_visits++;
     if (x < d->scx0 || x > d->scx1 || y < d->scy0 || y > d->scy1) return;
     int as = col >> 24;
     int fb_ok = 1, z_ok = 1, rgb_only = 0;
@@ -253,13 +266,20 @@ static void pixel(const Draw *d, int x, int y, uint32_t z, uint32_t col /* rgba8
             case 4: pass = as == d->aref; break; case 5: pass = as >= d->aref; break; case 6: pass = as > d->aref; break; default: pass = as != d->aref; }
         if (!pass) switch (d->afail) { case 0: return; case 1: z_ok = 0; break; case 2: fb_ok = 0; break; default: z_ok = 0; rgb_only = 1; }
     }
-    uint32_t dst = read_px(d->fbp, d->fbw, d->fpsm, x, y);
-    uint32_t dst32 = (d->fpsm == CT16 || d->fpsm == CT16S) ? c16to32(dst, 0, 0, 0x80) : dst;
-    if (d->date) { int bit = (d->fpsm == CT16 || d->fpsm == CT16S) ? (dst >> 15) & 1 : (dst >> 31) & 1; if (bit != d->datm) return; }
+    uint32_t fa = 0, dst = 0, dst32 = 0;
+    if (!d->fb16) fa = addr32(d->fbp, d->fbw, x, y);
+    if (d->need_dst) {
+        dst = d->fb16 ? read_px(d->fbp, d->fbw, d->fpsm, x, y) : vm[fa];
+        dst32 = d->fb16 ? c16to32(dst, 0, 0, 0x80) : dst;
+    }
+    if (d->date) { int bit = d->fb16 ? (dst >> 15) & 1 : (dst >> 31) & 1; if (bit != d->datm) return; }
     if (d->zte) {
-        uint32_t zd = read_px(d->zbp, d->fbw, d->zpsm, x, y);
-        if (d->zpsm == Z24) zd &= 0xFFFFFF;
-        switch (d->ztst) { case 0: return; case 1: break; case 2: if (z < zd) return; break; default: if (z <= zd) return; }
+        if (d->ztst == 0) return;
+        if (d->zread) {
+            uint32_t zd = read_px(d->zbp, d->fbw, d->zpsm, x, y);
+            if (d->zpsm == Z24) zd &= 0xFFFFFF;
+            if (d->ztst == 2 ? z < zd : z <= zd) return;
+        }
     } else z_ok = 0;
     if (fb_ok) {
         uint32_t out = col;
@@ -275,13 +295,14 @@ static void pixel(const Draw *d, int x, int y, uint32_t z, uint32_t col /* rgba8
         }
         if (d->fba) out |= 0x80000000u;
         if (rgb_only) out = (out & 0xFFFFFF) | (dst32 & 0xFF000000u);
-        if (d->fpsm == CT16 || d->fpsm == CT16S) { uint32_t o = c32to16(out); o = (o & ~d->fbmsk) | (dst & d->fbmsk & 0xFFFF); write_px(d->fbp, d->fbw, d->fpsm, x, y, o); }
-        else { out = (out & ~d->fbmsk) | (dst & d->fbmsk); write_px(d->fbp, d->fbw, d->fpsm == CT24 ? CT24 : CT32, x, y, out); }
+        if (d->fb16) { uint32_t o = c32to16(out); o = (o & ~d->fbmsk) | (dst & d->fbmsk & 0xFFFF); write_px(d->fbp, d->fbw, d->fpsm, x, y, o); }
+        else if (d->fpsm == CT24) vm[fa] = (dst & 0xFF000000u) | (((out & ~d->fbmsk) | (dst & d->fbmsk)) & 0xFFFFFF);
+        else vm[fa] = (out & ~d->fbmsk) | (dst & d->fbmsk);
         n_pixels++;
     }
     if (z_ok && !d->zmsk) write_px(d->zbp, d->fbw, d->zpsm, x, y, z);
 }
-static uint32_t shade(const Draw *d, uint32_t vcol, int u16, int v16, int fog) {
+static inline __attribute__((always_inline)) uint32_t shade(const Draw *d, uint32_t vcol, int u16, int v16, int fog) {
     uint32_t c = vcol;
     if (d->tme) {
         uint32_t t = sample(&d->tex, u16, v16);
@@ -394,11 +415,25 @@ static void vertex_kick(Vtx v, int draw) {
         Vtx w[3]; for (int i = 0; i < nvq; i++) { w[i] = vq[i]; w[i].x -= ox; w[i].y -= oy; }
         n_prims++; n_kicks_frame++;
         double t0 = host_now();
+        uint64_t px0 = n_pixels, vis0 = n_visits;
         switch (prim) {
         case 0: pixel(&d, w[0].x >> 4, w[0].y >> 4, w[0].z, shade(&d, w[0].rgba, w[0].u, w[0].v, w[0].f)); break;
         case 1: case 2: draw_line(&d, &w[0], &w[1]); break;
         case 3: case 4: case 5: draw_triangle(&d, &w[0], &w[1], &w[2]); break;
         case 6: draw_sprite(&d, &w[0], &w[1]); break;
+        }
+        int k = prim == 6 ? 0 : (prim >= 3 && prim <= 5) ? 1 : 2;
+        st_prims[k]++; st_px[k] += n_pixels - px0; st_visits[k] += n_visits - vis0; st_time[k] += host_now() - t0;
+        if (d.tme) st_tex[k]++; if (d.abe) st_blend[k]++; if (d.zte) st_z[k]++;
+        if (k == 0 && getenv("HG_SPRSTAT")) {   /* configuration histogram weighted by pixels */
+            char key[160]; snprintf(key, sizeof key, "fb%02x tex%d:%02x bil%d tfx%d tcc%d abe%d(%d%d%d%d fix%d) ate%d:%d zte%d:%d zmsk%d fbmsk%08x",
+                d.fpsm, d.tme, d.tme ? d.tex.psm : 0, d.tme ? d.tex.bilinear : 0, d.tme ? d.tex.tfx : 0, d.tme ? d.tex.tcc : 0, d.abe, d.a, d.b, d.cc, d.d, d.fix, d.ate, d.atst, d.zte, d.ztst, d.zmsk, d.fbmsk);
+            static struct { char k[160]; uint64_t px, n; } h[256]; static int nh;
+            int j = 0; for (; j < nh; j++) if (!strcmp(h[j].k, key)) break;
+            if (j == nh && nh < 256) { strcpy(h[nh].k, key); nh++; }
+            if (j < 256) { h[j].px += n_visits - vis0; h[j].n++; }
+            static uint64_t calls; if (++calls % 100000 == 0 || getenv("HG_SPRSTAT")[0] == 'x') {}
+            gs_sprhist_ptr = (void *)h; gs_sprhist_n = nh;
         }
         tprof[1] += host_now() - t0;
     }
@@ -595,10 +630,16 @@ void gs_vblank(uint64_t vb) {
     n_kicks_frame = 0;
 }
 void gs_init(uint8_t *priv) {
-    gspriv = priv; build_t4_table();
+    gspriv = priv; build_t4_table(); build_xoff();
     int bad = check_bijective(); if (bad) L("GS: WARNING: T%d column table is not a bijection\n", bad);
 }
 void gs_dump_stats(void) {
+    if (gs_sprhist_ptr) { struct { char k[160]; uint64_t px, n; } *h = gs_sprhist_ptr;
+        for (int r = 0; r < 12; r++) { int b = -1; for (int j = 0; j < gs_sprhist_n; j++) if (h[j].px && (b < 0 || h[j].px > h[b].px)) b = j;
+            if (b < 0) break; L("  sprite cfg %s: %llu px in %llu sprites\n", h[b].k, (unsigned long long)h[b].px, (unsigned long long)h[b].n); h[b].px = 0; } }
+    static const char *nm[3] = { "sprites", "triangles", "points/lines" };
+    for (int k = 0; k < 3; k++) if (st_prims[k]) L("GS %s: %llu prims (%llu textured, %llu blended, %llu z-tested), %llu shaded pixels, %llu written, %.1fs\n", nm[k],
+        (unsigned long long)st_prims[k], (unsigned long long)st_tex[k], (unsigned long long)st_blend[k], (unsigned long long)st_z[k], (unsigned long long)st_visits[k], (unsigned long long)st_px[k], st_time[k]);
     L("GS: %llu prims, %llu pixels, %llu GIF tags, %llu image qwords, %llu frames written\n", (unsigned long long)n_prims, (unsigned long long)n_pixels,
       (unsigned long long)n_gif_tags, (unsigned long long)n_xfer_qw, (unsigned long long)frames_written);
 }

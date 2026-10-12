@@ -207,6 +207,7 @@ int main(int argc, char **argv) {
     sa.sa_handler = on_alarm; sigaction(SIGALRM, &sa, 0);
     struct itimerval ia = {{0, 16667}, {0, 16667}}; setitimer(ITIMER_REAL, &ia, 0);
     hle_init();
+    extern void overrides_init(void); overrides_init();
     if (getenv("HG_PRESS")) { char *p = getenv("HG_PRESS"); while (*p && npress < 16) { press_at[npress++] = strtol(p, &p, 10); while (*p == ',') p++; }
         const char *fl = getenv("HG_PRESSFN") ? getenv("HG_PRESSFN") : "380410,37fef0,380050,37fe50,37fc60,37fac0,37f980,37f7d0";
         char *q = (char *)fl; while (*q) { uint32_t a = strtoul(q, &q, 16); if (func_index(a) >= 0) set_hook(a, press_hook); while (*q == ',') q++; } }

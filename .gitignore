@@ -1,0 +1,51 @@
+# --- Game data: NEVER commit anything derived from the disc ---
+game/*
+!game/README.md
+*.iso
+*.ISO
+*.cvm
+*.CVM
+*.zip
+*.7z
+*.chd
+SLUS_*
+SLES_*
+SLPM_*
+*.IRX
+*.irx
+*.IMG
+
+# Decoded / extracted assets
+*.wav
+*.WAV
+*.png
+*.tex
+*.TEX
+*.glb
+*.sfd
+*.SFD
+*.adx
+*.ADX
+*.HD
+*.BD
+*.SDT
+
+# Generated code and build outputs (derived from the game executable)
+recomp/gen/
+recomp/obj/
+recomp/hgboot
+*.o
+*.a
+*.so
+*.exe
+*.dll
+
+# Logs and local runs
+*.log
+funcs_entered*.txt
+
+# Python / editor
+__pycache__/
+*.pyc
+.vscode/
+.idea/

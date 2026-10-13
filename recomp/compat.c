@@ -63,6 +63,65 @@ void host_fiber_switch(HostFiber *from, HostFiber *to) {
 static HANDLE main_thread;
 static void build_ord(void);
 static void (*cb_prof)(void), (*cb_alarm)(void);
+
+/* HG_HOSTPROF=1: every 1 ms the timer thread samples the host instruction pointer of the main thread and of threads
+   that called host_prof_thread() (the GS thread). A sample inside a DLL is charged to the first frame back in
+   hgboot.exe, marked with the high bit. host_prof_dump() writes "thread rva count" lines to hostprof.txt;
+   tools/verify/hostprof.py names them from the exe's symbol table. */
+#define HP_SLOTS (1 << 16)
+#define HP_THREADS 4
+typedef struct { HANDLE h; char name[16]; uint32_t key[HP_SLOTS], cnt[HP_SLOTS]; uint64_t total, lost; } HpThread;
+static HpThread *hp; static volatile LONG hp_n; static volatile int hp_on; static uint64_t exe_lo, exe_hi;
+static void hp_add(HpThread *t, uint32_t key) {
+    uint32_t i = (key * 2654435761u) >> 16;
+    for (int p = 0; p < 64; p++, i = (i + 1) & (HP_SLOTS - 1)) {
+        if (t->key[i] == key && t->cnt[i]) { t->cnt[i]++; return; }
+        if (!t->cnt[i]) { t->key[i] = key; t->cnt[i] = 1; return; }
+    }
+    t->lost++;
+}
+static void hp_register(HANDLE h, const char *name) {
+    if (!hp) return;
+    LONG k = InterlockedIncrement(&hp_n) - 1; if (k >= HP_THREADS) return;
+    snprintf(hp[k].name, sizeof hp[k].name, "%s", name); hp[k].h = h;
+}
+void host_prof_thread(const char *name) {
+    HANDLE h; DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    hp_register(h, name);
+}
+static void hp_sample(void) {
+    int n = hp_n < HP_THREADS ? hp_n : HP_THREADS;
+    for (int k = 0; k < n; k++) {
+        HpThread *t = &hp[k]; if (!t->h) continue;
+        if (SuspendThread(t->h) == (DWORD)-1) continue;
+        CONTEXT c; memset(&c, 0, sizeof c); c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        if (GetThreadContext(t->h, &c)) {
+            uint32_t dll = 0;
+            for (int d = 0; d < 32 && !(c.Rip >= exe_lo && c.Rip < exe_hi); d++) {   /* in a DLL: walk back into the exe */
+                dll = 0x80000000u;
+                DWORD64 img; PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(c.Rip, &img, 0);
+                if (!rf) { c.Rip = *(DWORD64 *)c.Rsp; c.Rsp += 8; continue; }
+                void *hd; DWORD64 est; RtlVirtualUnwind(UNW_FLAG_NHANDLER, img, c.Rip, rf, &c, &hd, &est, 0);
+                if (!c.Rip) break;
+            }
+            if (c.Rip >= exe_lo && c.Rip < exe_hi) hp_add(t, (uint32_t)(c.Rip - exe_lo) | dll); else t->lost++;
+            t->total++;
+        }
+        ResumeThread(t->h);
+    }
+}
+void host_prof_dump(void) {
+    if (!hp) return;
+    hp_on = 0; Sleep(5);   /* let a sample in progress finish */
+    FILE *f = fopen("hostprof.txt", "w"); if (!f) return;
+    int n = hp_n < HP_THREADS ? hp_n : HP_THREADS;
+    for (int k = 0; k < n; k++) {
+        fprintf(f, "# %s samples %llu lost %llu\n", hp[k].name, (unsigned long long)hp[k].total, (unsigned long long)hp[k].lost);
+        for (int i = 0; i < HP_SLOTS; i++) if (hp[k].cnt[i]) fprintf(f, "%s %08x %u\n", hp[k].name, hp[k].key[i], hp[k].cnt[i]);
+    }
+    fclose(f); L("host profile: %d threads sampled, written to hostprof.txt\n", n);
+}
+
 static DWORD WINAPI timer_main(LPVOID arg) {
     (void)arg;
     HANDLE t = CreateWaitableTimerExW(0, 0, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
@@ -73,6 +132,7 @@ static DWORD WINAPI timer_main(LPVOID arg) {
     for (;;) {
         WaitForSingleObject(t, INFINITE);
         cb_prof();
+        if (hp_on) hp_sample();
         double n = host_now();
         if (n >= next_alarm) { next_alarm += 1.0 / 60; if (next_alarm < n) next_alarm = n + 1.0 / 60; cb_alarm(); }
     }
@@ -82,6 +142,12 @@ void host_start_timers(void (*prof)(void), void (*alarm)(void)) {
     cb_prof = prof; cb_alarm = alarm;
     build_ord();   /* now: the backtrace may run while the main thread is suspended (holding the heap lock, say) */
     DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &main_thread, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    if (getenv("HG_HOSTPROF") && atoi(getenv("HG_HOSTPROF"))) {
+        hp = calloc(HP_THREADS, sizeof *hp);
+        uint8_t *b = (uint8_t *)GetModuleHandleW(0); IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(b + ((IMAGE_DOS_HEADER *)b)->e_lfanew);
+        exe_lo = (uintptr_t)b; exe_hi = exe_lo + nt->OptionalHeader.SizeOfImage;
+        hp_register(main_thread, "main"); hp_on = 1;
+    }
     HANDLE h = CreateThread(0, 64 << 10, timer_main, 0, 0, 0);
     if (h) { SetThreadPriority(h, THREAD_PRIORITY_TIME_CRITICAL); CloseHandle(h); }
 }
@@ -158,5 +224,7 @@ void host_start_timers(void (*prof)(void), void (*alarm)(void)) {
     sa.sa_handler = on_alarm; sigaction(SIGALRM, &sa, 0);
     struct itimerval ia = {{0, 16667}, {0, 16667}}; setitimer(ITIMER_REAL, &ia, 0);
 }
+void host_prof_thread(const char *name) { (void)name; }
+void host_prof_dump(void) {}
 void host_backtrace(FILE *f) { void *bt[64]; int n = backtrace(bt, 64); fflush(f); backtrace_symbols_fd(bt, n, fileno(f)); }
 #endif

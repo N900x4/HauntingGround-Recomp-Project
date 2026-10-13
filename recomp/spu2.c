@@ -311,7 +311,7 @@ int spu2_dma(int core, uint8_t *mem, uint32_t halfwords, int to_spu) {
         Adma *s = &adma[core];
         for (uint32_t k = 0; k < halfwords; k++) { int16_t v; memcpy(&v, mem + 2 * k, 2); s->buf[(s->wr + k) & (ADMA_CAP - 1)] = v; }
         s->wr += halfwords; n_dma_hw[core] += halfwords; s->pending = 1;
-        if (getenv("HG_ADMAWAV") && core == 0) {   /* raw stream PCM (L block, R block per 1 KB) -> interleaved stereo WAV */
+        if (GETENV_ONCE("HG_ADMAWAV") && core == 0) {   /* raw stream PCM (L block, R block per 1 KB) -> interleaved stereo WAV */
             static FILE *af; if (!af) { af = fopen(getenv("HG_ADMAWAV"), "wb"); }
             if (af) for (uint32_t b = 0; b + 512 <= halfwords; b += 512) for (int i = 0; i < 256; i++) {
                 int16_t lr[2]; memcpy(&lr[0], mem + 2 * (b + i), 2); memcpy(&lr[1], mem + 2 * (b + 256 + i), 2); fwrite(lr, 2, 2, af); }

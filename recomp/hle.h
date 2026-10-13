@@ -2,6 +2,9 @@
 #define HLE_H
 #include <stdint.h>
 void L(const char *fmt, ...);
+/* getenv() once per call site, for switches tested on hot paths: the Windows CRT's getenv takes a lock and scans
+   the whole environment (it was 25-35% of the GS and VU1 time there) */
+#define GETENV_ONCE(name) ({ static const char *v_; static int k_; if (!k_) { v_ = getenv(name); k_ = 1; } v_; })
 void stop(const char *fmt, ...) __attribute__((noreturn));
 uint8_t *gptr(uint32_t a);
 int func_index(uint32_t a);

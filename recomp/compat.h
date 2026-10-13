@@ -28,6 +28,9 @@ void host_fiber_switch(HostFiber *from, HostFiber *to);                    /* fr
 void host_start_timers(void (*prof)(void), void (*alarm)(void));
 /* write the calling thread's host call stack to f, with the translated guest function of each frame */
 void host_backtrace(FILE *f);
+/* HG_HOSTPROF=1 host-PC sampler (Windows; use perf on Linux): register the calling thread, write hostprof.txt */
+void host_prof_thread(const char *name);
+void host_prof_dump(void);
 #ifdef _WIN32
 void host_backtrace_main(FILE *f);   /* from another thread: suspends the main thread (for good) and walks its stack */
 #endif

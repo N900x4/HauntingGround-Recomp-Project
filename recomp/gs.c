@@ -1044,11 +1044,11 @@ static void vertex_kick(Vtx v, int draw) {
         case 0: pixel(&d, w[0].x >> 4, w[0].y >> 4, w[0].z, shade(&d, w[0].rgba, w[0].u, w[0].v, w[0].f)); break;
         case 1: case 2: draw_line(&d, &w[0], &w[1]); break;
         case 3: case 4: case 5:
-            if (getenv("HG_BIGTRI")) {   /* debugging: report triangles far larger than the screen */
+            if (GETENV_ONCE("HG_BIGTRI")) {   /* debugging: report triangles far larger than the screen */
                 int xs[3] = { w[0].x >> 4, w[1].x >> 4, w[2].x >> 4 }, ys[3] = { w[0].y >> 4, w[1].y >> 4, w[2].y >> 4 };
                 int mnx = xs[0], mxx = xs[0], mny = ys[0], mxy = ys[0];
                 for (int i = 1; i < 3; i++) { if (xs[i] < mnx) mnx = xs[i]; if (xs[i] > mxx) mxx = xs[i]; if (ys[i] < mny) mny = ys[i]; if (ys[i] > mxy) mxy = ys[i]; }
-                if ((mxx - mnx > 1500 || mxy - mny > 1500) && getenv("HG_BIGTRI")[0] == 's') break;   /* =s: skip them */
+                if ((mxx - mnx > 1500 || mxy - mny > 1500) && GETENV_ONCE("HG_BIGTRI")[0] == 's') break;   /* =s: skip them */
                 static int nb; if ((mxx - mnx > 1500 || mxy - mny > 1500) && nb++ < 30)
                     L("BIGTRI prim %d tme %d: (%d,%d z%u q%g) (%d,%d z%u q%g) (%d,%d z%u q%g) scissor %d-%d,%d-%d\n", prim, d.tme, xs[0], ys[0], w[0].z, w[0].q, xs[1], ys[1], w[1].z, w[1].q, xs[2], ys[2], w[2].z, w[2].q, d.scx0, d.scx1, d.scy0, d.scy1);
             }
@@ -1334,7 +1334,7 @@ static uint32_t front[1024 * 1024]; static int front_w, front_h, front_ok; stati
 static int want_front;
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv);
 static void *gs_main(void *arg) {
-    (void)arg;
+    (void)arg; host_prof_thread("gs");
     for (;;) {
         uint64_t t = atomic_load_explicit(&r_tail, memory_order_relaxed), h = atomic_load_explicit(&r_head, memory_order_acquire);
         if (t == h) {

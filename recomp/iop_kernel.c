@@ -291,14 +291,14 @@ static void f_sceSifCallRpc(void) {
     WR32(cd + 0x1c, endf); WR32(cd + 0x20, endp);
     uint32_t pl[10] = { 0, cd, 0, cd, fno, ssize, recv, rsize, 1, RD32(cd + 0x24) };
     hle_iop_send_cmd(0x8000000A, pl, 10); n_ee_rpc++;
-    if (n_ee_rpc < 50 || getenv("HG_RPCLOG")) L("IOP: sceSifCallRpc to EE: cd 0x%x fn 0x%x mode %u send %u -> recv 0x%x/%u server 0x%x (thread %d, ra 0x%x)\n", cd, fno, mode, ssize, recv, rsize, RD32(cd + 0x24), cur, R[31]);
+    if (n_ee_rpc < 50 || GETENV_ONCE("HG_RPCLOG")) L("IOP: sceSifCallRpc to EE: cd 0x%x fn 0x%x mode %u send %u -> recv 0x%x/%u server 0x%x (thread %d, ra 0x%x)\n", cd, fno, mode, ssize, recv, rsize, RD32(cd + 0x24), cur, R[31]);
     R[2] = 0;
     if (!(mode & 1)) block(W_SIFC, (int)cd);
 }
 /* RPC END from the EE (words = whole packet): bind result or call completion */
 void iop_ee_rpc_end(const uint32_t *w) {
     uint32_t cd = w[7], cid = w[8];
-    static int ne; if (ne++ < 50 || getenv("HG_RPCLOG")) L("IOP: RPC END from EE: cd 0x%x cid 0x%x\n", cd, cid);
+    static int ne; if (ne++ < 50 || GETENV_ONCE("HG_RPCLOG")) L("IOP: RPC END from EE: cd 0x%x cid 0x%x\n", cd, cid);
     if (cid == 0x80000009) { WR32(cd + 0x24, w[9]); WR32(cd + 0x14, w[10]); WR32(cd + 0x18, w[11]);
         L("IOP: bind from IOP client 0x%x -> EE server 0x%x\n", cd, w[9]); }
     else if (cid == 0x8000000A) { uint32_t f = RD32(cd + 0x1c); if (f) iop_call(f, RD32(cd + 0x20), 0, 0); }
@@ -324,7 +324,7 @@ static void rpc_return(void) {             /* server function returned: v0 = rep
     if (r->recv && r->rsize && data) { uint8_t *p = iop_ptr(data); if (p) memcpy(gptr(r->recv), p, r->rsize); }
     hle_iop_rpc_end(r->endpkt);
     n_iop_rpc++;
-    if (getenv("HG_RPCLOG")) L("IOP: RPC done sid 0x%08x fn 0x%x (thread %d) reply 0x%x -> %08x\n", srv[r->srv].sid, r->fno, cur, data, data ? RD32(data) : 0);
+    if (GETENV_ONCE("HG_RPCLOG")) L("IOP: RPC done sid 0x%08x fn 0x%x (thread %d) reply 0x%x -> %08x\n", srv[r->srv].sid, r->fno, cur, data, data ? RD32(data) : 0);
     serve_next(cur);
 }
 /* ---- sifman */
@@ -333,9 +333,9 @@ static void f_sceSifInit(void) { R[2] = 0; }
 static void f_sceSifSetDma(void) {
     uint32_t d = R[4]; int n = R[5];
     for (int i = 0; i < n; i++) { uint32_t src = RD32(d + 16 * i), dst = RD32(d + 16 * i + 4), size = RD32(d + 16 * i + 8), attr = RD32(d + 16 * i + 12);
-        static int nlog, nb; if (getenv("HG_BLKLOG") && size == 2176 && RD32(src) && vblanks > (uint64_t)atoi(getenv("HG_BLKLOG")) && nb++ < 800) {
+        static int nlog, nb; if (GETENV_ONCE("HG_BLKLOG") && size == 2176 && RD32(src) && vblanks > (uint64_t)atoi(GETENV_ONCE("HG_BLKLOG")) && nb++ < 800) {
             L("IOP->EE blk src 0x%x vb %llu count %u:", src, (unsigned long long)vblanks, RD32(src)); for (int k = 4; k < 16; k++) L(" %08x", RD32(src + 4 * k)); L("\n"); }
-        if (getenv("HG_SIFLOG") && nlog++ < 300) L("IOP SIF DMA -> EE: src 0x%x dst 0x%x size %u attr 0x%x (thread %d, ra 0x%x) first %08x %08x %08x %08x\n", src, dst, size, attr, cur, R[31], RD32(src), RD32(src + 4), RD32(src + 8), RD32(src + 12));
+        if (GETENV_ONCE("HG_SIFLOG") && nlog++ < 300) L("IOP SIF DMA -> EE: src 0x%x dst 0x%x size %u attr 0x%x (thread %d, ra 0x%x) first %08x %08x %08x %08x\n", src, dst, size, attr, cur, R[31], RD32(src), RD32(src + 4), RD32(src + 8), RD32(src + 12));
         uint8_t *p = iop_ptr(src); if (p && size < 0x100000) memcpy(gptr(dst & 0x1FFFFFFF), p, size); }
     R[2] = sifdma_id++;
 }
@@ -615,9 +615,9 @@ int iop_rpc_find(uint32_t sid, uint32_t *sd, uint32_t *buf, uint32_t *cbuf) {
 int iop_rpc_call(uint32_t sd, uint32_t fno, uint32_t size, uint32_t recv, uint32_t rsize, const uint32_t endpkt[8]) {
     int s = -1; for (int i = 0; i < nsrv; i++) if (srv[i].sd == sd) s = i;
     if (s < 0 || nrq >= 64) return 0;
-    if (getenv("HG_RPCLOG")) L("IOP: RPC queued sid 0x%08x fn 0x%x size %u rsize %u  [%08x %08x %08x %08x] vb %llu\n", srv[s].sid, fno, size, rsize,
+    if (GETENV_ONCE("HG_RPCLOG")) L("IOP: RPC queued sid 0x%08x fn 0x%x size %u rsize %u  [%08x %08x %08x %08x] vb %llu\n", srv[s].sid, fno, size, rsize,
         RD32(srv[s].buf), RD32(srv[s].buf + 4), RD32(srv[s].buf + 8), RD32(srv[s].buf + 12), (unsigned long long)vblanks);
-    if (getenv("HG_RPCLOG")) { L("    words 4-11:"); for (int k = 4; k < 12; k++) L(" %08x", RD32(srv[s].buf + 4 * k)); L("\n"); }
+    if (GETENV_ONCE("HG_RPCLOG")) { L("    words 4-11:"); for (int k = 4; k < 12; k++) L(" %08x", RD32(srv[s].buf + 4 * k)); L("\n"); }
     Req *r = &rq[nrq++]; r->srv = s; r->fno = fno; r->size = size; r->recv = recv; r->rsize = rsize; memcpy(r->endpkt, endpkt, 32);
     for (int i = 1; i < MAXTH; i++) if (th[i].status == TS_WAIT && th[i].wait == W_RPC && th[i].rpc_qd == srv[s].qd) { serve_next(i); break; }
     iop_run_until(now, 2000000);

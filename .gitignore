@@ -51,3 +51,4 @@ __pycache__/
 .vscode/
 .idea/
 memcards/
+hostprof.txt

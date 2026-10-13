@@ -6,7 +6,8 @@ Read this first when resuming. It gives the state, the rules and the next steps.
 
 The recompiled game boots, plays the logos and movies, and reaches the title, the menu, New Game, the opening movie
 and stage 1. Stage 1 has 3D graphics and sound. Rooms beyond the first load and run without crashes (20,000
-VBlanks tested). It runs at about 0.5x real time on this VM (2 vCPUs, no GPU).
+VBlanks tested). It now runs on the user's Windows PC (MSYS2 build), at 0.51x real time in stage 1 and 0.68x in the
+Castle Suite. The GS thread is the limit.
 
 | Area | Status | Doc |
 |---|---|---|
@@ -18,6 +19,32 @@ VBlanks tested). It runs at about 0.5x real time on this VM (2 vCPUs, no GPU).
 | Reverb | Unverified: the game sets the depth to 0 at stage init, and no reached room changes it | `exploration-notes.md` |
 
 Last commit before this doc: `bf60152`.
+
+### Session 2026-10-13, later (move to Windows)
+
+- **Windows port** (commit `da1c36f`): MSYS2 UCRT64 build, `recomp/compat.c` replaces the Linux-only calls (see the
+  README). Checked: two `runhash.sh` runs to VB 4000 give identical hashes (702 frames), and `HG_VU1CHECK` 2,000,000
+  runs with 0 mismatches. These Windows hashes are in `D:\ps2-work\scratch\hashA.md5`. They are the reference for
+  later speed-ups. They have not been compared with Linux output, because the VM's hashes were lost.
+- **Speed, measured** (headless, `HG_SPEEDLOG=300`, steady state, 9800X3D):
+
+  | Scene | Speed | ms per VBlank | Main thread | GS thread |
+  |---|---|---|---|---|
+  | Stage 1 (New Game, VB 4200–6000) | 0.51x real time | 33.0 | VU1 16.1 ms; waits for the GS about half the time | 94% busy |
+  | Castle Suite (LOAD GAME, VB 4200–6000) | 0.68x real time | 24.6 | VU1 12.0 ms; waits for the GS about half the time | 93% busy |
+
+  Before the getenv fix below, the speeds were 0.34x and 0.33x. The UCRT's `getenv` takes a lock and scans the whole
+  environment. Uncached `getenv()` calls on hot paths (VU1 CLIP, every triangle, and the SIF/RPC logs) cost 25–35% of
+  the GS and VU1 time. They are now cached per call site (`GETENV_ONCE` in `hle.h`). Frames and VU1 lockstep were
+  unchanged.
+- **Profiler**: `HG_HOSTPROF=1` (Windows) samples the main and GS thread PCs every 1 ms into `hostprof.txt`;
+  `python tools/verify/hostprof.py hostprof.txt hgboot.exe [top] [--lines N]` names them.
+- **Where the time goes**: the GS thread is the limit in both scenes. About half of it is sprites, mostly the
+  full-screen effect passes (`sprite_row_avx2`, `draw_sprite`, `sprite_spans`). The other half is triangles
+  (`v_texel`, `draw_triangle_avx2`, `v_pixel`, `v_sample`). The main thread waits for it (`prod_wait`) more than half
+  the time. The 9800X3D has 16 hardware threads and two are in use, so the obvious next step is to split GS
+  rasterizing across threads (for example by screen bands, each band in primitive order, so the output stays
+  bit-identical).
 
 ### Session 2026-10-13 (PCSX2 reference comparison)
 
@@ -76,9 +103,14 @@ Since 2026-10-13 the project lives on the user's Windows 11 PC (Ryzen 7 9800X3D,
 
 ## Waiting on the user
 
-- **3D acceleration** in the VM (VMware Display → "Accelerate 3D graphics"). Without it PCSX2 has only llvmpipe.
-- Suggested: 4 or more vCPUs (now 2). RAM is 8 GB; 12 GB is optional (the VM swaps heavily).
-- After that, the user expects me to self-test against PCSX2.
+- A decision on whether to parallelize the GS rasterizer next (see the Windows session above) or to do something else
+  first.
+- PCSX2 on Windows is not set up for the comparison tools yet. It needs:
+  - the VM's save states copied into `Documents\PCSX2\sstates`;
+  - PINE turned on (it uses TCP on Windows);
+  - Windows ports of `pine.py` and of the window capture in `pcsx2_teleport_cmp.py`.
+
+  The user still wants me to self-test against PCSX2, for graphics only.
 
 ## Next steps, in order
 

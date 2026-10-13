@@ -260,7 +260,7 @@ static inline void upper(const Dec *d, UpRes *r) {
         float w = fabsf(rdf(T.u[3])); uint32_t c = 0;
         float x = rdf(S.u[0]), y = rdf(S.u[1]), z = rdf(S.u[2]);
         if (x > w) c |= 1; if (x < -w) c |= 2; if (y > w) c |= 4; if (y < -w) c |= 8; if (z > w) c |= 16; if (z < -w) c |= 32;
-        if (getenv("HG_CLIPLOG")) { static int n; if (n++ < 40) L("VU1 CLIP @%u fs vf%d (%g %g %g %g) ft vf%d.w %g -> %02x\n", 0, d->fs, x, y, z, rdf(S.u[3]), d->ft, rdf(T.u[3]), c); }
+        if (GETENV_ONCE("HG_CLIPLOG")) { static int n; if (n++ < 40) L("VU1 CLIP @%u fs vf%d (%g %g %g %g) ft vf%d.w %g -> %02x\n", 0, d->fs, x, y, z, rdf(S.u[3]), d->ft, rdf(T.u[3]), c); }
         flag_push(1, c); return; }
     }
 }

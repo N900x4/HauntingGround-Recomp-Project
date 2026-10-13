@@ -301,7 +301,7 @@ static void iop_rpc(Bind *b, uint32_t fn, uint32_t sbuf, uint32_t ssize, uint32_
         memset(gptr(recv), 0, rsize);
         if (rsize >= 4) W32(recv, 1);
     }
-    if (getenv("HG_DUMPSID") && strtoul(getenv("HG_DUMPSID"), 0, 16) == b->sid) {
+    if (GETENV_ONCE("HG_DUMPSID") && strtoul(GETENV_ONCE("HG_DUMPSID"), 0, 16) == b->sid) {
         L("  send dump:"); for (uint32_t k = 0; k < ssize && k < 320; k += 4) L("%s%08x", k % 32 ? " " : "\n   ", *(uint32_t *)(S + k)); L("\n");
     }
     if (pad_rpc(b->sid, fn, S, ssize, recv, rsize) || mc_rpc(b->sid, fn, S, ssize, recv, rsize)) return;
@@ -361,9 +361,9 @@ static void iop_sifdma(uint32_t src, uint32_t dst, uint32_t size, uint32_t attr)
     if (size > 0x100000) size = 0x100000;
     if (dst != IOP_CMDBUF) {           /* plain data (RPC send buffer etc): keep a copy in IOP RAM */
         memcpy(iop_ram + (dst & 0x1FFFFF), gptr(src), (dst & 0x1FFFFF) + size <= sizeof iop_ram ? size : 0);
-        static int nb; if (getenv("HG_BLKLOG") && size == 0x880 && R32(src) && vblank_count > (uint64_t)atoi(getenv("HG_BLKLOG")) && nb++ < 800) {
+        static int nb; if (GETENV_ONCE("HG_BLKLOG") && size == 0x880 && R32(src) && vblank_count > (uint64_t)atoi(GETENV_ONCE("HG_BLKLOG")) && nb++ < 800) {
             L("EE->IOP blk dst 0x%x vb %llu count %u:", dst, (unsigned long long)vblank_count, R32(src)); for (int k = 4; k < 16; k++) L(" %08x", R32(src + 4 * k)); L("\n"); }
-        static int nl; if (bg_verbose > 1 || (getenv("HG_SIFLOG") && nl++ < 400000 && (size > 0x880 || nl < 400))) L("EE SIF DMA -> IOP: src 0x%x dst 0x%x size 0x%x first %08x %08x\n", src, dst, size, R32(src), R32(src + 4));
+        static int nl; if (bg_verbose > 1 || (GETENV_ONCE("HG_SIFLOG") && nl++ < 400000 && (size > 0x880 || nl < 400))) L("EE SIF DMA -> IOP: src 0x%x dst 0x%x size 0x%x first %08x %08x\n", src, dst, size, R32(src), R32(src + 4));
         return;
     }
     uint32_t w[16]; for (int i = 0; i < 16; i++) w[i] = R32(src + 4 * i);

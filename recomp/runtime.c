@@ -41,7 +41,16 @@ const char *game_path(const char *name) {
     snprintf(b, 1024, "%s/%s", getenv("HG_GAME_DIR") ? getenv("HG_GAME_DIR") : "../game", name); return b;
 }
 double tprof[8];
+#ifdef _WIN32
+#include <windows.h>
+double host_now(void) {   /* QPC directly: winpthreads' clock_gettime also queries the frequency on every call */
+    static double inv; LARGE_INTEGER c;
+    if (!inv) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); inv = 1.0 / (double)f.QuadPart; }
+    QueryPerformanceCounter(&c); return (double)c.QuadPart * inv;
+}
+#else
 double host_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+#endif
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static long log_bytes; static int log_capped;
 #define LOG_CAP (8L << 20)            /* cap per run; the stop summary bypasses it */
@@ -93,6 +102,7 @@ void dump_stats(const char *why) {
     { double tot = now() - t_start; L("host time: total %.1fs, VU1 %.1fs, GS draw %.1fs, IOP+SPU2 %.1fs (SPU2 mix %.1fs), DMA/VIF %.1fs, rest (EE code, HLE, output) %.1fs\n",
         tot, tprof[0], tprof[1], tprof[2], tprof[3], tprof[4], tot - tprof[0] - tprof[1] - tprof[2] - tprof[4]); }
     hle_dump();
+    host_prof_dump();
     if (getenv("HG_PEEK")) { char *p = getenv("HG_PEEK"); while (*p) { uint32_t a = strtoul(p, &p, 16); uint32_t v; memcpy(&v, ee_ram + (a & 0x1FFFFFF), 4); L("peek %08x = %08x\n", a, v); while (*p == ',') p++; } }
 }
 void stop(const char *fmt, ...) {

@@ -54,7 +54,11 @@ So playback, sound, timing and presentation are the game's own.
     PSNR, 0 to about 1,400 samples per picture off by 1–2. The rest is IDCT rounding (the IPU's exact IDCT
     arithmetic is not documented).
 - **Sound.** The movie audio the IOP sends to the SPU2 (`HG_ADMAWAV`) is bit-identical to the SFD's ADX track,
-  decoded independently, over the checked 15 s of `LOOP_DEMO.SFD`.
+  decoded independently:
+  - all 209.6 s of `OPENING.SFD`, every sample;
+  - the checked 15 s of `LOOP_DEMO.SFD`.
+- **End to end.** With `HG_PAD=1500:start,1800:start,2100:cross`, the opening plays to its end and stage 1
+  starts at about VBlank 14,400. The whole 16,000-VBlank run takes 132 s of host time.
 
 ## Using it
 

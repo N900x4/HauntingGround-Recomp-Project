@@ -262,8 +262,8 @@ static void draw_setup(Draw *d) {
     d->date = BITS(c->test, 14, 1); d->datm = BITS(c->test, 15, 1); d->zte = BITS(c->test, 16, 1); d->ztst = BITS(c->test, 17, 2);
     d->a = BITS(c->alpha, 0, 2); d->b = BITS(c->alpha, 2, 2); d->cc = BITS(c->alpha, 4, 2); d->d = BITS(c->alpha, 6, 2); d->fix = BITS(c->alpha, 32, 8);
     d->pabe = r_pabe & 1; d->fba = c->fba & 1; d->colclamp = r_colclamp & 1;
-    d->fb16 = d->fpsm == CT16 || d->fpsm == CT16S;
-    d->need_dst = d->abe || d->date || d->fbmsk || (d->ate && d->afail == 3) || d->fpsm == CT24 || d->fb16;
+    d->fb16 = d->fpsm == CT16 || d->fpsm == CT16S || d->fpsm == Z16 || d->fpsm == Z16S;   /* Z16 frame buffers: 16-bit colour in the Z16 layouts */
+    d->need_dst = d->abe || d->date || d->fbmsk || (d->ate && d->afail == 3) || d->fpsm == CT24 || d->fpsm == Z24 || d->fb16;
     d->zread = d->zte && d->ztst >= 2;
 }
 static inline int clamp255(int v, int cc) { return cc ? (v < 0 ? 0 : v > 255 ? 255 : v) : (v & 255); }
@@ -281,7 +281,7 @@ static inline __attribute__((always_inline)) void pixel(const Draw *d, int x, in
         if (!pass) switch (d->afail) { case 0: return; case 1: z_ok = 0; break; case 2: fb_ok = 0; break; default: z_ok = 0; rgb_only = 1; }
     }
     uint32_t fa = 0, dst = 0, dst32 = 0;
-    if (!d->fb16) fa = addr32(d->fbp, d->fbw, x, y);
+    if (!d->fb16) fa = (d->fpsm == Z32 || d->fpsm == Z24) ? addr32z(d->fbp, d->fbw, x, y) : addr32(d->fbp, d->fbw, x, y);   /* Z32/Z24 frame buffers: Z layout */
     if (d->need_dst) {
         dst = d->fb16 ? read_px(d->fbp, d->fbw, d->fpsm, x, y) : vm[fa];
         dst32 = d->fb16 ? c16to32(dst, 0, 0, 0x80) : dst;
@@ -310,7 +310,7 @@ static inline __attribute__((always_inline)) void pixel(const Draw *d, int x, in
         if (d->fba) out |= 0x80000000u;
         if (rgb_only) out = (out & 0xFFFFFF) | (dst32 & 0xFF000000u);
         if (d->fb16) { uint32_t o = c32to16(out); o = (o & ~d->fbmsk) | (dst & d->fbmsk & 0xFFFF); write_px(d->fbp, d->fbw, d->fpsm, x, y, o); }
-        else if (d->fpsm == CT24) vm[fa] = (dst & 0xFF000000u) | (((out & ~d->fbmsk) | (dst & d->fbmsk)) & 0xFFFFFF);
+        else if (d->fpsm == CT24 || d->fpsm == Z24) vm[fa] = (dst & 0xFF000000u) | (((out & ~d->fbmsk) | (dst & d->fbmsk)) & 0xFFFFFF);
         else vm[fa] = (out & ~d->fbmsk) | (dst & d->fbmsk);
         n_pixels++;
     }
@@ -543,6 +543,13 @@ static void sprite_vec(const Draw *d, const Vtx *b, int px0, int px1, int py0, i
 #endif
 static void draw_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
     int x0 = a->x, x1 = b->x, y0 = a->y, y1 = b->y;
+    {   /* HG_SPRLOG=vb: log every sprite drawn during that VBlank */
+        static long svb = -2; if (svb == -2) svb = getenv("HG_SPRLOG") ? atol(getenv("HG_SPRLOG")) : -1;
+        if (svb >= 0 && (long)cur_vb == svb)
+            L("SPRITE fbp %u psm %02x fbmsk %08x zbp %u zpsm %02x zte %d:%d zmsk %d z %u (0x%x) tme %d tbp %u tpsm %02x abe %d(%d%d%d%d fix %d) rgba %08x x %d-%d y %d-%d\n",
+              d->fbp, d->fpsm, d->fbmsk, d->zbp, d->zpsm, d->zte, d->ztst, d->zmsk, b->z, b->z, d->tme, d->tme ? d->tex.tbp : 0, d->tme ? d->tex.psm : 0,
+              d->abe, d->a, d->b, d->cc, d->d, d->fix, b->rgba, x0 >> 4, x1 >> 4, y0 >> 4, y1 >> 4);
+    }
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
     if (d->tme) { vtx_uv(d, a, &u0, &v0); vtx_uv(d, b, &u1, &v1); }
     if (x0 > x1) { int t = x0; x0 = x1; x1 = t; float f = u0; u0 = u1; u1 = f; }

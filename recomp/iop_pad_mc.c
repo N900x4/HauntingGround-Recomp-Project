@@ -60,7 +60,7 @@ void pad_set_input(uint16_t held, const uint8_t analog[4]) { pad_held = held; if
 
 /* HG_EXPLORE=vb: from that VBlank on, a simple explorer drives Fiona (testing): it holds one direction until her
    position (player object *(0x44f818) + 0x10) stops changing, then turns to the next direction (pseudo-random),
-   taps Cross every 2 s to read text and use doors, and logs the position every second. */
+   taps Cross every 2 s to read text, tries Cross then Circle (Search) when blocked, and logs the position every second. */
 static uint16_t explore(uint64_t vb) {
     static long start = -2; if (start == -2) start = getenv("HG_EXPLORE") ? atol(getenv("HG_EXPLORE")) : -1;
     if (start < 0 || (long)vb < start) return 0;
@@ -81,7 +81,8 @@ static uint16_t explore(uint64_t vb) {
     if (t % 60 == 0) { uint32_t stg = 0; if (obj) memcpy(&stg, gptr(obj + 0x30), 4);   /* +0x30: stage number (0x2a = ST_02A) */
         L("explore: VBlank %llu stage %x pos %.1f %.1f %.1f (obj 0x%x) dir %s\n", (unsigned long long)vb, stg, x, y, z, obj, bnames[dirs[dir]]); }
     uint16_t h = 1u << dirs[dir];
-    if (t % 120 < 6 || (t - stuck_at >= 6 && t - stuck_at < 12) || (t - stuck_at >= 30 && t - stuck_at < 36)) h |= 1u << B_CROSS;
+    if (t % 120 < 6 || (t - stuck_at >= 6 && t - stuck_at < 12)) h |= 1u << B_CROSS;
+    if (t - stuck_at >= 30 && t - stuck_at < 36) h |= 1u << B_CIRCLE;   /* Circle is Search (doors, objects) */
     return h;
 }
 void pad_vblank(uint64_t vb) {

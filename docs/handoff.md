@@ -10,14 +10,35 @@ VBlanks tested). It runs at about 0.5x real time on this VM (2 vCPUs, no GPU).
 
 | Area | Status | Doc |
 |---|---|---|
-| Boot, pad, memory-card HLE | Done. Saving is untested (no save point reached yet). | `phase1-runtime-notes.md` |
-| VU1, VIF1, GIF, software GS | Done; renderer 3.1x faster, hash-identical to the original | `renderer-performance.md` |
+| Boot, pad, memory-card HLE | Done. LOAD GAME works: a save made on PCSX2 (extracted with `tools/verify/ps2mc.py`) loads into the Castle Suite (`ST_021`) at the saved position. Saving from our build is untested. | `phase1-runtime-notes.md` |
+| VU1, VIF1, GIF, software GS | Done; checked against PCSX2: stage 1 has 99.7% of pixels within 8 levels, the Castle Suite matches | `renderer-performance.md`, below |
 | IOP and sound | The game's own IOP modules run on an emulated IOP plus SPU2. SFX, ADX streams and BGM .SQ are verified. | `phase2-audio-notes.md` |
 | Movies | The IPU is emulated, and the game's own Sofdec player runs. Movie audio is bit-exact. | `movies-ipu.md` |
 | Exploration | `ST_02A` → `ST_013` → `ST_00D` reached; explorer tools | `exploration-notes.md` |
 | Reverb | Unverified: the game sets the depth to 0 at stage init, and no reached room changes it | `exploration-notes.md` |
 
 Last commit before this doc: `bf60152`.
+
+### Session 2026-10-13 (PCSX2 reference comparison)
+
+- **PCSX2 reference is set up**: data dir `~/ps2-work/tools/pcsx2/data` (BIOS path set, PINE on, software renderer,
+  raw screenshots). Save states: slot 1 = main menu, 2 = opening movie start, 4 = stage 1 start. The user's memory
+  card `Mcd001.ps2` holds a save at the first clock ("Castle Suite", 9:25).
+- **Fixed, found by comparing against PCSX2 GS dumps** (`tools/verify/gsdump.py`):
+  - VU1: WAITQ/WAITP stall the whole instruction pair, so MULq next to WAITQ sees the new Q (the brown beam in stage 1
+    was the last vertex of every batch projected with the previous vertex's 1/w).
+  - VU1: pipeline stalls are modelled (4-cycle VF latency, FDIV busy; Q/P count cycles). Fixes the bright streak by
+    Fiona. `HG_VUSTALL=0` turns it off. Both interpreters, lockstep clean.
+  - GS: Z32/Z24/Z16/Z16S textures use the depth layouts (blocky fog behind the stage 1 gate).
+  - MCSERV GetDir: maxent -1 means no limit; without this LOAD GAME saw no save.
+  - VU0 macro mode sets MAC/status flags; `HG_FPRZ=1` (opt-in) rounds toward zero like the EE FPU.
+- **The user says PCSX2's sound is not accurate**: do not use it as the audio reference.
+- **Stage number**: player object `*(0x44f818)` + 0x30 (0x2A = `ST_02A`, 0x21 = `ST_021`). The whole outside area
+  walked so far is `ST_02A`.
+- Tools: `tools/verify/pine.py` (PCSX2 memory over PINE, RAM dump, save/load state), `gsdump.py`, `vudis.py`,
+  `framecmp.py`, `ps2mc.py`; `HG_VTXLOG`, `HG_VU1DUMP`, Z buffer in `HG_PIXWATCH`.
+- Method that worked: same frame in both (static camera), PCSX2 GS dump vs our `HG_VTXLOG`/`HG_PIXWATCH`; the
+  first vertex that differs points at the bug.
 
 ## Rules (from the user)
 

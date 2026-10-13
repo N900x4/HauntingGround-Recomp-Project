@@ -397,6 +397,9 @@ static void vu1_run_inner(uint32_t start) {
         if (fq_n) flag_commit(0);
         if (q_wait && --q_wait == 0) q_reg = q_pend;
         if (p_wait && --p_wait == 0) p_reg = p_pend;
+        /* WAITQ/WAITP stall the whole instruction pair until the result arrives, so an upper op in the same pair
+           (e.g. MULq next to WAITQ in the game's epilogue) already sees the new Q or P. */
+        if (!d->ibit) { if (d->lk == L_WAITQ) q_commit(); else if (d->lk == L_WAITP) p_commit(); }
         UpRes ur; upper(d, &ur);
         int wvi = -1, taken = 0; uint16_t wold = 0; uint32_t tgt = 0;
         if (d->ibit) memcpy(&i_reg, &d->iimm, 4);           /* I bit: lower word is a float immediate */
@@ -460,6 +463,15 @@ void vu1_run(uint32_t start) {
         for (int m = 0; m < 16; m++) {
             rev4[m] = (uint8_t)(((m & 1) << 3) | ((m & 2) << 1) | ((m & 4) >> 1) | ((m & 8) >> 3));
             lane_mask[m] = _mm_setr_epi32(m & 8 ? -1 : 0, m & 4 ? -1 : 0, m & 2 ? -1 : 0, m & 1 ? -1 : 0);
+        }
+    }
+    {   /* HG_VU1DUMP=path:vb writes micro and data memory (code first) at the first run from that VBlank on */
+        static long dump_vb = -2; static const char *dump_path;
+        if (dump_vb == -2) { const char *e = getenv("HG_VU1DUMP"); dump_vb = -1; if (e) { static char buf[512]; snprintf(buf, sizeof buf, "%s", e); char *c = strrchr(buf, ':'); if (c) { *c = 0; dump_vb = atol(c + 1); dump_path = buf; } } }
+        extern uint64_t hle_vblank_count(void);
+        if (dump_vb >= 0 && (long)hle_vblank_count() >= dump_vb) {
+            FILE *f = fopen(dump_path, "wb"); if (f) { fwrite(vu1_code, 1, sizeof vu1_code, f); fwrite(vu1_mem, 1, sizeof vu1_mem, f); fclose(f); }
+            L("VU1DUMP at VB %llu, start pc %u\n", (unsigned long long)hle_vblank_count(), start); dump_vb = -1;
         }
     }
     double t0 = host_now();

@@ -266,7 +266,7 @@ static inline int clamp255(int v, int cc) { return cc ? (v < 0 ? 0 : v > 255 ? 2
 static int watch_x = -1, watch_y; static long watch_vb; static uint64_t cur_vb; static char watch_prim[400];
 static inline __attribute__((always_inline)) void pixel(const Draw *d, int x, int y, uint32_t z, uint32_t col /* rgba8, a 0x80 = 1.0 */) {
     n_visits++;
-    if (__builtin_expect(x == watch_x && y == watch_y, 0) && (long)cur_vb >= watch_vb) L("PIXWATCH (%d,%d) z %u col %08x fbp %u: %s\n", x, y, z, col, d->fbp, watch_prim);
+    if (__builtin_expect(x == watch_x && y == watch_y, 0) && (long)cur_vb >= watch_vb) L("PIXWATCH (%d,%d) z %u zbuf-now %u col %08x fbp %u: %s\n", x, y, z, read_px(d->zbp, d->fbw, d->zpsm, x, y) & (d->zpsm == Z24 ? 0xFFFFFF : 0xFFFFFFFF), col, d->fbp, watch_prim);
     if (x < d->scx0 || x > d->scx1 || y < d->scy0 || y > d->scy1) return;
     int as = col >> 24;
     int fb_ok = 1, z_ok = 1, rgb_only = 0;
@@ -1018,8 +1018,8 @@ static void vertex_kick(Vtx v, int draw) {
         uint64_t off = d.c->xyoffset; int ox = BITS(off, 0, 16), oy = BITS(off, 32, 16);
         Vtx w[3]; for (int i = 0; i < nvq; i++) { w[i] = vq[i]; w[i].x -= ox; w[i].y -= oy; }
         n_prims++; n_kicks_frame++;
-        if (watch_x >= 0 && (long)cur_vb >= watch_vb) snprintf(watch_prim, sizeof watch_prim, "prim %d tme %d psm %02x tbp %u abe %d(%d%d%d%d) ate %d:%d:%d zte %d:%d fge %d fst %d v0 (%d,%d z%u rgba %08x st %g,%g,%g uv %d,%d) v1 (%d,%d z%u rgba %08x st %g,%g,%g) v2 (%d,%d z%u rgba %08x st %g,%g,%g)",
-            prim, d.tme, d.tex.psm, d.tex.tbp, d.abe, d.a, d.b, d.cc, d.d, d.ate, d.atst, d.afail, d.zte, d.ztst, d.fge, d.fst, w[0].x >> 4, w[0].y >> 4, w[0].z, w[0].rgba, w[0].s, w[0].t, w[0].q, w[0].u, w[0].v,
+        if (watch_x >= 0 && (long)cur_vb >= watch_vb) snprintf(watch_prim, sizeof watch_prim, "prim %d tme %d psm %02x tbp %u abe %d(%d%d%d%d) ate %d:%d:%d zte %d:%d zbuf %u:%02x:%d fge %d fst %d v0 (%d,%d z%u rgba %08x st %g,%g,%g uv %d,%d) v1 (%d,%d z%u rgba %08x st %g,%g,%g) v2 (%d,%d z%u rgba %08x st %g,%g,%g)",
+            prim, d.tme, d.tex.psm, d.tex.tbp, d.abe, d.a, d.b, d.cc, d.d, d.ate, d.atst, d.afail, d.zte, d.ztst, d.zbp, d.zpsm, d.zmsk, d.fge, d.fst, w[0].x >> 4, w[0].y >> 4, w[0].z, w[0].rgba, w[0].s, w[0].t, w[0].q, w[0].u, w[0].v,
             w[1].x >> 4, w[1].y >> 4, w[1].z, w[1].rgba, w[1].s, w[1].t, w[1].q, nvq > 2 ? w[2].x >> 4 : 0, nvq > 2 ? w[2].y >> 4 : 0, nvq > 2 ? w[2].z : 0, nvq > 2 ? w[2].rgba : 0, nvq > 2 ? w[2].s : 0, nvq > 2 ? w[2].t : 0, nvq > 2 ? w[2].q : 0);
         double t0 = host_now();
         uint64_t px0 = n_pixels, vis0 = n_visits;

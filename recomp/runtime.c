@@ -223,6 +223,9 @@ int main(int argc, char **argv) {
         const char *fl = getenv("HG_PRESSFN") ? getenv("HG_PRESSFN") : "380410,37fef0,380050,37fe50,37fc60,37fac0,37f980,37f7d0";
         char *q = (char *)fl; while (*q) { uint32_t a = strtoul(q, &q, 16); if (func_index(a) >= 0) set_hook(a, press_hook); while (*q == ',') q++; } }
     if (getenv("HG_TRACE")) { char *p = getenv("HG_TRACE"); while (*p) { uint32_t a = strtoul(p, &p, 16); set_hook(a, trace_hook); while (*p == ',') p++; } }
+    if (getenv("HG_FPRZ") && atoi(getenv("HG_FPRZ"))) {   /* EE FPU and VU round toward zero and flush denormals (MXCSR RC=11, FTZ, DAZ) */
+        unsigned m; __asm__ volatile("stmxcsr %0" : "=m"(m)); m |= 0x6000 | 0x8000 | 0x40; __asm__ volatile("ldmxcsr %0" : : "m"(m));
+    }
     hle_run_main(0x100008);     /* never returns */
     return 0;
 }

@@ -301,6 +301,10 @@ static void vu1_run_inner(uint32_t start) {
         if (q_wait && --q_wait == 0) q_reg = q_pend;
         if (p_wait && --p_wait == 0) p_reg = p_pend;
         uint16_t vi_snap[16]; memcpy(vi_snap, vi, sizeof vi);
+        if (!(up & 0x80000000u) && lo >> 25 == 0x40 && (lo & 0x3C) == 0x3C) {   /* WAITQ/WAITP stall the pair: the upper op sees the new Q/P */
+            uint32_t op2 = ((lo >> 6) & 31) << 2 | (lo & 3);
+            if (op2 == 0x3B) q_commit(); else if (op2 == 0x7B) p_commit();
+        }
         UpRes ur; upper(up, &ur);
         int wrote_vf = 0, wrote_vi = -1, taken = 0; uint32_t tgt = 0;
         if (up & 0x80000000u) { memcpy(&i_reg, &lo, 4); }           /* I bit: lower word is a float immediate */

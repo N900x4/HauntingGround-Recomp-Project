@@ -87,6 +87,24 @@ static void vwrite(Ctx *c, int fd, int dest, const float r[4]) {
     if (fd == 0) return;
     for (int i = 0; i < 4; i++) if (dest & (8 >> i)) c->vf[fd][i] = vclamp(r[i]);
 }
+/* FMAC flags (add/sub/mul/madd/msub and their accumulator forms, opmula/opmsub): MAC flag vi17 holds per-lane zero,
+   sign, underflow and overflow (x is the high bit of each nibble); status vi16 bits 0-3 summarize them and bits 6-9
+   keep them sticky until a ctc2 clears them. The game's bounding-box tests (0x10e658..0x10e788) read the sticky
+   zero/sign bits after vsub, so without these every object passes as visible. */
+static void vflags(Ctx *c, int dest, const float r[4]) {
+    uint32_t mac = 0;
+    for (int i = 0; i < 4; i++) if (dest & (8 >> i)) {
+        float v = vclamp(r[i]); uint32_t u, a; memcpy(&u, &v, 4); a = u & 0x7FFFFFFF; int bit = 3 - i;
+        if (a == 0) mac |= 1u << bit; else if (u >> 31) mac |= 1u << (bit + 4);
+        if (a == 0x7F7FFFFF || isinf(r[i])) mac |= 1u << (bit + 12);
+    }
+    uint32_t now = (mac & 0xF ? 1 : 0) | (mac & 0xF0 ? 2 : 0) | (mac & 0xF00 ? 4 : 0) | (mac & 0xF000 ? 8 : 0);
+    c->vi[17] = mac; c->vi[16] = (c->vi[16] & 0xFF0) | now | now << 6;
+}
+static void vdivflags(Ctx *c, float num, float den) {   /* DIV/SQRT/RSQRT: invalid (bit 4) and divide-by-zero (bit 5), sticky in 10/11 */
+    uint32_t f = 0; if (den == 0) f = num == 0 ? 0x10 : 0x20; else if (den < 0) f = 0x10;
+    c->vi[16] = (c->vi[16] & ~0x30u) | f | f << 6;
+}
 void ee_lqc2(Ctx *c, int ft, uint32_t a) { GPR g; rd128(a, &g); if (ft) memcpy(c->vf[ft], &g, 16); }
 void ee_sqc2(Ctx *c, int ft, uint32_t a) { GPR g; memcpy(&g, c->vf[ft], 16); wr128(a, &g); }
 void ee_cop2(Ctx *c, uint32_t pc, uint32_t w) {
@@ -99,54 +117,54 @@ void ee_cop2(Ctx *c, uint32_t pc, uint32_t w) {
         case 5: if (fs) memcpy(c->vf[fs], &c->r[ft], 16); return;                             /* qmtc2 */
         case 2: { uint32_t v = fs < 16 ? c->vi[fs] : fs == 22 ? 0 : fs == 29 ? 0 : c->vi[fs];      /* cfc2 */
                   if (fs == 22) memcpy(&v, &c->vq, 4); if (ft) c->r[ft].s64[0] = (int32_t)v; return; }
-        case 6: if (fs) c->vi[fs] = c->r[ft].u32[0]; if (fs == 22) memcpy(&c->vq, &c->r[ft].u32[0], 4); return; /* ctc2 */
+        case 6: if (fs == 16) { c->vi[16] = (c->vi[16] & 0x3F) | (c->r[ft].u32[0] & 0xFC0); return; } if (fs) c->vi[fs] = c->r[ft].u32[0]; if (fs == 22) memcpy(&c->vq, &c->r[ft].u32[0], 4); return; /* ctc2 */
         }
         stop("interp: unimplemented COP2 0x%08x at 0x%x", w, pc);
     }
     if (fn < 60) {
         float bv = T[bc];
         switch (fn) {
-        case 0: case 1: case 2: case 3: for (i = 0; i < 4; i++) r[i] = S[i] + bv; vwrite(c, fd, dest, r); return;        /* vaddbc */
-        case 4: case 5: case 6: case 7: for (i = 0; i < 4; i++) r[i] = S[i] - bv; vwrite(c, fd, dest, r); return;        /* vsubbc */
-        case 8: case 9: case 10: case 11: for (i = 0; i < 4; i++) r[i] = A[i] + S[i] * bv; vwrite(c, fd, dest, r); return; /* vmaddbc */
-        case 12: case 13: case 14: case 15: for (i = 0; i < 4; i++) r[i] = A[i] - S[i] * bv; vwrite(c, fd, dest, r); return; /* vmsubbc */
+        case 0: case 1: case 2: case 3: for (i = 0; i < 4; i++) r[i] = S[i] + bv; vwrite(c, fd, dest, r); vflags(c, dest, r); return;        /* vaddbc */
+        case 4: case 5: case 6: case 7: for (i = 0; i < 4; i++) r[i] = S[i] - bv; vwrite(c, fd, dest, r); vflags(c, dest, r); return;        /* vsubbc */
+        case 8: case 9: case 10: case 11: for (i = 0; i < 4; i++) r[i] = A[i] + S[i] * bv; vwrite(c, fd, dest, r); vflags(c, dest, r); return; /* vmaddbc */
+        case 12: case 13: case 14: case 15: for (i = 0; i < 4; i++) r[i] = A[i] - S[i] * bv; vwrite(c, fd, dest, r); vflags(c, dest, r); return; /* vmsubbc */
         case 16: case 17: case 18: case 19: for (i = 0; i < 4; i++) r[i] = fmaxf(S[i], bv); vwrite(c, fd, dest, r); return; /* vmaxbc */
         case 20: case 21: case 22: case 23: for (i = 0; i < 4; i++) r[i] = fminf(S[i], bv); vwrite(c, fd, dest, r); return; /* vminibc */
-        case 24: case 25: case 26: case 27: for (i = 0; i < 4; i++) r[i] = S[i] * bv; vwrite(c, fd, dest, r); return;     /* vmulbc */
-        case 28: for (i = 0; i < 4; i++) r[i] = S[i] * c->vq; vwrite(c, fd, dest, r); return;     /* vmulq */
-        case 32: for (i = 0; i < 4; i++) r[i] = S[i] + c->vq; vwrite(c, fd, dest, r); return;     /* vaddq */
-        case 40: for (i = 0; i < 4; i++) r[i] = S[i] + T[i]; vwrite(c, fd, dest, r); return;      /* vadd */
-        case 41: for (i = 0; i < 4; i++) r[i] = A[i] + S[i] * T[i]; vwrite(c, fd, dest, r); return; /* vmadd */
-        case 42: for (i = 0; i < 4; i++) r[i] = S[i] * T[i]; vwrite(c, fd, dest, r); return;      /* vmul */
+        case 24: case 25: case 26: case 27: for (i = 0; i < 4; i++) r[i] = S[i] * bv; vwrite(c, fd, dest, r); vflags(c, dest, r); return;     /* vmulbc */
+        case 28: for (i = 0; i < 4; i++) r[i] = S[i] * c->vq; vwrite(c, fd, dest, r); vflags(c, dest, r); return;     /* vmulq */
+        case 32: for (i = 0; i < 4; i++) r[i] = S[i] + c->vq; vwrite(c, fd, dest, r); vflags(c, dest, r); return;     /* vaddq */
+        case 40: for (i = 0; i < 4; i++) r[i] = S[i] + T[i]; vwrite(c, fd, dest, r); vflags(c, dest, r); return;      /* vadd */
+        case 41: for (i = 0; i < 4; i++) r[i] = A[i] + S[i] * T[i]; vwrite(c, fd, dest, r); vflags(c, dest, r); return; /* vmadd */
+        case 42: for (i = 0; i < 4; i++) r[i] = S[i] * T[i]; vwrite(c, fd, dest, r); vflags(c, dest, r); return;      /* vmul */
         case 43: for (i = 0; i < 4; i++) r[i] = fmaxf(S[i], T[i]); vwrite(c, fd, dest, r); return;
-        case 44: for (i = 0; i < 4; i++) r[i] = S[i] - T[i]; vwrite(c, fd, dest, r); return;      /* vsub */
-        case 45: for (i = 0; i < 4; i++) r[i] = A[i] - S[i] * T[i]; vwrite(c, fd, dest, r); return;
-        case 46: r[0] = A[0] - S[1] * T[2]; r[1] = A[1] - S[2] * T[0]; r[2] = A[2] - S[0] * T[1]; r[3] = 0; vwrite(c, fd, dest & 0xE, r); return; /* vopmsub */
+        case 44: for (i = 0; i < 4; i++) r[i] = S[i] - T[i]; vwrite(c, fd, dest, r); vflags(c, dest, r); return;      /* vsub */
+        case 45: for (i = 0; i < 4; i++) r[i] = A[i] - S[i] * T[i]; vwrite(c, fd, dest, r); vflags(c, dest, r); return;   /* vmsub */
+        case 46: r[0] = A[0] - S[1] * T[2]; r[1] = A[1] - S[2] * T[0]; r[2] = A[2] - S[0] * T[1]; r[3] = 0; vwrite(c, fd, dest & 0xE, r); vflags(c, 0xE, r); return; /* vopmsub */
         case 47: for (i = 0; i < 4; i++) r[i] = fminf(S[i], T[i]); vwrite(c, fd, dest, r); return;
         }
     } else {
         int op = (fn & 3) | (fd << 2);
         float bv = T[bc];
         switch (op) {
-        case 0: case 1: case 2: case 3: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(S[i] + bv); return;   /* vaddabc */
-        case 4: case 5: case 6: case 7: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(S[i] - bv); return;
-        case 8: case 9: case 10: case 11: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(A[i] + S[i] * bv); return; /* vmaddabc */
-        case 12: case 13: case 14: case 15: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(A[i] - S[i] * bv); return;
-        case 24: case 25: case 26: case 27: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(S[i] * bv); return; /* vmulabc */
+        case 0: case 1: case 2: case 3: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(S[i] + bv); vflags(c, dest, A); return;   /* vaddabc */
+        case 4: case 5: case 6: case 7: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(S[i] - bv); vflags(c, dest, A); return;   /* vsubabc */
+        case 8: case 9: case 10: case 11: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(A[i] + S[i] * bv); vflags(c, dest, A); return; /* vmaddabc */
+        case 12: case 13: case 14: case 15: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(A[i] - S[i] * bv); vflags(c, dest, A); return;   /* vmsubabc */
+        case 24: case 25: case 26: case 27: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(S[i] * bv); vflags(c, dest, A); return; /* vmulabc */
         case 16: case 17: case 18: case 19: { float sc = op == 16 ? 1 : op == 17 ? 1.f / 16 : op == 18 ? 1.f / 4096 : 1.f / 32768; /* vitofN */
             for (i = 0; i < 4; i++) { int32_t v; memcpy(&v, &S[i], 4); r[i] = v * sc; } vwrite(c, ft, dest, r); return; }
         case 20: case 21: case 22: case 23: { float sc = op == 20 ? 1 : op == 21 ? 16 : op == 22 ? 4096 : 32768;          /* vftoiN */
             if (!ft) return; for (i = 0; i < 4; i++) if (dest & (8 >> i)) { int32_t v = ee_cvtw(S[i] * sc); memcpy(&c->vf[ft][i], &v, 4); } return; }
-        case 40: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(S[i] + T[i]); return;   /* vadda */
-        case 41: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(A[i] + S[i] * T[i]); return; /* vmadda */
-        case 42: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(S[i] * T[i]); return;   /* vmula */
-        case 46: A[0] = S[1] * T[2]; A[1] = S[2] * T[0]; A[2] = S[0] * T[1]; return;                 /* vopmula */
+        case 40: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(S[i] + T[i]); vflags(c, dest, A); return;   /* vadda */
+        case 41: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(A[i] + S[i] * T[i]); vflags(c, dest, A); return; /* vmadda */
+        case 42: for (i = 0; i < 4; i++) if (dest & (8 >> i)) A[i] = vclamp(S[i] * T[i]); vflags(c, dest, A); return;   /* vmula */
+        case 46: A[0] = S[1] * T[2]; A[1] = S[2] * T[0]; A[2] = S[0] * T[1]; vflags(c, 0xE, A); return;   /* vopmula */
         case 47: return;                                                                               /* vnop */
         case 48: for (i = 0; i < 4; i++) r[i] = S[i]; vwrite(c, ft, dest, r); return;                 /* vmove */
         case 49: r[0] = S[1]; r[1] = S[2]; r[2] = S[3]; r[3] = S[0]; vwrite(c, ft, dest, r); return;  /* vmr32 */
-        case 56: { int fsf = (w >> 21) & 3, ftf = (w >> 23) & 3; c->vq = ee_divs(S[fsf], T[ftf]); return; } /* vdiv */
-        case 57: { int ftf = (w >> 23) & 3; c->vq = sqrtf(fabsf(T[ftf])); return; }                  /* vsqrt */
-        case 58: { int fsf = (w >> 21) & 3, ftf = (w >> 23) & 3; c->vq = ee_divs(S[fsf], sqrtf(fabsf(T[ftf]))); return; } /* vrsqrt */
+        case 56: { int fsf = (w >> 21) & 3, ftf = (w >> 23) & 3; vdivflags(c, S[fsf], T[ftf]); c->vq = ee_divs(S[fsf], T[ftf]); return; } /* vdiv */
+        case 57: { int ftf = (w >> 23) & 3; vdivflags(c, 1, T[ftf] < 0 ? -1 : 1); c->vq = sqrtf(fabsf(T[ftf])); return; } /* vsqrt */
+        case 58: { int fsf = (w >> 21) & 3, ftf = (w >> 23) & 3; vdivflags(c, S[fsf], T[ftf]); c->vq = ee_divs(S[fsf], sqrtf(fabsf(T[ftf]))); return; } /* vrsqrt */
         case 59: return;                                                                               /* vwaitq */
         }
     }

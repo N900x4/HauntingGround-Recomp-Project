@@ -41,6 +41,43 @@ The IOP runs in lock-step with the EE VBlank: 1/59.94 s of IOP time per VBlank, 
 - **Stage 1 ambience, bit-exact:** CRI's PCM output captured with `HG_ADMAWAV` matches `ADX00/AD_22.ADX` decoded independently with correlation 1.0000 and gain 1.000 over 30 s. The stream loops (1,537 sectors read of 911).
 - Stage 1 plays continuous sound from load to the end of a 90 s capture, with output RMS 1,000–2,900 (voices, stream and reverb).
 
+### Background music (stage 1), checked 2026-10-13
+
+- **Format.** `BGM/*.SQ` is Sony's SCEI sequence: `IECSsreV` / `IECSuqeS` / `IECSidiM` chunks, then a MIDI-style
+  event stream with running status. Two packing rules:
+  - If the last data byte of an event has bit 7 set, no delta time follows (delta 0). Otherwise a variable-length
+    delta follows.
+  - Note-off (`8n`) carries only the key.
+  - Parser: `tools/formats/sq.py`. Note-ons and note-offs balance in all four stage-1 files.
+- **What plays.** From stage start, `S1_NORMALA` and `S1_NORMALB` play together, both on `BGM/STAGE1_BANK`.
+  - That bank is resident in SPU2 RAM at halfword 0x10000; it matches the disc file byte for byte.
+  - At the same moment, 22 voices start at volume 0 with the chase-music samples. That's the game preparing the
+    chase music silently.
+- **Check** (`tools/research/bgm_check.py`, using the key-on log `HG_KONLOG`). Every note of both sequences matches
+  a key-on over a full 164 s pass plus the loop:
+  - 47 + 9 notes; worst timing error 3.3 ms, under one 240 Hz driver tick.
+  - Each key-on starts at the right bank sample (Vagi offset).
+  - Transposition is exact against the sample's native rate (root key 60).
+  - The envelope settings match the bank's Smpl records.
+- **Loop.** NRPN CC99 = 0 at tick 1 and CC99 = 1 at 163.2 s mark the loop. The second pass starts 163.2 s after
+  the first.
+- **Pitch bend over the loop.** Channel 2 bends fully down by 157.7 s, and its reset lies after the loop end.
+  So from the second pass on, that channel plays 2 semitones low. This is in the game's data, and the real driver
+  reproduces it.
+
+### Reverb
+
+- **Configuration.** The game configures core 1 for `SD_EFFECT_MODE_STUDIO_2`; the coefficients written are the
+  "Studio Medium" preset from psx-spx. 12 of the first 66 key-ons route voices to the effect send.
+- **The effect return volume (EVOL) stays 0.** It is set through SNDDRV RPC function 0x150000 (`+0x6934`, which
+  writes EVOL through `sceSdSetParam` at `+0xb830`).
+  - The EE wrapper is `FUN_0020ef50(snd, core, depth)`.
+  - Stage init (`FUN_0039d310`) explicitly calls it with depth 0 for both cores.
+  - The room script entry (`FUN_00209390`) does the same for core 1.
+  - So stage 1's opening room is dry by design, unless a later room script raises the depth.
+  - No reverb was audible anywhere in the tested content (title, menu, first room), so the reverb implementation
+    remains unverified.
+
 ## Bugs found on the way (fixed)
 
 - An exponential envelope decrease must use an arithmetic shift (`step * level >> 15`). Truncating division stalls release at level 1, so ENVX never reaches 0 and SNDDRV never frees the voice.
@@ -51,5 +88,5 @@ The IOP runs in lock-step with the EE VBlank: 1/59.94 s of IOP time per VBlank, 
 
 - Reverb is implemented from the PS1 formula with the PS2 register mapping, but it is not yet compared against hardware. The 24 kHz resampling uses the documented FIR.
 - No reference recordings yet (PCSX2 + the user's BIOS planned) to compare full mixes.
-- SNDDRV's BGM sequences (`BGM/*.SQ`) are loaded in stage 1 but not yet heard or verified.
+- Reverb depth is 0 in all tested content (see above); the reverb path needs a room that sets a depth, or a reference recording.
 - Speed: in 3D the host runs below real time (the software GS dominates; see the README). Headless WAV capture is unaffected because time is emulated.

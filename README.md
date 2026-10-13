@@ -21,8 +21,8 @@ Measured in the [boot test](docs/boot-test-report.md):
 - The recompiled code runs natively from the PS2 entry point. It gets through the C++ static constructors, `main` and the loading of all 12 IOP modules, mounts `DATA.CVM`, and reads real game files from it.
 - Controller (DBCMAN/libpad2) and memory card (MCSERV/libmc, backed by a host folder) are emulated at the IOP level. Input is scripted for now (`HG_PAD`).
 - Movies are skipped at the CRI MWPLY level, as if each one had finished.
-- A software GS renders the 2D front end: CRI and Dolby logos, the violence notice, the title animation, the title screen and the main menu. Pressing Start and Cross starts a new game and stage 1 loads.
-- 3D is not drawn yet: the game's VU1 microprograms are not executed.
+- A software GS renders the logos, title, menu and, through a VU1 interpreter running the game's own microprograms, the 3D of stage 1 with its full-screen effect passes. Rendering runs on its own thread with AVX2 paths; in stage 1 the build runs at about half of real time on a 2-core VM ([renderer performance](docs/renderer-performance.md)).
+- Sound comes from the game's own IOP drivers on an emulated IOP and SPU2: sound effects, CRI ADX streams (bit-exact against an independent decode) and SNDDRV background music (every note checked against the sequence and bank; see the [audio notes](docs/phase2-audio-notes.md)).
 
 ## Building (Linux, experimental)
 
@@ -33,8 +33,8 @@ cd recomp
 python3 bulk2.py gen 16          # generate C (~15–40 s)
 make -j2                         # compile (~1–3 min)
 mkdir -p /tmp/frames
-HG_FRAMES=/tmp/frames HG_PAD=600:cross,900:cross,1200:cross,1500:cross,2300:start,2700:cross \
-  ./hgboot -q -t 60 > run.log    # run for 60 s; frames go to /tmp/frames, a summary ends the log
+HG_FRAMES=/tmp/frames HG_MAXVB=2600 HG_PAD=600:cross,900:cross,1200:cross,1500:cross,1800:cross,2100:cross \
+  ./hgboot -q -t 600 > run.log   # New Game into stage 1 (VBlank ~2200); frames go to /tmp/frames, a summary ends the log
 ```
 
 With SDL2 installed (`libsdl2-dev`) the build opens a window and takes live input; just run `./hgboot` (no time limit when windowed, Esc quits, F11 toggles fullscreen). `HG_WINDOW=0` forces headless mode.

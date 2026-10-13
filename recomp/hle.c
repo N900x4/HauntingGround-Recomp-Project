@@ -2,6 +2,7 @@
    hardware-register defaults. Everything is logged so the stop point says what the game waited on. */
 #define _GNU_SOURCE
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ucontext.h>
@@ -321,6 +322,13 @@ static void iop_rpc(Bind *b, uint32_t fn, uint32_t sbuf, uint32_t ssize, uint32_
         break; }
     case 0x80000593: { /* CDVD S_CMD */
         uint32_t v = 1;
+        if (fn == 0x01 && recv) {          /* ReadClock: result, then sceCdCLOCK {stat, sec, min, hour, pad, day, month, year} in BCD, JST like the console's RTC */
+            time_t t = time(0) + 9 * 3600; struct tm tm; gmtime_r(&t, &tm);
+            #define BCD(x) (uint8_t)((((x) / 10) << 4) | ((x) % 10))
+            uint8_t c[8] = { 0, BCD(tm.tm_sec), BCD(tm.tm_min), BCD(tm.tm_hour), 0, BCD(tm.tm_mday), BCD(tm.tm_mon + 1), BCD(tm.tm_year % 100) };
+            #undef BCD
+            memcpy(gptr(recv + 4), c, 8);
+        }
         if (fn == 0x03) v = 0x14;          /* GetDiskType: PS2 DVD */
         else if (fn == 0x04) v = 0;        /* GetError: none */
         if (recv) W32(recv, v);

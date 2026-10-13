@@ -39,6 +39,14 @@ Last commit before this doc: `bf60152`.
   `framecmp.py`, `ps2mc.py`; `HG_VTXLOG`, `HG_VU1DUMP`, Z buffer in `HG_PIXWATCH`.
 - Method that worked: same frame in both (static camera), PCSX2 GS dump vs our `HG_VTXLOG`/`HG_PIXWATCH`; the
   first vertex that differs points at the bug.
+- **Outside area**: two explorer runs of 30,000 VBlanks each (seeds 1 and 2) covered `ST_02A` (gate, garden paths,
+  fountain, terraces) and `ST_013` (upper terrace with the two lamps and the stairs to the castle door), with no crash or
+  hang. Frames look clean; the `ST_013` wedge holes are gone. `tools/verify/pcsx2_teleport_cmp.py` teleports Fiona in
+  PCSX2 (PINE) to each explorer position and compares windows: where the cameras agree, the images agree. Limits:
+  cameras have history (hysteresis), so a teleport often gets a different camera; a monologue text box pauses PCSX2
+  (the tool taps Cross first).
+- **Next**: compare the room interiors after `ST_013` (outfit change, `ST_021`) from the loaded save; sound against a
+  reference the user trusts (not PCSX2); saving from our build; the faint haze offset over the far wall in stage 1.
 
 ## Rules (from the user)
 

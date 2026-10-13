@@ -2,7 +2,7 @@
 
 A static recompiler that turns **your own copy** of *Haunting Ground* (PS2, NTSC-U SLUS-21075) into a native PC program, with the long-term goal of a remastered Windows and Linux version: 4K rendering, high-resolution textures, 60 fps, and Hewie voiced with real dog recordings.
 
-> **Status: early research.** The recompiled game boots through the logos, title and menu into the first room, where Fiona can be walked around. The 3D is drawn by a software GS through a VU1 interpreter. Sound comes from the game's own IOP sound drivers (Capcom SNDDRV, CRI ADX) running on an emulated IOP with an SPU2 core; the stage ambience is bit-exact against an independent decode. Movies are skipped, graphics accuracy is not yet checked against reference frames, and 3D runs below real time. It is **not playable** yet. See the [roadmap](#roadmap), [phase 1 notes](docs/phase1-runtime-notes.md) and [audio notes](docs/phase2-audio-notes.md).
+> **Status: early research.** The recompiled game boots through the logos, title and menu into the first room, where Fiona can be walked around. The 3D is drawn by a software GS through a VU1 interpreter. Sound comes from the game's own IOP sound drivers (Capcom SNDDRV, CRI ADX) running on an emulated IOP with an SPU2 core; the stage ambience is bit-exact against an independent decode. Movies play through an emulated IPU running the game's own Sofdec player (pictures match an independent decoder within IDCT rounding; movie sound is bit-exact). Graphics accuracy is not yet checked against reference frames, and 3D runs below real time. It is **not playable** yet. See the [roadmap](#roadmap), [phase 1 notes](docs/phase1-runtime-notes.md) and [audio notes](docs/phase2-audio-notes.md).
 
 ## How it works
 
@@ -20,7 +20,7 @@ Measured in the [boot test](docs/boot-test-report.md):
 
 - The recompiled code runs natively from the PS2 entry point. It gets through the C++ static constructors, `main` and the loading of all 12 IOP modules, mounts `DATA.CVM`, and reads real game files from it.
 - Controller (DBCMAN/libpad2) and memory card (MCSERV/libmc, backed by a host folder) are emulated at the IOP level. Input is scripted for now (`HG_PAD`).
-- Movies are skipped at the CRI MWPLY level, as if each one had finished.
+- Movies (logo, intro, opening cinematic) play: the game's own CRI Sofdec player runs on an emulated IPU with its DMA channels ([movie notes](docs/movies-ipu.md)). `HG_MOVIES=skip` skips them.
 - A software GS renders the logos, title, menu and, through a VU1 interpreter running the game's own microprograms, the 3D of stage 1 with its full-screen effect passes. Rendering runs on its own thread with AVX2 paths; in stage 1 the build runs at about half of real time on a 2-core VM ([renderer performance](docs/renderer-performance.md)).
 - Sound comes from the game's own IOP drivers on an emulated IOP and SPU2: sound effects, CRI ADX streams (bit-exact against an independent decode) and SNDDRV background music (every note checked against the sequence and bank; see the [audio notes](docs/phase2-audio-notes.md)).
 
@@ -33,8 +33,8 @@ cd recomp
 python3 bulk2.py gen 16          # generate C (~15–40 s)
 make -j2                         # compile (~1–3 min)
 mkdir -p /tmp/frames
-HG_FRAMES=/tmp/frames HG_MAXVB=2600 HG_PAD=600:cross,900:cross,1200:cross,1500:cross,1800:cross,2100:cross \
-  ./hgboot -q -t 600 > run.log   # New Game into stage 1 (VBlank ~2200); frames go to /tmp/frames, a summary ends the log
+HG_FRAMES=/tmp/frames HG_MAXVB=16000 HG_PAD=1500:start,1800:start,2100:cross \
+  ./hgboot -q -t 3000 > run.log  # skip the intro, New Game, opening cinematic, stage 1; frames go to /tmp/frames
 ```
 
 With SDL2 installed (`libsdl2-dev`) the build opens a window and takes live input; just run `./hgboot` (no time limit when windowed, Esc quits, F11 toggles fullscreen). `HG_WINDOW=0` forces headless mode.

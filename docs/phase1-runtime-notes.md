@@ -26,7 +26,7 @@ HG_PAD=600:cross,900:cross,1200:cross,1500:cross,2300:start,2700:cross,2900:cros
 | `HG_GAME_DIR` | Folder with `SLUS_210.75` and `DATA.CVM` (default `../game`) |
 | `HG_PAD` | Scripted input: `vblank[:-end]:button[+button]`, comma-separated. A single VBlank holds for 6 VBlanks. Buttons: select l3 r3 start up right down left l2 r2 l1 r1 triangle circle cross square |
 | `HG_MEMCARD_DIR` | Memory-card root; port 0 = `<dir>/port0` (default `../memcards`, git-ignored). Port 1 is empty |
-| `HG_MOVIES` | `play` disables the movie skip (movies then hang on the unemulated IPU) |
+| `HG_MOVIES` | `skip` skips movies (they play by default since the IPU is emulated; see movies-ipu.md) |
 | `HG_FRAMES`, `HG_FRAME_EVERY` | Write the displayed frame as PPM every N VBlanks (default 60) |
 | `HG_TRACE`, `HG_PEEK`, `HG_DUMPSID` | Debug aids (function-entry trace, memory peek at stop, RPC send-buffer dump) |
 
@@ -54,7 +54,7 @@ HG_PAD=600:cross,900:cross,1200:cross,1500:cross,2300:start,2700:cross,2900:cros
 - Every SFD goes through a CRI MWPLY handle (static handle 0x3e893c, function table 0x3e8758): +0x18 StartFname 0x23b618, +0x1c Stop 0x23b8e8, +0x20 GetStat 0x23c9a8 (3 = play end).
 - The decoder (0x2a2xxx) drives the IPU registers directly. Without an IPU it parses forever inside one frame.
 - With the skip on, StartFname starts nothing and GetStat reports "play end". The game's movie object (vtable 0x46ea60, update 0x2b6510) then destroys itself and clears `*(0x44e958)`, which is what the boot step 0x37f7d0 waits for. Start also skips the logo movie in the real game.
-- Phase 2 option: HLE at the MWPLY level (decode the SFD on the host), not IPU emulation.
+- Superseded (2026-10-13): the IPU is now emulated and movies play through the game's own player; this skip is only used with `HG_MOVIES=skip`. See [movies-ipu.md](movies-ipu.md).
 
 ## Graphics (`recomp/gs.c`, `recomp/dmac.c`)
 

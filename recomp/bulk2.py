@@ -37,3 +37,4 @@ tab += ['const uint32_t rec_func_end[] = {'] + [f'  0x{e:x}u,' for e in ends] + 
 open(os.path.join(out, 'table.c'), 'w').write('\n'.join(tab) + '\n')
 print(f'{len(bounds)} functions ({len(ctors)} ctors), {sum(e - s for s, e in bounds) // 4} insns, {time.time() - t0:.1f}s; '
       f'unimplemented sites {len(u.unimpl)}: {collections.Counter(m for a, m in u.unimpl).most_common(12)}')
+import vu1gen; print(vu1gen.generate(out, GAME))

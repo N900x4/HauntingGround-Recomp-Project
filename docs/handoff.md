@@ -20,6 +20,19 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### Session 2026-10-13, VU1 ahead-of-time compilation
+
+- `recomp/vu1gen.py` (run by `bulk2.py`) extracts the 19 VU1 programs from the ELF and writes `gen/vu1_aot_NN.c`.
+  Every instruction pair is the interpreter's own `step()` (`recomp/vu1_core.h`) on constant words, so decode and
+  dispatch fold away and the semantics cannot drift. Functions are cut at 64 pairs; one big function per program
+  took 14 minutes to compile, and now the whole build takes 1.5 minutes. After an MPG upload the program in micro
+  memory is identified by its code. Anything outside the compiled code goes to the interpreter with the exact
+  state. `HG_VU1AOT=0` turns it off; it is not used with a non-default `HG_VUSTALL` or `HG_VUFLAGDELAY`.
+- Checked: frames identical to `hashA.md5`, and `HG_VU1CHECK` (which now checks the compiled code against
+  `vu1_ref.c`) found 0 mismatches in 2,000,000 runs, with no handovers to the interpreter.
+- Speed in stage 1 with drawing off (`HG_GSDRAW=0`): VU1 went from 9.9 to 7.4 ms per VBlank, and the whole EE
+  thread needs 11.2 ms per VBlank (1.49x real time). The GS thread is now the only thing between us and full speed.
+
 ### Session 2026-10-13, later (move to Windows)
 
 - **Windows port** (commit `da1c36f`): MSYS2 UCRT64 build, `recomp/compat.c` replaces the Linux-only calls (see the

@@ -30,7 +30,7 @@ Measured in the [boot test](docs/boot-test-report.md):
 python3 tools/ingest.py /path/to/your/HauntingGround.iso game   # NTSC-U v1.01 only for now
 # or, to use files already extracted elsewhere: export HG_GAME_DIR=/path/with/SLUS_210.75+DATA.CVM
 cd recomp
-python3 bulk2.py gen 16          # generate C (~15–40 s)
+python3 bulk2.py gen 16          # generate C, including the 19 VU1 programs (~15–40 s)
 make -j2                         # compile (~1–3 min)
 mkdir -p /tmp/frames
 HG_FRAMES=/tmp/frames HG_MAXVB=16000 HG_PAD=1500:start,1800:start,2100:cross \

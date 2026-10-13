@@ -16,9 +16,12 @@ ifneq ($(SDL_LIBS),)
 SDL_CFLAGS += -DHAVE_SDL
 endif
 RTFLAGS = -O1 -g -Wall -Wno-unused -fno-strict-aliasing -I. -Igen
-GENSRC = $(wildcard gen/part*.c) gen/table.c
+GENSRC = $(wildcard gen/part*.c) gen/table.c $(wildcard gen/vu1_aot_*.c)
 GENOBJ = $(patsubst gen/%.c,obj/%.o,$(GENSRC))
 all: $(EXE)
+# VU1 programs compiled ahead of time (vu1gen.py): the flags of vu1.c, whose semantics they inline
+obj/vu1_aot_%.o: gen/vu1_aot_%.c vu1_core.h ee_runtime.h hle.h
+	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -ffp-contract=off -g0 -c $< -o $@
 obj/%.o: gen/%.c ee_runtime.h
 	@mkdir -p obj
 	$(CC) $(GENFLAGS) -c $< -o $@
@@ -36,7 +39,7 @@ obj/dmac.o: dmac.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/host_sdl.o: host_sdl.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) $(SDL_CFLAGS) -c $< -o $@
-obj/vu1.o: vu1.c ee_runtime.h hle.h vu1_state.h
+obj/vu1.o: vu1.c vu1_core.h ee_runtime.h hle.h vu1_state.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -ffp-contract=off -c $< -o $@
 obj/ipu.o: ipu.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -c $< -o $@

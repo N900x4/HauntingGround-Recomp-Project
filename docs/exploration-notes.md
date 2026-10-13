@@ -35,3 +35,19 @@
 - **Reverb:** no area reached changes the reverb depth. Only the stage-init calls (depth 0) were seen.
 - **Memory card:** the boot check creates nothing. Saving needs an in-game save point, which the explorer has not
   reached. Story progress (doors, items, events) is beyond a wall-following explorer.
+
+## Where this stopped (2026-10-13, at the user's request)
+
+- **Save point (from the user):** the first save point is the **clock in the room after Fiona changes from the towel
+  into her normal outfit**. Reaching it is the way to test memory-card save/reload and to look for a room that
+  turns reverb on.
+- **Explorer change:** when blocked, it now presses Cross before turning (doors open with Cross).
+  `HG_EXPLORE_SEED` picks the random route.
+- **Last runs:** two seeds, stopped at about VBlank 6000 when the user asked to stop. Both reached `ST_013` and
+  `ST_00D` (seed 2 went back to `ST_013`). Neither reached the outfit change.
+- **Next:** script a route to the outfit-change room and the clock, by watching the area loads and Fiona's
+  position. Once real-time play works, that can also be done by hand. Then:
+  - save at the clock;
+  - check the files written under `HG_MEMCARD_DIR`;
+  - reload from LOAD GAME;
+  - watch reverb depth there (`HG_TRACE=20ef50`, `HG_SPUREGLOG=78c-78e`).

@@ -65,7 +65,8 @@ static uint16_t explore(uint64_t vb) {
     static long start = -2; if (start == -2) start = getenv("HG_EXPLORE") ? atol(getenv("HG_EXPLORE")) : -1;
     if (start < 0 || (long)vb < start) return 0;
     static const int dirs[4] = { B_UP, B_RIGHT, B_DOWN, B_LEFT };
-    static int dir; static float lx, lz; static uint32_t rng = 12345; static long since;
+    static int dir; static float lx, lz; static uint32_t rng; static long since, stuck_at = -1000;
+    if (!rng) rng = getenv("HG_EXPLORE_SEED") ? (uint32_t)atol(getenv("HG_EXPLORE_SEED")) : 12345;
     uint32_t obj = 0; memcpy(&obj, gptr(0x44f818), 4);
     float x = 0, y = 0, z = 0;
     if (obj) { memcpy(&x, gptr(obj + 0x10), 4); memcpy(&y, gptr(obj + 0x14), 4); memcpy(&z, gptr(obj + 0x18), 4); }
@@ -73,12 +74,13 @@ static uint16_t explore(uint64_t vb) {
     if (t % 30 == 0) {
         float moved = fabsf(x - lx) + fabsf(z - lz);
         since += 30;
-        if ((moved < 1.0f && since >= 60) || since >= 900) { rng = rng * 1103515245u + 12345u; dir = (dir + 1 + (int)((rng >> 16) % 3)) & 3; since = 0; }
+        if (moved < 1.0f && since >= 60 && stuck_at < t - 90) stuck_at = t;   /* blocked: try Cross (doors, objects) for a moment first */
+        else if ((moved < 1.0f && since >= 60 && t - stuck_at >= 60) || since >= 900) { rng = rng * 1103515245u + 12345u; dir = (dir + 1 + (int)((rng >> 16) % 3)) & 3; since = 0; }
         lx = x; lz = z;
     }
     if (t % 60 == 0) L("explore: VBlank %llu pos %.1f %.1f %.1f (obj 0x%x) dir %s\n", (unsigned long long)vb, x, y, z, obj, bnames[dirs[dir]]);
     uint16_t h = 1u << dirs[dir];
-    if (t % 120 < 6) h |= 1u << B_CROSS;
+    if (t % 120 < 6 || (t - stuck_at >= 6 && t - stuck_at < 12) || (t - stuck_at >= 30 && t - stuck_at < 36)) h |= 1u << B_CROSS;
     return h;
 }
 void pad_vblank(uint64_t vb) {

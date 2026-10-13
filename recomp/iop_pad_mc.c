@@ -78,7 +78,8 @@ static uint16_t explore(uint64_t vb) {
         else if ((moved < 1.0f && since >= 60 && t - stuck_at >= 60) || since >= 900) { rng = rng * 1103515245u + 12345u; dir = (dir + 1 + (int)((rng >> 16) % 3)) & 3; since = 0; }
         lx = x; lz = z;
     }
-    if (t % 60 == 0) L("explore: VBlank %llu pos %.1f %.1f %.1f (obj 0x%x) dir %s\n", (unsigned long long)vb, x, y, z, obj, bnames[dirs[dir]]);
+    if (t % 60 == 0) { uint32_t stg = 0; if (obj) memcpy(&stg, gptr(obj + 0x30), 4);   /* +0x30: stage number (0x2a = ST_02A) */
+        L("explore: VBlank %llu stage %x pos %.1f %.1f %.1f (obj 0x%x) dir %s\n", (unsigned long long)vb, stg, x, y, z, obj, bnames[dirs[dir]]); }
     uint16_t h = 1u << dirs[dir];
     if (t % 120 < 6 || (t - stuck_at >= 6 && t - stuck_at < 12) || (t - stuck_at >= 30 && t - stuck_at < 36)) h |= 1u << B_CROSS;
     return h;

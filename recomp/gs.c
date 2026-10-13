@@ -220,6 +220,10 @@ static inline uint32_t texel(const TexState *t, int u, int v) {
     case CT16: case CT16S: return c16to32(read_px(t->tbp, t->tbw, t->psm, u, v), t->aem, t->ta0, t->ta1);
     case T8: case T8H: return clut[read_px(t->tbp, t->tbw, t->psm, u, v) & 255];
     case T4: case T4HL: case T4HH: return clut[((t->cpsm == CT32 ? (t->csa & 15) : t->csa) * 16 + read_px(t->tbp, t->tbw, t->psm, u, v)) & 255];
+    /* depth formats used as textures (depth-based effects): the Z layouts, read like CT32/CT24/CT16 */
+    case Z32: return read_px(t->tbp, t->tbw, Z32, u, v);
+    case Z24: { uint32_t c = read_px(t->tbp, t->tbw, Z32, u, v) & 0xFFFFFF; return c | (uint32_t)((t->aem && !c) ? 0 : t->ta0) << 24; }
+    case Z16: case Z16S: return c16to32(read_px(t->tbp, t->tbw, t->psm, u, v), t->aem, t->ta0, t->ta1);
     }
     return read_px(t->tbp, t->tbw, CT32, u, v);
 }
@@ -1010,6 +1014,12 @@ static void draw_line(const Draw *d, const Vtx *a, const Vtx *b) {
 static int gs_nodraw; static long gs_draw_from;
 static void vertex_kick(Vtx v, int draw) {
     Draw d; int prim = BITS(r_prim, 0, 3);
+    {   /* HG_VTXLOG=path:vb writes every vertex kicked during that VBlank and the next (x, y in 1/16 pixel with offset, z, drawing kick) */
+        static FILE *vf; static long vvb = -2;
+        if (vvb == -2) { const char *e = getenv("HG_VTXLOG"); vvb = -1; if (e) { char buf[512]; snprintf(buf, sizeof buf, "%s", e); char *c = strrchr(buf, ':'); if (c) { *c = 0; vvb = atol(c + 1); vf = fopen(buf, "w"); } } }
+        if (vf && (long)cur_vb >= vvb && (long)cur_vb < vvb + 2) fprintf(vf, "%d %d %u %d %d\n", v.x, v.y, v.z, draw, prim);
+        if (vf && (long)cur_vb >= vvb + 2) { fclose(vf); vf = 0; }
+    }
     static const int need[8] = { 1, 2, 2, 3, 3, 3, 2, 1 };
     vq[nvq++] = v;
     if (nvq < need[prim]) return;

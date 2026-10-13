@@ -276,6 +276,55 @@ static void q_commit(void) { if (q_wait) { q_reg = q_pend; q_wait = 0; } }
 static void p_commit(void) { if (p_wait) { p_reg = p_pend; p_wait = 0; } }
 static void p_issue(float v, int lat) { p_commit(); p_pend = clampf(v); p_wait = lat; }
 static void q_issue(float v, int lat) { q_commit(); q_pend = clampf(v); q_wait = lat; }
+
+/* Pipeline stalls (on by default; HG_VUSTALL=0 turns them off): a VF result (upper FMAC or lower-unit write) becomes readable 4 cycles after
+   issue, and an instruction pair that reads a field before then waits; a DIV/SQRT/RSQRT waits for a busy FDIV.
+   Q, P and flag latencies then elapse in cycles (stalls included), not in instructions. */
+static int vu_stall = -1;
+static uint64_t vf_rdy[32][4], acc_rdy;
+static inline uint64_t rdy(int r, int mask) {
+    uint64_t m = 0; if (!r) return 0;
+    for (int i = 0; i < 4; i++) if ((mask & (8 >> i)) && vf_rdy[r][i] > m) m = vf_rdy[r][i];
+    return m;
+}
+static inline void set_rdy(int r, int mask, uint64_t c) { if (r) for (int i = 0; i < 4; i++) if (mask & (8 >> i)) vf_rdy[r][i] = c; }
+static inline uint64_t mx(uint64_t a, uint64_t b) { return a > b ? a : b; }
+static int stall_cycles(const Dec *d) {
+    uint64_t need = 0;
+    switch (d->uk) {
+    case U_ARITH:
+        need = rdy(d->fs, d->dest);
+        if (d->bsrc == B_VEC) need = mx(need, rdy(d->ft, d->dest)); else if (d->bsrc == B_BC) need = mx(need, rdy(d->ft, 8 >> d->bc));
+        if (d->kind == K_MADD || d->kind == K_MSUB) need = mx(need, acc_rdy);
+        break;
+    case U_OPMULA: need = mx(rdy(d->fs, 0xE), rdy(d->ft, 0xE)); break;
+    case U_OPMSUB: need = mx(mx(rdy(d->fs, 0xE), rdy(d->ft, 0xE)), acc_rdy); break;
+    case U_ITOF: case U_FTOI: case U_ABS: need = rdy(d->fs, d->dest); break;
+    case U_CLIP: need = mx(rdy(d->fs, 0xE), rdy(d->ft, 1)); break;
+    }
+    if (!d->ibit) switch (d->lk) {
+    case L_SQ: case L_SQI: case L_SQD: case L_MOVE: need = mx(need, rdy(d->lfs, d->ldest)); break;
+    case L_MR32: case L_EFU: need = mx(need, rdy(d->lfs, 0xF)); break;
+    case L_MTIR: case L_RINIT: case L_RXOR: need = mx(need, rdy(d->lfs, 8 >> d->fsf)); break;
+    case L_DIV: case L_RSQRT: need = mx(need, mx(rdy(d->lfs, 8 >> d->fsf), rdy(d->lft, 8 >> d->ftf))); /* fall through */
+    case L_SQRT: if (d->lk == L_SQRT) need = mx(need, rdy(d->lft, 8 >> d->ftf));
+        if (q_wait > 1) need = mx(need, vcyc + (uint64_t)q_wait - 1);
+        break;
+    }
+    return need > vcyc ? (int)(need - vcyc) : 0;
+}
+static void note_writes(const Dec *d) {
+    const uint64_t c = vcyc + 4;
+    switch (d->uk) {
+    case U_ARITH: if (d->to_acc) acc_rdy = c; else set_rdy(d->fd, d->dest, c); break;
+    case U_OPMULA: acc_rdy = c; break;
+    case U_OPMSUB: set_rdy(d->fd, 0xE, c); break;
+    case U_ITOF: case U_FTOI: case U_ABS: set_rdy(d->ft, d->dest, c); break;
+    }
+    if (!d->ibit) switch (d->lk) {
+    case L_LQ: case L_LQI: case L_LQD: case L_MOVE: case L_MR32: case L_MFIR: case L_MFP: case L_RGET: case L_RNEXT: set_rdy(d->lft, d->ldest, c); break;
+    }
+}
 static int kick_check;
 static void kick(uint32_t addr) {
     n_kicks++;
@@ -391,12 +440,15 @@ static void vu1_run_inner(uint32_t start) {
     int ebit_pending = 0, branch_pending = 0; uint32_t branch_tgt = 0;
     int prev_vi = -1; uint16_t prev_old = 0;
     vf[0].f[0] = vf[0].f[1] = vf[0].f[2] = 0; vf[0].f[3] = 1.0f; vi[0] = 0;
+    if (vu_stall) { memset(vf_rdy, 0, sizeof vf_rdy); acc_rdy = 0; }   /* the pipeline has drained between program runs */
     for (long n = 0; n < 4000000; n++) {
         const Dec *d = decoded(pc);
         n_insns++; vcyc++;
+        int st = vu_stall ? stall_cycles(d) : 0;
+        vcyc += (uint64_t)st;
         if (fq_n) flag_commit(0);
-        if (q_wait && --q_wait == 0) q_reg = q_pend;
-        if (p_wait && --p_wait == 0) p_reg = p_pend;
+        if (q_wait) { q_wait -= 1 + st; if (q_wait <= 0) { q_wait = 0; q_reg = q_pend; } }
+        if (p_wait) { p_wait -= 1 + st; if (p_wait <= 0) { p_wait = 0; p_reg = p_pend; } }
         /* WAITQ/WAITP stall the whole instruction pair until the result arrives, so an upper op in the same pair
            (e.g. MULq next to WAITQ in the game's epilogue) already sees the new Q or P. */
         if (!d->ibit) { if (d->lk == L_WAITQ) q_commit(); else if (d->lk == L_WAITP) p_commit(); }
@@ -405,6 +457,7 @@ static void vu1_run_inner(uint32_t start) {
         if (d->ibit) memcpy(&i_reg, &d->iimm, 4);           /* I bit: lower word is a float immediate */
         else taken = lower(d, pc, prev_vi, prev_old, &wvi, &wold, &tgt);
         upper_commit(&ur);
+        if (vu_stall) note_writes(d);
         vi[0] = 0; vf[0].f[0] = vf[0].f[1] = vf[0].f[2] = 0; vf[0].f[3] = 1.0f;
         prev_vi = wvi; prev_old = wold;
         uint32_t next = (pc + 1) & 2047;
@@ -459,7 +512,8 @@ void vu1_run(uint32_t start) {
     static int init, check;
     if (!init) {
         init = 1; check = getenv("HG_VU1CHECK") != 0;
-        flag_delay = getenv("HG_VUFLAGDELAY") ? atoi(getenv("HG_VUFLAGDELAY")) : 0;   /* 4 matches the FMAC pipeline, but stalls are not modelled: off until checked against a reference */
+        flag_delay = getenv("HG_VUFLAGDELAY") ? atoi(getenv("HG_VUFLAGDELAY")) : 0;
+        vu_stall = getenv("HG_VUSTALL") ? atoi(getenv("HG_VUSTALL")) : 1;   /* 4 matches the FMAC pipeline, but stalls are not modelled: off until checked against a reference */
         for (int m = 0; m < 16; m++) {
             rev4[m] = (uint8_t)(((m & 1) << 3) | ((m & 2) << 1) | ((m & 4) >> 1) | ((m & 8) >> 3));
             lane_mask[m] = _mm_setr_epi32(m & 8 ? -1 : 0, m & 4 ? -1 : 0, m & 2 ? -1 : 0, m & 1 ? -1 : 0);

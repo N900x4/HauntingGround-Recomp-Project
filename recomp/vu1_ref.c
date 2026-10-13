@@ -11,6 +11,7 @@
 #include <string.h>
 #include <math.h>
 #include <float.h>
+#include <stdlib.h>
 #include "ee_runtime.h"
 #include "hle.h"
 
@@ -289,17 +290,80 @@ void vu1ref_get(Vu1State *s) {
     s->q = q_reg; s->p = p_reg; s->i = i_reg; s->q_pend = q_pend; s->p_pend = p_pend; s->q_wait = q_wait; s->p_wait = p_wait;
     s->r = r_reg; s->mac = mac; s->status = status; s->clip = clip;
 }
+/* Pipeline stalls (default on, HG_VUSTALL=0 off), decoded independently of vu1.c from the raw words: a VF field written by either
+   unit is readable 4 cycles after issue; a pair reading it earlier waits, and an FDIV op waits for a busy FDIV.
+   Q/P latencies then count cycles. */
+static uint64_t ref_cyc, ref_rdy[33][4];   /* register 32 = ACC */
+static int ref_stall_on = -1;
+static uint64_t ref_need(int r, int mask) { uint64_t m = 0; if (r == 0) return 0; for (int i = 0; i < 4; i++) if (mask & (8 >> i) && ref_rdy[r][i] > m) m = ref_rdy[r][i]; return m; }
+static void ref_set(int r, int mask, uint64_t c) { if (r == 0) return; for (int i = 0; i < 4; i++) if (mask & (8 >> i)) ref_rdy[r][i] = c; }
+#define NEED(r, m) do { uint64_t n_ = ref_need((r), (m)); if (n_ > need) need = n_; } while (0)
+static int ref_stall(uint32_t up, uint32_t lo) {
+    uint64_t need = 0;
+    int op = up & 63, dest = (up >> 21) & 15, ft = (up >> 16) & 31, fs = (up >> 11) & 31, bc = up & 3;
+    if ((op & 0x3C) != 0x3C) {
+        if (op < 0x1C) { NEED(fs, dest); NEED(ft, 8 >> bc); if (op >= 8 && op < 16) NEED(32, dest); }
+        else if (op < 0x28) { NEED(fs, dest); if (op == 0x21 || op == 0x23 || op == 0x25 || op == 0x27) NEED(32, dest); }
+        else if (op == 0x2E) { NEED(fs, 0xE); NEED(ft, 0xE); NEED(32, 0xE); }
+        else { NEED(fs, dest); NEED(ft, dest); if (op == 0x29 || op == 0x2D) NEED(32, dest); }
+    } else {
+        int sop = ((up >> 6) & 31) << 2 | (up & 3);
+        if (sop < 0x10 || (sop >= 0x18 && sop < 0x1C)) { NEED(fs, dest); NEED(ft, 8 >> bc); if (sop >= 8 && sop < 16) NEED(32, dest); }
+        else if (sop < 0x18 || sop == 0x1D) NEED(fs, dest);
+        else if (sop == 0x1F) { NEED(fs, 0xE); NEED(ft, 1); }
+        else if (sop == 0x2E) { NEED(fs, 0xE); NEED(ft, 0xE); }
+        else if ((sop >= 0x1C && sop <= 0x27 && sop != 0x1D && sop != 0x1F)) { NEED(fs, dest); if (sop == 0x21 || sop == 0x23 || sop == 0x25 || sop == 0x27) NEED(32, dest); }
+        else if (sop >= 0x28 && sop <= 0x2D && sop != 0x2B) { NEED(fs, dest); NEED(ft, dest); if (sop == 0x29 || sop == 0x2D) NEED(32, dest); }
+    }
+    if (!(up & 0x80000000u)) {
+        int lop = lo >> 25, ld = (lo >> 21) & 15, lft = (lo >> 16) & 31, lfs = (lo >> 11) & 31, fsf = (lo >> 21) & 3, ftf = (lo >> 23) & 3;
+        if (lop == 0x01) NEED(lfs, ld);
+        else if (lop == 0x40 && (lo & 0x3C) == 0x3C) {
+            int s2 = ((lo >> 6) & 31) << 2 | (lo & 3);
+            if (s2 == 0x30 || s2 == 0x35 || s2 == 0x37) NEED(lfs, ld);
+            else if (s2 == 0x31 || (s2 >= 0x70 && s2 <= 0x7E && s2 != 0x77 && s2 != 0x7B)) NEED(lfs, 0xF);
+            else if (s2 == 0x3C || s2 == 0x42 || s2 == 0x43) NEED(lfs, 8 >> fsf);
+            if (s2 == 0x38 || s2 == 0x3A) { NEED(lfs, 8 >> fsf); NEED(lft, 8 >> ftf); }
+            if (s2 == 0x39) NEED(lft, 8 >> ftf);
+            if ((s2 == 0x38 || s2 == 0x39 || s2 == 0x3A) && q_wait > 1 && ref_cyc + (uint64_t)q_wait - 1 > need) need = ref_cyc + (uint64_t)q_wait - 1;
+        }
+    }
+    return need > ref_cyc ? (int)(need - ref_cyc) : 0;
+}
+static void ref_writes(uint32_t up, uint32_t lo) {
+    const uint64_t c = ref_cyc + 4;
+    int op = up & 63, dest = (up >> 21) & 15, ft = (up >> 16) & 31, fd = (up >> 6) & 31;
+    if ((op & 0x3C) != 0x3C) ref_set(fd, op == 0x2E ? 0xE : dest, c);
+    else {
+        int sop = ((up >> 6) & 31) << 2 | (up & 3);
+        if (sop < 0x10 || (sop >= 0x18 && sop <= 0x2D && sop != 0x1D && sop != 0x1F && sop != 0x2B) || sop == 0x2E) ref_set(32, sop == 0x2E ? 0xE : dest, c);
+        else if (sop < 0x18 || sop == 0x1D) ref_set(ft, dest, c);
+    }
+    if (!(up & 0x80000000u)) {
+        int lop = lo >> 25, ld = (lo >> 21) & 15, lft = (lo >> 16) & 31;
+        if (lop == 0x00) ref_set(lft, ld, c);
+        else if (lop == 0x40 && (lo & 0x3C) == 0x3C) {
+            int s2 = ((lo >> 6) & 31) << 2 | (lo & 3);
+            if (s2 == 0x30 || s2 == 0x31 || s2 == 0x34 || s2 == 0x36 || s2 == 0x3D || s2 == 0x40 || s2 == 0x41 || s2 == 0x64) ref_set(lft, ld, c);
+        }
+    }
+}
+#undef NEED
 static void vu1_run_inner(uint32_t start) {
     n_runs++;
     uint32_t pc = start & 2047;
     int ebit_pending = 0, branch_pending = 0; uint32_t branch_tgt = 0;
     uint16_t vi_before_prev[16]; int prev_vi = -1;
     vf[0].f[0] = vf[0].f[1] = vf[0].f[2] = 0; vf[0].f[3] = 1.0f; vi[0] = 0;
+    if (ref_stall_on < 0) ref_stall_on = getenv("HG_VUSTALL") ? atoi(getenv("HG_VUSTALL")) : 1;
+    memset(ref_rdy, 0, sizeof ref_rdy);                /* the pipeline has drained between program runs */
     for (long n = 0; n < 4000000; n++) {
         uint32_t lo, up; memcpy(&lo, vu1_code + pc * 8, 4); memcpy(&up, vu1_code + pc * 8 + 4, 4);
-        n_insns++;
-        if (q_wait && --q_wait == 0) q_reg = q_pend;
-        if (p_wait && --p_wait == 0) p_reg = p_pend;
+        n_insns++; ref_cyc++;
+        int st = ref_stall_on ? ref_stall(up, lo) : 0;
+        ref_cyc += (uint64_t)st;
+        if (q_wait) { q_wait -= 1 + st; if (q_wait <= 0) { q_wait = 0; q_reg = q_pend; } }
+        if (p_wait) { p_wait -= 1 + st; if (p_wait <= 0) { p_wait = 0; p_reg = p_pend; } }
         uint16_t vi_snap[16]; memcpy(vi_snap, vi, sizeof vi);
         if (!(up & 0x80000000u) && lo >> 25 == 0x40 && (lo & 0x3C) == 0x3C) {   /* WAITQ/WAITP stall the pair: the upper op sees the new Q/P */
             uint32_t op2 = ((lo >> 6) & 31) << 2 | (lo & 3);
@@ -310,6 +374,7 @@ static void vu1_run_inner(uint32_t start) {
         if (up & 0x80000000u) { memcpy(&i_reg, &lo, 4); }           /* I bit: lower word is a float immediate */
         else taken = lower(lo, pc, &wrote_vf, &wrote_vi, vi_before_prev, prev_vi, &tgt);
         upper_commit(&ur, wrote_vf);
+        if (ref_stall_on) ref_writes(up, lo);
         vi[0] = 0; vf[0].f[0] = vf[0].f[1] = vf[0].f[2] = 0; vf[0].f[3] = 1.0f;
         memcpy(vi_before_prev, vi_snap, sizeof vi_snap); prev_vi = wrote_vi;
         uint32_t next = (pc + 1) & 2047;

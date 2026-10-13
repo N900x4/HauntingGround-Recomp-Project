@@ -37,6 +37,18 @@ HG_FRAMES=/tmp/frames HG_MAXVB=16000 HG_PAD=1500:start,1800:start,2100:cross \
   ./hgboot -q -t 3000 > run.log  # skip the intro, New Game, opening cinematic, stage 1; frames go to /tmp/frames
 ```
 
+### Windows (MSYS2 UCRT64, experimental)
+
+Install [MSYS2](https://www.msys2.org/), then in an MSYS2 shell: `pacman -S make mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-SDL2 mingw-w64-ucrt-x86_64-pkgconf`. Ingest and generate with any Python 3 as above, then build and run from the **UCRT64** shell (it puts `SDL2.dll` on the `PATH`):
+
+```sh
+cd recomp
+make -j16                        # builds hgboot.exe
+./hgboot.exe                     # window with live input; HG_WINDOW=0 ./hgboot.exe -q for headless runs
+```
+
+The Windows build replaces the Linux-only calls in `compat.c`: fibers instead of ucontext, a timer thread instead of SIGPROF/SIGALRM (the profile samples wall time, not CPU time), VirtualAlloc, and its own glob matcher for memory-card directory listings.
+
 With SDL2 installed (`libsdl2-dev`) the build opens a window and takes live input; just run `./hgboot` (no time limit when windowed, Esc quits, F11 toggles fullscreen). `HG_WINDOW=0` forces headless mode.
 
 | PS2 | Keyboard | Gamepad |

@@ -15,6 +15,7 @@
 int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph);
 
 #ifdef HAVE_SDL
+#define SDL_MAIN_HANDLED          /* our own main(): no SDL2main, and the console stays */
 #include <SDL.h>
 
 enum { B_SELECT = 0, B_L3, B_R3, B_START, B_UP, B_RIGHT, B_DOWN, B_LEFT, B_L2, B_R2, B_L1, B_R1, B_TRIANGLE, B_CIRCLE, B_CROSS, B_SQUARE };
@@ -37,7 +38,11 @@ static const struct { SDL_GameControllerButton b; int bit; } padmap[] = {
     { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, B_RIGHT },
 };
 
-int host_window_wanted(void) { const char *w = getenv("HG_WINDOW"); return !(w && !strcmp(w, "0")) && (getenv("DISPLAY") || getenv("WAYLAND_DISPLAY")); }
+int host_window_wanted(void) { const char *w = getenv("HG_WINDOW"); return !(w && !strcmp(w, "0"))
+#ifndef _WIN32
+        && (getenv("DISPLAY") || getenv("WAYLAND_DISPLAY"))
+#endif
+        ; }
 int host_window_active(void) { return active == 1; }
 static void open_pad(int idx) {
     if (pad || !SDL_IsGameController(idx)) return;
@@ -46,6 +51,7 @@ static void open_pad(int idx) {
 }
 static int host_init(void) {
     if (!host_window_wanted()) return 0;
+    SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) { L("host: SDL_Init failed: %s (running headless)\n", SDL_GetError()); return 0; }
     int scale = getenv("HG_SCALE") ? atoi(getenv("HG_SCALE")) : 2; if (scale < 1) scale = 1;
     win = SDL_CreateWindow("Haunting Ground Recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640 * scale, 448 * scale, SDL_WINDOW_RESIZABLE);

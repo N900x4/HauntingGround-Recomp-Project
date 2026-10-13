@@ -1,7 +1,7 @@
 #!/bin/sh
 # usage: runhash.sh BINARY OUT.md5 MAXVB [GSDRAW]  -> frames every 5 VBlanks hashed (md5 of the PPM) and deleted as they appear
 S=${HG_SCRATCH:-${TMPDIR:-/tmp}}
-export HG_GAME_DIR="/home/kali/ps2-work/Haunting Ground/iso"
+export HG_GAME_DIR="${HG_GAME_DIR:-$(cd "$(dirname "$0")/../../game" && pwd)}"
 export HG_MOVIES=${HG_MOVIES:-skip}   # the HG_PAD timeline below is the movie-skip one
 D=$(mktemp -d $S/fr.XXXX); M=$(mktemp -d $S/mc.XXXX)
 if [ -n "$4" ]; then export HG_GSDRAW=$4; fi

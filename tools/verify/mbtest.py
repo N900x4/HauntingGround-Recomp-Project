@@ -1,5 +1,8 @@
+import os
+REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+GAME = os.environ.get('HG_GAME_DIR', os.path.join(REPO, 'game'))
 import re,sys
-src=open('/home/kali/ps2-work/HauntingGround-Recomp-Project/recomp/ipu.c').read()
+src=open(os.path.join(REPO, 'recomp', 'ipu.c')).read()
 tab=src[src.index('static const Vlc t_dct0[]'):]
 tab=tab[:tab.index('VLC_END')]
 dct={c:(int(a),int(b)) for c,a,b in re.findall(r'\{"([01]+)",(-?\d+),(-?\d+)\}',tab)}

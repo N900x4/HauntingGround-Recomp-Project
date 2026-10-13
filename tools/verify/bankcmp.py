@@ -1,6 +1,9 @@
 import os
+REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+GAME = os.environ.get('HG_GAME_DIR', os.path.join(REPO, 'game'))
+import os
 import sys, struct, numpy as np
-sys.path.insert(0, '/home/kali/ps2-work/HauntingGround-Recomp-Project/tools/formats')
+sys.path.insert(0, os.path.join(REPO, 'tools', 'formats'))
 import hdbd
 exec(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),'adxcmp.py')).read().split("ext,sz=found[sys.argv[1]]")[0].replace('sys.argv[1]','X'))
 def rd(p):

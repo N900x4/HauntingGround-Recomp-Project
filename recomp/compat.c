@@ -1,0 +1,162 @@
+/* Host services that differ between Linux and Windows; see compat.h. */
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include "compat.h"
+#include "ee_runtime.h"
+#include "hle.h"
+extern const int rec_nfuncs;
+
+#ifdef _WIN32
+#include <windows.h>
+#include <direct.h>
+
+void *host_alloc(size_t sz) {
+    void *p = VirtualAlloc(0, sz, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!p) stop("VirtualAlloc of %zu bytes failed", sz);
+    return p;
+}
+int host_ncpus(void) { SYSTEM_INFO si; GetSystemInfo(&si); return (int)si.dwNumberOfProcessors; }
+void host_gmtime(time_t t, struct tm *out) { gmtime_s(out, &t); }
+int host_mkdir(const char *path) { return _mkdir(path); }
+/* *, ? and [...] (with ! or ^ negation and ranges), backslash escapes; no special case for '/' or a leading '.' */
+int host_fnmatch(const char *p, const char *s) {
+    for (;; p++, s++) {
+        switch (*p) {
+        case 0: return *s ? 1 : 0;
+        case '?': if (!*s) return 1; break;
+        case '*':
+            while (*p == '*') p++;
+            if (!*p) return 0;
+            for (; *s; s++) if (!host_fnmatch(p, s)) return 0;
+            return 1;
+        case '[': {
+            if (!*s) return 1;
+            const char *q = p + 1; int neg = *q == '!' || *q == '^', hit = 0; if (neg) q++;
+            do { char lo = *q, hi = lo; if (q[1] == '-' && q[2] && q[2] != ']') { hi = q[2]; q += 2; }
+                 if ((unsigned char)*s >= (unsigned char)lo && (unsigned char)*s <= (unsigned char)hi) hit = 1; q++; } while (*q && *q != ']');
+            if (!*q) { if (*s != '[') return 1; break; }   /* no closing ']': literal '[' */
+            if (hit == neg) return 1;
+            p = q; break; }
+        case '\\': if (p[1]) p++; /* fall through */
+        default: if (*p != *s) return 1;
+        }
+    }
+}
+
+static void *boot_fiber;
+static VOID CALLBACK fiber_entry(LPVOID fn) { ((void (*)(void))fn)(); stop("fiber function returned"); }
+void host_fiber_make(HostFiber *f, void (*fn)(void), size_t stack_size) {
+    if (f->h) { if (f->h == GetCurrentFiber()) stop("restarting the running fiber"); DeleteFiber(f->h); }
+    /* MXCSR (HG_FPRZ rounding) is thread state here: no FIBER_FLAG_FLOAT_SWITCH, so every fiber shares main()'s setting */
+    f->h = CreateFiberEx(64 << 10, stack_size, 0, fiber_entry, (LPVOID)fn);
+    if (!f->h) stop("CreateFiberEx failed (%lu)", GetLastError());
+}
+void host_fiber_switch(HostFiber *from, HostFiber *to) {
+    if (!boot_fiber) { boot_fiber = ConvertThreadToFiber(0); if (!boot_fiber) stop("ConvertThreadToFiber failed (%lu)", GetLastError()); }
+    if (!from->h) from->h = GetCurrentFiber();   /* the boot context */
+    SwitchToFiber(to->h);
+}
+
+static HANDLE main_thread;
+static void build_ord(void);
+static void (*cb_prof)(void), (*cb_alarm)(void);
+static DWORD WINAPI timer_main(LPVOID arg) {
+    (void)arg;
+    HANDLE t = CreateWaitableTimerExW(0, 0, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (!t) t = CreateWaitableTimerW(0, FALSE, 0);
+    LARGE_INTEGER due; due.QuadPart = -10000;          /* 1 ms, relative */
+    SetWaitableTimer(t, &due, 1, 0, 0, FALSE);
+    double next_alarm = host_now() + 1.0 / 60;
+    for (;;) {
+        WaitForSingleObject(t, INFINITE);
+        cb_prof();
+        double n = host_now();
+        if (n >= next_alarm) { next_alarm += 1.0 / 60; if (next_alarm < n) next_alarm = n + 1.0 / 60; cb_alarm(); }
+    }
+    return 0;
+}
+void host_start_timers(void (*prof)(void), void (*alarm)(void)) {
+    cb_prof = prof; cb_alarm = alarm;
+    build_ord();   /* now: the backtrace may run while the main thread is suspended (holding the heap lock, say) */
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &main_thread, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    HANDLE h = CreateThread(0, 64 << 10, timer_main, 0, 0, 0);
+    if (h) { SetThreadPriority(h, THREAD_PRIORITY_TIME_CRITICAL); CloseHandle(h); }
+}
+/* Symbols: frames in hgboot.exe are named by the translated guest function whose host code starts at or below the
+   address (the generated objects are linked first); frames past the last one are runtime code ("exe+offset" for
+   addr2line). Other modules are named by their DLL. */
+static int cmp_fn(const void *a, const void *b) { int x = *(const int *)a, y = *(const int *)b;
+    uintptr_t p = (uintptr_t)rec_table[x].fn, q = (uintptr_t)rec_table[y].fn; return p < q ? -1 : p > q; }
+static int *ord;
+static void build_ord(void) { ord = malloc(sizeof *ord * rec_nfuncs); for (int i = 0; i < rec_nfuncs; i++) ord[i] = i; qsort(ord, rec_nfuncs, sizeof *ord, cmp_fn); }
+static void print_frame(FILE *f, int k, uint64_t pc) {
+    if (!ord) build_ord();
+    HMODULE m = 0; char name[MAX_PATH] = "?";
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)(uintptr_t)pc, &m);
+    if (m != GetModuleHandleW(0)) { if (m) { GetModuleFileNameA(m, name, sizeof name); } const char *b = strrchr(name, '\\');
+        fprintf(f, "  [%2d] %s+0x%llx\n", k, b ? b + 1 : name, (unsigned long long)(pc - (uintptr_t)m)); return; }
+    fprintf(f, "  [%2d] exe+0x%llx", k, (unsigned long long)(pc - (uintptr_t)m));
+    int lo = 0, hi = rec_nfuncs - 1, r = -1;
+    while (lo <= hi) { int mid = (lo + hi) / 2; if ((uintptr_t)rec_table[ord[mid]].fn <= pc) { r = mid; lo = mid + 1; } else hi = mid - 1; }
+    if (r >= 0 && r < rec_nfuncs - 1) fprintf(f, "  guest 0x%08x+0x%llx", rec_table[ord[r]].addr, (unsigned long long)(pc - (uintptr_t)rec_table[ord[r]].fn));
+    else fprintf(f, "  (runtime)");
+    fprintf(f, "\n");
+}
+static void walk(FILE *f, CONTEXT *c) {
+    for (int k = 0; k < 64 && c->Rip; k++) {
+        print_frame(f, k, c->Rip);
+        DWORD64 img; PRUNTIME_FUNCTION rf = RtlLookupFunctionEntry(c->Rip, &img, 0);
+        if (!rf) { c->Rip = *(DWORD64 *)c->Rsp; c->Rsp += 8; continue; }   /* leaf function */
+        void *hd; DWORD64 est; RtlVirtualUnwind(UNW_FLAG_NHANDLER, img, c->Rip, rf, c, &hd, &est, 0);
+    }
+    fflush(f);
+}
+void host_backtrace(FILE *f) { CONTEXT c; RtlCaptureContext(&c); walk(f, &c); }
+void host_backtrace_main(FILE *f) {
+    _lock_file(f); SuspendThread(main_thread); _unlock_file(f);   /* not stopped inside the log stream's lock */
+    CONTEXT c; memset(&c, 0, sizeof c); c.ContextFlags = CONTEXT_FULL;
+    if (!GetThreadContext(main_thread, &c)) { fprintf(f, "  (GetThreadContext failed)\n"); return; }
+    walk(f, &c);
+}
+
+#else
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <signal.h>
+#include <unistd.h>
+#include <execinfo.h>
+#include <fnmatch.h>
+
+void *host_alloc(size_t sz) {
+    void *p = mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (p == MAP_FAILED) stop("mmap of %zu bytes failed", sz);
+    return p;
+}
+int host_ncpus(void) { return (int)sysconf(_SC_NPROCESSORS_ONLN); }
+void host_gmtime(time_t t, struct tm *out) { gmtime_r(&t, out); }
+int host_mkdir(const char *path) { return mkdir(path, 0755); }
+int host_fnmatch(const char *pat, const char *name) { return fnmatch(pat, name, 0); }
+
+void host_fiber_make(HostFiber *f, void (*fn)(void), size_t stack_size) {
+    if (!f->stack) { f->size = stack_size; f->stack = host_alloc(stack_size); }   /* kept across thread restarts */
+    getcontext(&f->uc); f->uc.uc_stack.ss_sp = f->stack; f->uc.uc_stack.ss_size = f->size; f->uc.uc_link = 0;
+    makecontext(&f->uc, fn, 0);
+}
+void host_fiber_switch(HostFiber *from, HostFiber *to) { swapcontext(&from->uc, &to->uc); }
+
+static void (*cb_prof)(void), (*cb_alarm)(void);
+static void on_prof(int sig) { (void)sig; cb_prof(); }
+static void on_alarm(int sig) { (void)sig; cb_alarm(); }
+void host_start_timers(void (*prof)(void), void (*alarm)(void)) {
+    cb_prof = prof; cb_alarm = alarm;
+    struct sigaction sa = {0}; sa.sa_handler = on_prof; sa.sa_flags = SA_RESTART; sigaction(SIGPROF, &sa, 0);
+    struct itimerval it = {{0, 1000}, {0, 1000}}; setitimer(ITIMER_PROF, &it, 0);
+    sa.sa_handler = on_alarm; sigaction(SIGALRM, &sa, 0);
+    struct itimerval ia = {{0, 16667}, {0, 16667}}; setitimer(ITIMER_REAL, &ia, 0);
+}
+void host_backtrace(FILE *f) { void *bt[64]; int n = backtrace(bt, 64); fflush(f); backtrace_symbols_fd(bt, n, fileno(f)); }
+#endif

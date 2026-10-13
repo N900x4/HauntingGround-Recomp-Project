@@ -10,13 +10,12 @@
 #include <string.h>
 #include <math.h>
 #include <strings.h>
-#include <fnmatch.h>
 #include <dirent.h>
 #include <errno.h>
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <unistd.h>
+#include "compat.h"
 #include "ee_runtime.h"
 #include "hle.h"
 
@@ -149,7 +148,7 @@ static const char *mc_dir(int port) {
     if (!mc_root[port][0]) {
         const char *b = getenv("HG_MEMCARD_DIR") ? getenv("HG_MEMCARD_DIR") : "../memcards";
         snprintf(mc_root[port], sizeof mc_root[port], "%s/port%d", b, port);
-        char tmp[1024]; snprintf(tmp, sizeof tmp, "%s", b); mkdir(tmp, 0755); mkdir(mc_root[port], 0755);
+        char tmp[1024]; snprintf(tmp, sizeof tmp, "%s", b); host_mkdir(tmp); host_mkdir(mc_root[port]);
     }
     return mc_root[port];
 }
@@ -163,7 +162,7 @@ static int mc_host(int port, const char *name, char *out, size_t n) {
     return 1;
 }
 static void mc_datetime(uint8_t *d, time_t t) {       /* sceMcStDateTime: resv, sec, min, hour, day, month, year16 (JST) */
-    t += 9 * 3600; struct tm tm; gmtime_r(&t, &tm);
+    t += 9 * 3600; struct tm tm; host_gmtime(t, &tm);
     d[0] = 0; d[1] = tm.tm_sec; d[2] = tm.tm_min; d[3] = tm.tm_hour; d[4] = tm.tm_mday; d[5] = tm.tm_mon + 1;
     uint16_t y = tm.tm_year + 1900; memcpy(d + 6, &y, 2);
 }
@@ -186,12 +185,12 @@ static int mc_getdir(int port, const char *name, uint32_t maxent_u, uint32_t tab
     int n = 0; struct dirent *de; struct stat st;
     if (!is_root && strpbrk(pat, "*?")) {                 /* real cards list "." and ".." inside a directory */
         stat(path, &st);
-        if (n < maxent && !fnmatch(pat, ".", 0)) { if (table) mc_entry(table + 64 * n, ".", &st); n++; }
-        if (n < maxent && !fnmatch(pat, "..", 0)) { if (table) mc_entry(table + 64 * n, "..", &st); n++; }
+        if (n < maxent && !host_fnmatch(pat, ".")) { if (table) mc_entry(table + 64 * n, ".", &st); n++; }
+        if (n < maxent && !host_fnmatch(pat, "..")) { if (table) mc_entry(table + 64 * n, "..", &st); n++; }
     }
     while ((de = readdir(d)) && n < maxent) {
         if (de->d_name[0] == '.') continue;
-        if (fnmatch(pat, de->d_name, 0)) continue;
+        if (host_fnmatch(pat, de->d_name)) continue;
         char fp[1400]; snprintf(fp, sizeof fp, "%s/%s", path, de->d_name);
         if (stat(fp, &st)) continue;
         if (table) mc_entry(table + 64 * n, de->d_name, &st);
@@ -203,7 +202,7 @@ static int mc_getdir(int port, const char *name, uint32_t maxent_u, uint32_t tab
 static int mc_open(int port, const char *name, uint32_t mode) {
     char path[1100]; if (!mc_host(port, name, path, sizeof path)) return MC_NOENTRY;
     struct stat st;
-    if (mode & 0x40) { if (!stat(path, &st)) return MC_NOENTRY; return mkdir(path, 0755) ? MC_NOENTRY : 0; }   /* sceMcMkdir */
+    if (mode & 0x40) { if (!stat(path, &st)) return MC_NOENTRY; return host_mkdir(path) ? MC_NOENTRY : 0; }   /* sceMcMkdir */
     int fd = 0; while (fd < 32 && mcfd[fd].f) fd++;
     if (fd == 32) return MC_UPLIMIT;
     int exists = !stat(path, &st);

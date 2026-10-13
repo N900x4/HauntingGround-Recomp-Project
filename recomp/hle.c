@@ -5,8 +5,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ucontext.h>
-#include <sys/mman.h>
+#include "compat.h"
 #include "ee_runtime.h"
 #include "hle.h"
 extern uint32_t cop0_status;
@@ -25,7 +24,7 @@ typedef struct {
     int used, status, prio, init_prio, wait_type, wait_id, wakeup, suspended;
     uint32_t entry, stack, stack_size, gp, attr, option, arg;
     uint64_t seq;
-    Ctx ctx; ucontext_t uc; void *hstack; size_t hsize;
+    Ctx ctx; HostFiber fib;
 } Thread;
 static Thread th[MAXT];
 static int cur = 1;
@@ -45,11 +44,6 @@ static int in_intr;
 static int dma_pending[16];
 
 #define SYSTAB 0x00010000u
-static void *host_stack(size_t sz) {
-    void *p = mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (p == MAP_FAILED) stop("mmap host stack failed");
-    return p;
-}
 static const char *stname(int s) { switch (s) { case THS_RUN: return "RUN"; case THS_READY: return "READY"; case THS_WAIT: return "WAIT"; case THS_DORMANT: return "DORMANT"; default: return "SUSP"; } }
 static void dump_threads(void) {
     for (int i = 1; i < MAXT; i++) if (th[i].used)
@@ -88,7 +82,7 @@ static void schedule(void) {
     if (th[prev].status == THS_RUN) th[prev].status = THS_READY;
     th[n].status = THS_RUN; nswitch++;
     if (bg_verbose > 1) L("switch %d -> %d\n", prev, n);
-    swapcontext(&th[prev].uc, &th[n].uc);
+    host_fiber_switch(&th[prev].fib, &th[n].fib);
 }
 static void thread_exit(int id) {
     th[id].status = THS_DORMANT; L("thread %d exited\n", id);
@@ -106,9 +100,7 @@ static void start_thread_ctx(int id, uint32_t arg) {
     t->ctx.r[4].u64[0] = arg; t->ctx.r[28].u64[0] = t->gp;
     t->ctx.r[29].u64[0] = (t->stack + t->stack_size - 0x40) & ~15u;
     t->ctx.r[31].u64[0] = 0xDEAD0000u; t->ctx.vf[0][3] = 1.0f;
-    if (!t->hstack) { t->hsize = 64 << 20; t->hstack = host_stack(t->hsize); }
-    getcontext(&t->uc); t->uc.uc_stack.ss_sp = t->hstack; t->uc.uc_stack.ss_size = t->hsize; t->uc.uc_link = 0;
-    makecontext(&t->uc, thread_trampoline, 0);
+    host_fiber_make(&t->fib, thread_trampoline, 64 << 20);
     t->wakeup = 0; t->suspended = 0; t->prio = t->init_prio;
     make_ready(id);
 }
@@ -213,6 +205,18 @@ static void fire_vblank(void) {
     if (!timing_wall) { if (!vb_init) { vb_init = 1; vb_deadline = ee_next_vb; } if (ee_cycles < vb_deadline) ee_cycles = vb_deadline; vb_deadline += ee_vb_period; }
     { static long maxvb = -1; if (maxvb < 0) maxvb = getenv("HG_MAXVB") ? atol(getenv("HG_MAXVB")) : 0;
       if (maxvb && (long)vblank_count >= maxvb) stop("reached HG_MAXVB=%ld", maxvb); }
+    {   /* HG_SPEEDLOG=n: every n VBlanks, emulated speed (real time = 59.94 VB/s) and host seconds per subsystem.
+           VU1 and IOP+SPU2 run on this thread; GS drawing runs on the GS thread when HG_MTGS is on (busy % of wall). */
+        static long every = -1; static double t0, p0[8]; static uint64_t v0;
+        if (every < 0) { every = getenv("HG_SPEEDLOG") ? atol(getenv("HG_SPEEDLOG")) : 0; t0 = host_now(); v0 = vblank_count; memcpy(p0, tprof, sizeof p0); }
+        if (every > 0 && vblank_count - v0 >= (uint64_t)every) {
+            double t = host_now(), dt = t - t0, n = (double)(vblank_count - v0);
+            L("SPEED vb %llu: %.1f VB/s = %.2fx real time; per VB %.2f ms: VU1 %.2f, IOP+SPU2 %.2f, other EE-thread %.2f; GS thread busy %.0f%%\n",
+              (unsigned long long)vblank_count, n / dt, n / dt / 59.94, dt / n * 1e3, (tprof[0] - p0[0]) / n * 1e3, (tprof[2] - p0[2]) / n * 1e3,
+              (dt - (tprof[0] - p0[0]) - (tprof[2] - p0[2])) / n * 1e3, (tprof[1] - p0[1]) / dt * 100);
+            t0 = t; v0 = vblank_count; memcpy(p0, tprof, sizeof p0);
+        }
+    }
     for (int c = 0; c < 16; c++) if (dma_pending[c] && c != 5) { dma_pending[c] = 0; raise_dmac(c); }
     iop_flush_idle();
     host_vblank(vblank_count);
@@ -323,7 +327,7 @@ static void iop_rpc(Bind *b, uint32_t fn, uint32_t sbuf, uint32_t ssize, uint32_
     case 0x80000593: { /* CDVD S_CMD */
         uint32_t v = 1;
         if (fn == 0x01 && recv) {          /* ReadClock: result, then sceCdCLOCK {stat, sec, min, hour, pad, day, month, year} in BCD, JST like the console's RTC */
-            time_t t = time(0) + 9 * 3600; struct tm tm; gmtime_r(&t, &tm);
+            time_t t = time(0) + 9 * 3600; struct tm tm; host_gmtime(t, &tm);
             #define BCD(x) (uint8_t)((((x) / 10) << 4) | ((x) % 10))
             uint8_t c[8] = { 0, BCD(tm.tm_sec), BCD(tm.tm_min), BCD(tm.tm_hour), 0, BCD(tm.tm_mday), BCD(tm.tm_mon + 1), BCD(tm.tm_year % 100) };
             #undef BCD
@@ -418,6 +422,7 @@ extern volatile int vblank_due;
 static uint64_t async_vblanks;
 /* called at safe points (indirect-call dispatch, ei, syscalls) when the 60 Hz host timer has ticked */
 void hle_async_tick(void) {
+    if (host_stop_req) host_stop_now();   /* Windows time limit, requested by the timer thread */
     if (in_intr || !(cop0_status & 0x10000u)) return;
     vblank_due = 0; async_vblanks++;
     service_events();
@@ -680,11 +685,9 @@ void hle_run_main(uint32_t entry) {
     memset(t, 0, sizeof *t);
     t->used = 1; t->entry = entry; t->prio = t->init_prio = 1; t->status = THS_RUN; t->seq = seqno++;
     t->ctx.r[29].u64[0] = 0x01FFFF00; t->ctx.r[31].u64[0] = 0xDEAD0000u; t->ctx.vf[0][3] = 1.0f;
-    t->hsize = 256 << 20; t->hstack = host_stack(t->hsize);
-    ucontext_t boot;
-    getcontext(&t->uc); t->uc.uc_stack.ss_sp = t->hstack; t->uc.uc_stack.ss_size = t->hsize; t->uc.uc_link = 0;
-    makecontext(&t->uc, main_trampoline, 0);
+    host_fiber_make(&t->fib, main_trampoline, 256 << 20);
+    HostFiber boot = {0};
     cur = 1;
-    swapcontext(&boot, &t->uc);
+    host_fiber_switch(&boot, &t->fib);
     stop("unexpected return to boot context");
 }

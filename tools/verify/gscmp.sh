@@ -1,7 +1,7 @@
 #!/bin/sh
 # usage: gscmp.sh BINARY OUTDIR  -> renders VB 2380-2520 of stage 1, compares with ref1
 S=${HG_SCRATCH:-${TMPDIR:-/tmp}}
-export HG_GAME_DIR="/home/kali/ps2-work/Haunting Ground/iso"
+export HG_GAME_DIR="${HG_GAME_DIR:-$(cd "$(dirname "$0")/../../game" && pwd)}"
 export HG_MOVIES=${HG_MOVIES:-skip}   # the HG_PAD timeline below is the movie-skip one
 rm -rf $S/mc5 $2; mkdir -p $2
 HG_GSDRAW=2380 HG_MAXVB=2520 HG_FRAMES=$2 HG_FRAME_EVERY=5 HG_WINDOW=0 HG_MEMCARD_DIR=$S/mc5 HG_PAD=600:cross,900:cross,1200:cross,1500:cross,1800:cross,2100:cross $1 -q -t 3000 > $2.log 2>&1

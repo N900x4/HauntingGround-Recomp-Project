@@ -1,6 +1,9 @@
 """usage: sfdaudio_check.py STREAM.raw /PATH.SFD  -> where the SFD's ADX track appears in an HG_ADMAWAV capture and how it matches"""
+import os
+REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+GAME = os.environ.get('HG_GAME_DIR', os.path.join(REPO, 'game'))
 import sys, numpy as np
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, '/home/kali/ps2-work/HauntingGround-Recomp-Project/tools/formats')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, os.path.join(REPO, 'tools', 'formats'))
 import cvm, adx
 cap = np.frombuffer(open(sys.argv[1], 'rb').read(), dtype=np.int16).reshape(-1, 2).astype(float)
 pcm, rate, ch = adx.decode(adx.sfd_audio(cvm.read(sys.argv[2]))); ref = pcm.astype(float)

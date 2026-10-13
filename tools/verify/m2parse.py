@@ -1,9 +1,12 @@
 """MPEG-2 video slice parser (no reconstruction) using the VLC tables from recomp/ipu.c, to check that every slice
 of a stream parses exactly up to the next start code. usage: m2parse.py /CVM/PATH.SFD [max_pictures]"""
+import os
+REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+GAME = os.environ.get('HG_GAME_DIR', os.path.join(REPO, 'game'))
 import sys, re, struct
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cvm
-src = open('/home/kali/ps2-work/HauntingGround-Recomp-Project/recomp/ipu.c').read()
+src = open(os.path.join(REPO, 'recomp', 'ipu.c')).read()
 def table(name):
     t = src[src.index('static const Vlc %s[]' % name):]; t = t[:t.index('VLC_END')]
     return {c: (int(a), int(b)) for c, a, b in re.findall(r'\{"([01]+)",(-?\w+),(-?\d+)\}', t.replace('0x', '').replace('-1,0', '-1,0'))} if False else \

@@ -62,12 +62,17 @@ Last commit before this doc: `bf60152`.
 
 ## Paths
 
-- Repo: `~/ps2-work/HauntingGround-Recomp-Project`. Game files: `HG_GAME_DIR="~/ps2-work/Haunting Ground/iso"`.
-  Full disc image: `~/ps2-work/Haunting Ground (USA).iso`.
-- PCSX2 2.8.2: extracted AppImage at `~/ps2-work/tools/pcsx2/` (`squashfs-root/`, data dir `data/`).
-- BIOS: `~/.config/PCSX2/bios/ps2-0220a-20060905.bin`, a US v2.20 BIOS, plus its `.mec` and `.nvm`. Copied
-  2026-10-13 from the user's shared folder `/mnt/hgfs/PS2 Games/bios/`; md5 `40c11c063b3b9409aa5e4058e984e30c`.
-- Verification scripts: `tools/verify/` (see below).
+Since 2026-10-13 the project lives on the user's Windows 11 PC (Ryzen 7 9800X3D, RTX 5090); the Linux VM is shut down.
+
+- Repo: `D:\ps2-work\HauntingGround-Recomp-Project`. Game files: ingested into `game/` (the default; no
+  `HG_GAME_DIR` needed). Disc image: `D:\PS2 Games\Haunting Ground (USA)\Haunting Ground (USA).iso`.
+- Build: MSYS2 UCRT64 at `C:\msys64` (gcc 16, make, SDL2, pkgconf). Run make and `hgboot.exe` from the UCRT64 shell,
+  or from another shell with `MSYSTEM=UCRT64 /c/msys64/usr/bin/bash.exe -lc '...'`.
+- BIOS: `D:\PS2 Games\bios\ps2-0220a-20060905.bin` (US v2.20, plus `.mec` and `.nvm`).
+- PCSX2: the user's Windows install, data in `C:\Users\USER\Documents\PCSX2`. The VM's save states, memory card and
+  settings are in `D:\ps2-work\HauntingGround-Recomp-transfer\pcsx2\`; not yet copied into the Windows install.
+- Verification scripts: `tools/verify/` (see below). Paths are repo-relative now; `pine.py` (Unix socket) and
+  `pcsx2_teleport_cmp.py` (X11 `import`) are still Linux-only.
 
 ## Waiting on the user
 
@@ -94,12 +99,15 @@ Last commit before this doc: `bf60152`.
 ## Common runs
 
 ```sh
-cd recomp && make -j2          # build: see the README for the ingest/generate steps
-export HG_GAME_DIR="$HOME/ps2-work/Haunting Ground/iso"
+cd recomp && make -j16         # in the MSYS2 UCRT64 shell; see the README for the ingest/generate steps
+# The memory card in ../memcards/port0 holds the user's saves, so the main menu opens on LOAD GAME.
+# New Game timelines need an empty card: HG_MEMCARD_DIR=<empty dir>.
 # with movies: logos → LOOP_DEMO skipped → title → New Game → OPENING (210 s) → stage at about VB 14400
-HG_PAD=1500:start,1800:start,2100:cross ./hgboot
-# movies skipped (old timeline, stage at about VB 2200)
-HG_MOVIES=skip HG_PAD=600:cross,900:cross,1200:cross,1500:cross,1800:cross,2100:cross ./hgboot
+HG_MEMCARD_DIR=/d/ps2-work/scratch/mc_empty HG_PAD=1500:start,1800:start,2100:cross ./hgboot.exe
+# movies skipped, New Game → stage 1 (3D from about VB 2400)
+HG_MEMCARD_DIR=/d/ps2-work/scratch/mc_empty HG_MOVIES=skip HG_PAD=600:cross,900:cross,1200:cross,1500:cross,1800:cross,2100:cross ./hgboot.exe
+# movies skipped, LOAD GAME → Castle Suite (ST_021) from the user's save (3D from about VB 3000)
+HG_MOVIES=skip HG_PAD=600:cross,900:cross,1200:cross,1500:cross,1800:cross,2100:cross,2400:cross,2600:cross,2800:cross ./hgboot.exe
 ```
 
 Useful switches:
@@ -119,6 +127,7 @@ Useful switches:
 | `HG_IPULOG`, `HG_IPUDUMP` | IPU log and picture dumps. |
 | `HG_ADMAWAV` | Movie and stream audio to a WAV file. |
 | `HG_VU1CHECK=1` | VU1 lockstep check. |
+| `HG_SPEEDLOG=n` | Every n VBlanks: emulated speed against real time, host ms per VBlank by subsystem. Headless runs are unthrottled; with a window the game is paced to real time. |
 
 ## Verification scripts (`tools/verify/`)
 

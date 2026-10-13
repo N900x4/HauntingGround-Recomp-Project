@@ -29,6 +29,8 @@ void vu1_dump_stats(void);
 /* host-time accounting per subsystem (seconds): 0 VU1, 1 GS drawing, 2 IOP+SPU2, 3 SPU2 mixing, 4 DMA/VIF */
 extern double tprof[8];
 double host_now(void);
+extern volatile int host_stop_req;   /* set by the Windows timer thread at the -t limit */
+void host_stop_now(void);
 /* iop_kernel.c: emulated IOP running the game's sound modules */
 int iop_load_module(const char *path, const char *args, int arg_len);
 int iop_rpc_find(uint32_t sid, uint32_t *sd, uint32_t *buf, uint32_t *cbuf);

@@ -1,7 +1,10 @@
+import os
+REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+GAME = os.environ.get('HG_GAME_DIR', os.path.join(REPO, 'game'))
 import sys, struct, numpy as np
-sys.path.insert(0, '/home/kali/ps2-work/HauntingGround-Recomp-Project/tools/formats')
+sys.path.insert(0, os.path.join(REPO, 'tools', 'formats'))
 import adx
-CVM='/home/kali/ps2-work/Haunting Ground/iso/DATA.CVM'; HDR=3
+CVM=os.path.join(GAME, 'DATA.CVM'); HDR=3
 f=open(CVM,'rb')
 def sec(n,c=1): f.seek((n+HDR)*2048); return f.read(2048*c)
 pvd=sec(16); root=pvd[156:190]

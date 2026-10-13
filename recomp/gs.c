@@ -10,9 +10,9 @@
 #include <string.h>
 #include <math.h>
 #include <pthread.h>
-#include <unistd.h>
 #include <time.h>
 #include <stdatomic.h>
+#include "compat.h"
 #include "ee_runtime.h"
 #include "hle.h"
 #if defined(__x86_64__)
@@ -1441,7 +1441,7 @@ void gs_init(uint8_t *priv) {
 #endif
     if (getenv("HG_GSDRAW")) { gs_draw_from = atol(getenv("HG_GSDRAW")); if (gs_draw_from == 0) gs_draw_from = -1; gs_nodraw = 1; }
     const char *m = getenv("HG_MTGS");
-    mtgs = m ? strcmp(m, "0") != 0 : sysconf(_SC_NPROCESSORS_ONLN) >= 2;
+    mtgs = m ? strcmp(m, "0") != 0 : host_ncpus() >= 2;
     if (mtgs) {
         ring = calloc(RING, sizeof *ring);
         if (!ring || pthread_create(&gs_thread, 0, gs_main, 0)) { L("GS: no GS thread, running single-threaded\n"); mtgs = 0; }

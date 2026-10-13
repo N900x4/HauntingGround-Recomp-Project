@@ -2,7 +2,7 @@
    - 32 MB EE RAM, 16 KB scratchpad, trapped EE/GS/VU register space
    - ELF load, entry at 0x100008 (crt0 does SetupThread/SetupHeap itself)
    - dispatcher for indirect jumps (address -> host function), unknown target = stop
-   - EE kernel HLE: syscalls, cooperative priority threads (ucontext fibers), semaphores,
+   - EE kernel HLE: syscalls, cooperative priority threads (fibers: ucontext or Win32), semaphores,
      INTC/DMAC handlers fired from a virtual VBlank clock when all threads block / on CSR polls
    - instrumentation: unique functions entered, total calls, first-entry order, syscall and HW-register counts */
 #define _GNU_SOURCE
@@ -10,13 +10,9 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
-#include <signal.h>
-#include <ucontext.h>
-#include <sys/mman.h>
-#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
-#include <execinfo.h>
+#include "compat.h"
 #include "ee_runtime.h"
 #include "hle.h"
 
@@ -108,6 +104,7 @@ void rec_first(int i) { if (n_first < MAXF) first_order[n_first++] = i; }
 
 /* ------------------------------------------------------------------ dispatcher */
 volatile int vblank_due;
+volatile int host_stop_req;
 uint64_t ee_cycles, ee_next_vb = 1ull << 62, ee_vb_period;
 int timing_wall;   /* HG_TIMING=wall: VBlank from the host clock (old behaviour) */
 extern void hle_async_tick(void);
@@ -144,6 +141,7 @@ static uint64_t ld(uint8_t *p, int size) { uint64_t v = 0; memcpy(&v, p, size); 
 static void st(uint8_t *p, uint64_t v, int size) { memcpy(p, &v, size); }
 
 uint64_t hw_read(uint32_t a, int size) {
+    if (__builtin_expect(host_stop_req, 0)) host_stop_now();
     uint8_t *p = ram_alias(a);
     if (p) return ld(p, size);
     uint32_t pa = a & 0x1FFFFFFF;
@@ -155,6 +153,7 @@ uint64_t hw_read(uint32_t a, int size) {
     return 0;
 }
 void hw_write(uint32_t a, uint64_t v, int size) {
+    if (__builtin_expect(host_stop_req, 0)) host_stop_now();
     uint8_t *p = ram_alias(a);
     if (p) { st(p, v, size); return; }
     uint32_t pa = a & 0x1FFFFFFF;
@@ -169,9 +168,25 @@ void hw_write128(uint32_t a, const GPR *r) { hw_write(a, r->u64[0], 8); hw_write
 uint8_t *gptr(uint32_t a) { if (a < 0x02000000) return ee_ram + a; uint8_t *p = ram_alias(a); return p ? p : ee_ram; }
 
 /* ------------------------------------------------------------------ profiling + time limit */
-static void on_prof(int sig) { (void)sig; int i = func_containing(rec_cur); if (i < 0) i = func_index(rec_cur); if (i >= 0) prof_hist[i]++; }
+static void on_prof(void) { int i = func_containing(rec_cur); if (i < 0) i = func_index(rec_cur); if (i >= 0) prof_hist[i]++; }
 static double time_limit = -1;   /* -t seconds; default 60 headless, unlimited with a window */
-static void on_alarm(int sig) { (void)sig; if (timing_wall) vblank_due = 1; if (time_limit > 0 && now() - t_start > time_limit) { void *bt[64]; int n = backtrace(bt, 64); fprintf(logf_, "host backtrace (guest call chain, innermost first):\n"); fflush(logf_); backtrace_symbols_fd(bt, n, fileno(logf_)); dump_stats("wall-clock time limit (probably a busy-wait loop; see profile)"); _exit(0); } }
+static void time_limit_stop(void) { fprintf(logf_, "host backtrace (guest call chain, innermost first):\n"); host_backtrace(logf_); dump_stats("wall-clock time limit (probably a busy-wait loop; see profile)"); _exit(0); }
+void host_stop_now(void) { host_stop_req = 0; time_limit_stop(); }
+static void on_alarm(void) {
+    if (timing_wall) vblank_due = 1;
+    if (time_limit > 0 && now() - t_start > time_limit) {
+#ifdef _WIN32
+        /* on the timer thread: ask the main thread to stop at its next safe point (dispatcher, syscall, hardware
+           register access). Stopping it from here could leave the GS ring mutex or a stdio lock held. */
+        static double asked; if (!asked) { asked = now(); host_stop_req = 1; vblank_due = 1; return; }
+        if (now() - asked < 2) return;
+        fprintf(logf_, "main thread reached no safe point within 2 s; its host stack:\n"); host_backtrace_main(logf_);
+        fprintf(logf_, "==== STOP: wall-clock time limit (main thread unresponsive, no stats)\n"); fflush(logf_); _exit(0);
+#else
+        time_limit_stop();
+#endif
+    }
+}
 
 /* ------------------------------------------------------------------ main */
 extern void hle_init(void);
@@ -207,16 +222,13 @@ int main(int argc, char **argv) {
     { double ips = getenv("HG_EE_MIPS") ? atof(getenv("HG_EE_MIPS")) * 1e6 : 300e6;   /* guest instructions per second (EE 294.9 MHz at about one instruction per cycle; 150 starves movie audio) */
       ee_vb_period = (uint64_t)(ips / 59.94); ee_next_vb = timing_wall ? (1ull << 62) : ee_vb_period; }
     const char *exe = getenv("HG_ELF") ? getenv("HG_ELF") : game_path("SLUS_210.75");
-    ee_ram = mmap(0, 32 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ee_ram = host_alloc(32 << 20);
     FILE *f = fopen(exe, "rb"); if (!f) { perror(exe); return 1; }
     fseek(f, 0x80, SEEK_SET);
     if (fread(ee_ram + 0x100000, 1, 0x37B200, f) != 0x37B200) { fprintf(stderr, "short read\n"); return 1; }
     fclose(f);
     t_start = now();
-    struct sigaction sa = {0}; sa.sa_handler = on_prof; sa.sa_flags = SA_RESTART; sigaction(SIGPROF, &sa, 0);
-    struct itimerval it = {{0, 1000}, {0, 1000}}; setitimer(ITIMER_PROF, &it, 0);
-    sa.sa_handler = on_alarm; sigaction(SIGALRM, &sa, 0);
-    struct itimerval ia = {{0, 16667}, {0, 16667}}; setitimer(ITIMER_REAL, &ia, 0);
+    host_start_timers(on_prof, on_alarm);
     hle_init();
     extern void overrides_init(void); overrides_init();
     if (getenv("HG_PRESS")) { char *p = getenv("HG_PRESS"); while (*p && npress < 16) { press_at[npress++] = strtol(p, &p, 10); while (*p == ',') p++; }

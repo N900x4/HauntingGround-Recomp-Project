@@ -617,6 +617,7 @@ int iop_rpc_call(uint32_t sd, uint32_t fno, uint32_t size, uint32_t recv, uint32
     if (s < 0 || nrq >= 64) return 0;
     if (getenv("HG_RPCLOG")) L("IOP: RPC queued sid 0x%08x fn 0x%x size %u rsize %u  [%08x %08x %08x %08x] vb %llu\n", srv[s].sid, fno, size, rsize,
         RD32(srv[s].buf), RD32(srv[s].buf + 4), RD32(srv[s].buf + 8), RD32(srv[s].buf + 12), (unsigned long long)vblanks);
+    if (getenv("HG_RPCLOG")) { L("    words 4-11:"); for (int k = 4; k < 12; k++) L(" %08x", RD32(srv[s].buf + 4 * k)); L("\n"); }
     Req *r = &rq[nrq++]; r->srv = s; r->fno = fno; r->size = size; r->recv = recv; r->rsize = rsize; memcpy(r->endpkt, endpkt, 32);
     for (int i = 1; i < MAXTH; i++) if (th[i].status == TS_WAIT && th[i].wait == W_RPC && th[i].rpc_qd == srv[s].qd) { serve_next(i); break; }
     iop_run_until(now, 2000000);

@@ -151,6 +151,11 @@ static void key_on(int c, int n) {
     endx[c] &= ~(1u << n);
     decode_block(c, v);
     n_keyon++;
+    static FILE *kl; static int kinit;
+    if (!kinit) { kinit = 1; const char *p = getenv("HG_KONLOG"); if (p) kl = fopen(p, "w"); }
+    if (kl) fprintf(kl, "%llu %d %d ssa=%05x pitch=%04x adsr=%04x/%04x vol=%04x/%04x vmix=%d%d%d%d\n", (unsigned long long)n_samples, c, n, v->addr,
+                    reg[VREG(c, n, 4)], reg[VREG(c, n, 6)], reg[VREG(c, n, 8)], reg[VREG(c, n, 0)], reg[VREG(c, n, 2)],
+                    (mask24(c, 0x188) >> n) & 1, (mask24(c, 0x190) >> n) & 1, (mask24(c, 0x18C) >> n) & 1, (mask24(c, 0x194) >> n) & 1);
 }
 static void key_off(int c, int n) { Voice *v = &voice[c][n]; if (v->phase != PH_OFF) { v->phase = PH_RELEASE; v->adsr.counter = 0; } }
 static void adsr_tick(int c, int n, Voice *v) {
@@ -402,6 +407,8 @@ void spu2_write(uint32_t off, uint32_t v, int size) {
     if (size == 4) { spu2_write(off, v & 0xFFFF, 2); spu2_write(off + 2, v >> 16, 2); return; }
     uint32_t i = (off & 0x7FF) >> 1;
     int core = off >= 0x400 && off < 0x760 ? 1 : 0, r = off & 0x3FF;
+    static long rl_lo = -2, rl_hi; if (rl_lo == -2) { const char *p = getenv("HG_SPUREGLOG"); rl_lo = -1; if (p) { char *e; rl_lo = strtol(p, &e, 16); rl_hi = *e == '-' ? strtol(e + 1, 0, 16) : rl_lo; } }
+    if (rl_lo >= 0 && (long)(off & 0x7FF) >= rl_lo && (long)(off & 0x7FF) <= rl_hi) L("SPU2 reg %03x = %04x (t %.3f s) iop pc %08x ra %08x\n", off & 0x7FF, v & 0xFFFF, n_samples / 48000.0, iop.pc, iop.r[31]);
     if (off < 0x760) {
         if (r == 0x1A0 || r == 0x1A2) { uint32_t m = r == 0x1A0 ? (v & 0xFFFF) : (v & 0xFF) << 16; for (int n = 0; n < 24; n++) if (m & (1u << n)) key_on(core, n); return; }
         if (r == 0x1A4 || r == 0x1A6) { uint32_t m = r == 0x1A4 ? (v & 0xFFFF) : (v & 0xFF) << 16; for (int n = 0; n < 24; n++) if (m & (1u << n)) key_off(core, n); return; }
@@ -441,4 +448,5 @@ void spu2_dump_stats(void) {
         reg[CORE(c, 0x19A)], pair(c, 0x19C), irq_armed[c], reg[CORE(c, 0x198)], reg[CORE(c, 0x1B0)], (uint16_t)preg(c, 0), (uint16_t)preg(c, 2), (uint16_t)preg(c, 0xC), (uint16_t)preg(c, 0xE),
         (uint16_t)preg(c, 4), (uint16_t)preg(c, 6), pair(c, 0x2E0), in_pos[c], adma_queued(c));
     spu2_flush_output(); wav_close();
+    if (getenv("HG_SPUDUMP")) { FILE *f = fopen(getenv("HG_SPUDUMP"), "wb"); if (f) { fwrite(spu_ram, 2, 1 << 20, f); fclose(f); } }
 }

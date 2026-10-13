@@ -11,6 +11,9 @@
 #include <math.h>
 #include "ee_runtime.h"
 #include "hle.h"
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 /* ================================================================== local memory and swizzling */
 static uint32_t vm[1 << 20];                     /* 4 MB = 1M words */
@@ -331,6 +334,197 @@ static void vtx_uv(const Draw *d, const Vtx *v, float *u, float *w) {
     if (d->fst) { *u = v->u; *w = v->v; }
     else { float q = v->q != 0 ? v->q : 1.0f; *u = v->s / q * d->tex.tw * 16.0f; *w = v->t / q * d->tex.th * 16.0f; }
 }
+/* Sprite fast path: same arithmetic as pixel()/shade() for the common full-screen pass setups (32-bit frame buffer,
+   no destination alpha test, alpha test off or always, no fog, Z either untouched or a Z32/Z24 buffer), with the
+   scissor test and the frame/Z row addressing hoisted out of the pixel loop. Output is identical to the generic path. */
+static inline int sprite_span_ok(const Draw *d) {
+    if (d->fb16 || d->fpsm != CT32 || d->date || (d->ate && d->atst != 1) || d->fge) return 0;
+    if (d->zte && (d->ztst == 0 || ((d->zread || !d->zmsk) && d->zpsm != Z32 && d->zpsm != Z24))) return 0;
+    return 1;
+}
+/* One sprite row. TEX: 0 none, 1 CT32 nearest, 2 any other (sample()); TFX: 0-3; BL: 0 off, 1 on. The fields of *d are
+   copied to locals because vm stores could otherwise alias them (-fno-strict-aliasing) and force reloads per pixel. */
+static inline __attribute__((always_inline)) void sprite_row(const Draw *d, const Vtx *b, int y, int px0, int px1, int x0, float u0, float du, int v16,
+                                                           const int TEX, const int TFX, const int TCC, const int BL) {
+    const uint32_t fbp = d->fbp, fbw = d->fbw, fbmsk = d->fbmsk, zbp = d->zbp, zpsm = d->zpsm, vcol = b->rgba, z = b->z;
+    const int zread = d->zte && d->zread, zwrite = d->zte && !d->zmsk, ztst = d->ztst, need_dst = d->need_dst;
+    const int pabe = d->pabe, fba = d->fba, colclamp = d->colclamp, sa = d->a, sb = d->b, sc = d->cc, sd = d->d, fix = d->fix;
+    const uint32_t zcmp = zpsm == Z24 ? z & 0xFFFFFF : z;
+    const uint32_t fbase = fbp * 64 + (uint32_t)(y >> 5) * fbw * 2048, zbase = zbp * 64 + (uint32_t)(y >> 5) * fbw * 2048;
+    const uint32_t *xo = xoff32[y & 31], *xz = xoff32z[y & 31];
+    const TexState tx = d->tex;
+    uint32_t tbase = 0; const uint32_t *txo = xoff32[0];
+    if (TEX == 1) { int v = wrap(v16 >> 4, tx.th, tx.wmt, tx.minv, tx.maxv); tbase = tx.tbp * 64 + (uint32_t)(v >> 5) * tx.tbw * 2048; txo = xoff32[v & 31]; }
+    const int fa_v = vcol >> 24;
+    for (int x = px0; x < px1; x++) {
+        if (zread) {
+            uint32_t zd = vm[(zbase + xz[x & 2047]) & 0xFFFFF];
+            if (zpsm == Z24) zd &= 0xFFFFFF;
+            if (ztst == 2 ? zcmp < zd : zcmp <= zd) continue;
+        }
+        uint32_t col = vcol;
+        if (TEX) {
+            const int u16 = (int)(u0 + ((x << 4) - x0) * du);
+            uint32_t t;
+            if (TEX == 1) t = vm[(tbase + txo[wrap(u16 >> 4, tx.tw, tx.wms, tx.minu, tx.maxu) & 2047]) & 0xFFFFF];
+            else t = sample(&tx, u16, v16);
+            const int ta = t >> 24; uint32_t out = 0;
+            for (int s = 0; s < 24; s += 8) {
+                const int ct = (t >> s) & 255, cf = (vcol >> s) & 255; int v;
+                if (TFX == 0) v = ct * cf >> 7; else if (TFX == 1) v = ct; else v = (ct * cf >> 7) + fa_v;
+                out |= (uint32_t)(v > 255 ? 255 : v) << s;
+            }
+            int a;
+            if (TFX == 0) a = TCC ? ta * fa_v >> 7 : fa_v; else if (TFX == 2) a = TCC ? ta + fa_v : fa_v; else a = TCC ? ta : fa_v;
+            col = out | (uint32_t)(a > 255 ? 255 : a) << 24;
+        }
+        const uint32_t fa = (fbase + xo[x & 2047]) & 0xFFFFF;
+        const uint32_t dst = need_dst ? vm[fa] : 0;
+        uint32_t out = col; const int as = col >> 24;
+        if (BL && !(pabe && !(as & 0x80))) {
+            const int ad = dst >> 24, cf = sc == 0 ? as : sc == 1 ? ad : fix;
+            out = 0;
+            for (int s = 0; s < 24; s += 8) {
+                const int cs = (col >> s) & 255, cd = (dst >> s) & 255;
+                const int A = sa == 0 ? cs : sa == 1 ? cd : 0, B = sb == 0 ? cs : sb == 1 ? cd : 0, D = sd == 0 ? cs : sd == 1 ? cd : 0;
+                out |= (uint32_t)clamp255(((A - B) * cf >> 7) + D, colclamp) << s;
+            }
+            out |= col & 0xFF000000u;
+        }
+        if (fba) out |= 0x80000000u;
+        vm[fa] = (out & ~fbmsk) | (dst & fbmsk);
+        if (zwrite) { uint32_t *zp = &vm[(zbase + xz[x & 2047]) & 0xFFFFF]; *zp = zpsm == Z24 ? (*zp & 0xFF000000u) | (z & 0xFFFFFF) : z; }
+    }
+}
+#if defined(__x86_64__)
+/* AVX2 version of sprite_row for 8 pixels at a time: same integer arithmetic per lane, texels and destination pixels
+   fetched with gathers, stores done per lane (the swizzled addresses are not contiguous). Used for the frame-buffer
+   configurations sprite_span_ok() accepts when Z is neither read nor written; TEX: 0 none, 1 CT32 nearest, 3 CT32 bilinear. */
+__attribute__((target("avx2"))) static inline __m256i wrap8(__m256i v, int size, int mode, int mn, int mx) {
+    switch (mode) {
+    case 0: return _mm256_and_si256(v, _mm256_set1_epi32(size - 1));
+    case 1: return _mm256_min_epi32(_mm256_max_epi32(v, _mm256_setzero_si256()), _mm256_set1_epi32(size - 1));
+    case 2: { __m256i lo = _mm256_set1_epi32(mn), hi = _mm256_set1_epi32(mx);
+        __m256i t = _mm256_blendv_epi8(v, hi, _mm256_cmpgt_epi32(v, hi));
+        return _mm256_blendv_epi8(t, lo, _mm256_cmpgt_epi32(lo, v)); }
+    default: return _mm256_or_si256(_mm256_and_si256(v, _mm256_set1_epi32(mn)), _mm256_set1_epi32(mx));
+    }
+}
+__attribute__((target("avx2"))) static inline __m256i texel8(const TexState *t, __m256i u, uint32_t tbase, const uint32_t *txo) {
+    __m256i o = _mm256_i32gather_epi32((const int *)txo, _mm256_and_si256(wrap8(u, t->tw, t->wms, t->minu, t->maxu), _mm256_set1_epi32(2047)), 4);
+    return _mm256_i32gather_epi32((const int *)vm, _mm256_and_si256(_mm256_add_epi32(o, _mm256_set1_epi32(tbase)), _mm256_set1_epi32(0xFFFFF)), 4);
+}
+__attribute__((target("avx2"))) static void sprite_row_avx2(const Draw *d, const Vtx *b, int y, int px0, int px1, int x0, float u0, float du, int v16, int TEX) {
+    const TexState tx = d->tex;
+    const uint32_t fbase = d->fbp * 64 + (uint32_t)(y >> 5) * d->fbw * 2048, vcol = b->rgba;
+    const uint32_t *xo = xoff32[y & 31];
+    const int tfx = tx.tfx, tcc = tx.tcc, need_dst = d->need_dst, bl = d->abe, pabe = d->pabe;
+    const int sa = d->a, sb = d->b, sc = d->cc, sd = d->d;
+    const __m256i m255 = _mm256_set1_epi32(255), mask20 = _mm256_set1_epi32(0xFFFFF), lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    const __m256i fbmsk = _mm256_set1_epi32((int)d->fbmsk), fixv = _mm256_set1_epi32(d->fix);
+    __m256i vc[3], fav = _mm256_set1_epi32((int)(vcol >> 24));
+    for (int k = 0; k < 3; k++) vc[k] = _mm256_set1_epi32((vcol >> (8 * k)) & 255);
+    /* texture rows: nearest uses row v, bilinear rows v and v+1 with weight fv */
+    uint32_t tb0 = 0, tb1 = 0; const uint32_t *to0 = xoff32[0], *to1 = xoff32[0]; int fv = 0;
+    if (TEX == 1) { int v = wrap(v16 >> 4, tx.th, tx.wmt, tx.minv, tx.maxv); tb0 = tx.tbp * 64 + (uint32_t)(v >> 5) * tx.tbw * 2048; to0 = xoff32[v & 31]; }
+    if (TEX == 3) {
+        int v = v16 - 8; fv = v & 15; v >>= 4;
+        int va = wrap(v, tx.th, tx.wmt, tx.minv, tx.maxv), vb = wrap(v + 1, tx.th, tx.wmt, tx.minv, tx.maxv);
+        tb0 = tx.tbp * 64 + (uint32_t)(va >> 5) * tx.tbw * 2048; to0 = xoff32[va & 31];
+        tb1 = tx.tbp * 64 + (uint32_t)(vb >> 5) * tx.tbw * 2048; to1 = xoff32[vb & 31];
+    }
+    int x = px0;
+    for (; x + 8 <= px1; x += 8) {
+        const __m256i xv = _mm256_add_epi32(_mm256_set1_epi32(x), lane);
+        const __m256i fa = _mm256_and_si256(_mm256_add_epi32(_mm256_loadu_si256((const __m256i *)(xo + (x & 2047))), _mm256_set1_epi32(fbase)), mask20);
+        const __m256i dst = need_dst ? _mm256_i32gather_epi32((const int *)vm, fa, 4) : _mm256_setzero_si256();
+        __m256i col = _mm256_set1_epi32((int)vcol);
+        if (TEX) {
+            __m256 uf = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_slli_epi32(xv, 4), _mm256_set1_epi32(x0)));
+            uf = _mm256_add_ps(_mm256_set1_ps(u0), _mm256_mul_ps(uf, _mm256_set1_ps(du)));
+            const __m256i u16 = _mm256_cvttps_epi32(uf);
+            __m256i t;
+            if (TEX == 1) t = texel8(&tx, _mm256_srai_epi32(u16, 4), tb0, to0);
+            else {
+                const __m256i uu = _mm256_sub_epi32(u16, _mm256_set1_epi32(8)), fu = _mm256_and_si256(uu, _mm256_set1_epi32(15)), ui = _mm256_srai_epi32(uu, 4);
+                const __m256i ui1 = _mm256_add_epi32(ui, _mm256_set1_epi32(1));
+                const __m256i c00 = texel8(&tx, ui, tb0, to0), c10 = texel8(&tx, ui1, tb0, to0), c01 = texel8(&tx, ui, tb1, to1), c11 = texel8(&tx, ui1, tb1, to1);
+                const __m256i f16 = _mm256_set1_epi32(16), fvv = _mm256_set1_epi32(fv), gu = _mm256_sub_epi32(f16, fu), gv = _mm256_sub_epi32(f16, fvv);
+                const __m256i w00 = _mm256_mullo_epi32(gu, gv), w10 = _mm256_mullo_epi32(fu, gv), w01 = _mm256_mullo_epi32(gu, fvv), w11 = _mm256_mullo_epi32(fu, fvv);
+                const __m256i mrb = _mm256_set1_epi32(0xFF00FF);
+                __m256i rb = _mm256_add_epi32(_mm256_add_epi32(_mm256_mullo_epi32(_mm256_and_si256(c00, mrb), w00), _mm256_mullo_epi32(_mm256_and_si256(c10, mrb), w10)),
+                                              _mm256_add_epi32(_mm256_mullo_epi32(_mm256_and_si256(c01, mrb), w01), _mm256_mullo_epi32(_mm256_and_si256(c11, mrb), w11)));
+                __m256i ag = _mm256_add_epi32(_mm256_add_epi32(_mm256_mullo_epi32(_mm256_and_si256(_mm256_srli_epi32(c00, 8), mrb), w00), _mm256_mullo_epi32(_mm256_and_si256(_mm256_srli_epi32(c10, 8), mrb), w10)),
+                                              _mm256_add_epi32(_mm256_mullo_epi32(_mm256_and_si256(_mm256_srli_epi32(c01, 8), mrb), w01), _mm256_mullo_epi32(_mm256_and_si256(_mm256_srli_epi32(c11, 8), mrb), w11)));
+                t = _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi32(rb, 8), mrb), _mm256_slli_epi32(_mm256_and_si256(_mm256_srli_epi32(ag, 8), mrb), 8));
+            }
+            __m256i out = _mm256_setzero_si256();
+            for (int k = 0; k < 3; k++) {
+                const __m256i ct = _mm256_and_si256(_mm256_srli_epi32(t, 8 * k), m255);
+                __m256i v;
+                if (tfx == 1) v = ct;
+                else { v = _mm256_srai_epi32(_mm256_mullo_epi32(ct, vc[k]), 7); if (tfx != 0) v = _mm256_add_epi32(v, fav); }
+                out = _mm256_or_si256(out, _mm256_slli_epi32(_mm256_min_epi32(v, m255), 8 * k));
+            }
+            const __m256i ta = _mm256_srli_epi32(t, 24);
+            __m256i a;
+            if (!tcc) a = fav;
+            else if (tfx == 0) a = _mm256_srai_epi32(_mm256_mullo_epi32(ta, fav), 7);
+            else if (tfx == 2) a = _mm256_add_epi32(ta, fav);
+            else a = ta;
+            col = _mm256_or_si256(out, _mm256_slli_epi32(_mm256_min_epi32(a, m255), 24));
+        }
+        __m256i out = col;
+        if (bl) {
+            const __m256i as = _mm256_srli_epi32(col, 24), ad = _mm256_srli_epi32(dst, 24);
+            const __m256i cf = sc == 0 ? as : sc == 1 ? ad : fixv;
+            __m256i o = _mm256_and_si256(col, _mm256_set1_epi32((int)0xFF000000u));
+            for (int k = 0; k < 3; k++) {
+                const __m256i cs = _mm256_and_si256(_mm256_srli_epi32(col, 8 * k), m255), cd = _mm256_and_si256(_mm256_srli_epi32(dst, 8 * k), m255), z = _mm256_setzero_si256();
+                const __m256i A = sa == 0 ? cs : sa == 1 ? cd : z, B = sb == 0 ? cs : sb == 1 ? cd : z, D = sd == 0 ? cs : sd == 1 ? cd : z;
+                __m256i v = _mm256_add_epi32(_mm256_srai_epi32(_mm256_mullo_epi32(_mm256_sub_epi32(A, B), cf), 7), D);
+                v = d->colclamp ? _mm256_min_epi32(_mm256_max_epi32(v, z), m255) : _mm256_and_si256(v, m255);
+                o = _mm256_or_si256(o, _mm256_slli_epi32(v, 8 * k));
+            }
+            if (pabe) {   /* PABE: blend only where the source alpha MSB is set */
+                const __m256i on = _mm256_cmpeq_epi32(_mm256_and_si256(as, _mm256_set1_epi32(0x80)), _mm256_set1_epi32(0x80));
+                o = _mm256_blendv_epi8(col, o, on);
+            }
+            out = o;
+        }
+        if (d->fba) out = _mm256_or_si256(out, _mm256_set1_epi32((int)0x80000000u));
+        out = _mm256_or_si256(_mm256_andnot_si256(fbmsk, out), _mm256_and_si256(dst, fbmsk));
+        uint32_t oa[8], aa[8]; _mm256_storeu_si256((__m256i *)oa, out); _mm256_storeu_si256((__m256i *)aa, fa);
+        for (int i = 0; i < 8; i++) vm[aa[i]] = oa[i];
+    }
+    if (x < px1) {   /* tail */
+        const int TX = TEX == 3 ? 2 : TEX;
+        if (bl) { if (TX == 0) sprite_row(d, b, y, x, px1, x0, u0, du, v16, 0, 0, 0, 1); else if (TX == 1) sprite_row(d, b, y, x, px1, x0, u0, du, v16, 1, tfx, tcc, 1); else sprite_row(d, b, y, x, px1, x0, u0, du, v16, 2, tfx, tcc, 1); }
+        else { if (TX == 0) sprite_row(d, b, y, x, px1, x0, u0, du, v16, 0, 0, 0, 0); else if (TX == 1) sprite_row(d, b, y, x, px1, x0, u0, du, v16, 1, tfx, tcc, 0); else sprite_row(d, b, y, x, px1, x0, u0, du, v16, 2, tfx, tcc, 0); }
+    }
+}
+static int have_avx2 = -1;
+#endif
+#define SPRITE_ROWS(TEX, TFX, TCC, BL) for (int y = py0; y < py1; y++) sprite_row(d, b, y, px0, px1, x0, u0, du, d->tme ? (int)(v0 + ((y << 4) - y0) * dv) : 0, TEX, TFX, TCC, BL)
+static void sprite_spans(const Draw *d, const Vtx *b, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv) {
+    const int tex = !d->tme ? 0 : (d->tex.psm == CT32 && !d->tex.bilinear) ? 1 : 2, tfx = d->tex.tfx, tcc = d->tex.tcc, bl = d->abe;
+#if defined(__x86_64__)
+    if (have_avx2 < 0) have_avx2 = __builtin_cpu_supports("avx2") && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
+    if (have_avx2 && !(d->zte && (d->zread || !d->zmsk)) && (tex != 2 || d->tex.psm == CT32)) {
+        const int k = tex == 2 ? 3 : tex;
+        for (int y = py0; y < py1; y++) sprite_row_avx2(d, b, y, px0, px1, x0, u0, du, d->tme ? (int)(v0 + ((y << 4) - y0) * dv) : 0, k);
+        uint64_t n = (uint64_t)(px1 > px0 ? px1 - px0 : 0) * (uint64_t)(py1 > py0 ? py1 - py0 : 0);
+        n_visits += n; n_pixels += n; return;
+    }
+#endif
+    if (tex == 0) { if (bl) SPRITE_ROWS(0, 0, 0, 1); else SPRITE_ROWS(0, 0, 0, 0); }
+    else if (tex == 1 && tfx == 0 && tcc) { if (bl) SPRITE_ROWS(1, 0, 1, 1); else SPRITE_ROWS(1, 0, 1, 0); }
+    else if (tex == 2 && tfx == 0 && tcc) { if (bl) SPRITE_ROWS(2, 0, 1, 1); else SPRITE_ROWS(2, 0, 1, 0); }
+    else if (tex == 1) { if (bl) SPRITE_ROWS(1, tfx, tcc, 1); else SPRITE_ROWS(1, tfx, tcc, 0); }
+    else { if (bl) SPRITE_ROWS(2, tfx, tcc, 1); else SPRITE_ROWS(2, tfx, tcc, 0); }
+    uint64_t n = (uint64_t)(px1 > px0 ? px1 - px0 : 0) * (uint64_t)(py1 > py0 ? py1 - py0 : 0);
+    n_visits += n; n_pixels += n;
+}
 static void draw_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
     int x0 = a->x, x1 = b->x, y0 = a->y, y1 = b->y;
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
@@ -341,6 +535,7 @@ static void draw_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
     if (px0 < d->scx0) px0 = d->scx0; if (px1 > d->scx1 + 1) px1 = d->scx1 + 1;
     if (py0 < d->scy0) py0 = d->scy0; if (py1 > d->scy1 + 1) py1 = d->scy1 + 1;
     float du = x1 != x0 ? (u1 - u0) / (x1 - x0) : 0, dv = y1 != y0 ? (v1 - v0) / (y1 - y0) : 0;
+    if (sprite_span_ok(d)) { sprite_spans(d, b, px0, px1, py0, py1, x0, y0, u0, v0, du, dv); return; }
     for (int y = py0; y < py1; y++) {
         float vv = v0 + ((y << 4) - y0) * dv;
         for (int x = px0; x < px1; x++) {
@@ -404,12 +599,14 @@ static void draw_line(const Draw *d, const Vtx *a, const Vtx *b) {
         pixel(d, x, y, b->z, shade(d, b->rgba, 0, 0, b->f));
     }
 }
+/* HG_GSDRAW=0 skips rasterizing (sound/logic runs; emulated time is unaffected); HG_GSDRAW=N starts drawing at VBlank N */
+static int gs_nodraw; static long gs_draw_from;
 static void vertex_kick(Vtx v, int draw) {
     Draw d; int prim = BITS(r_prim, 0, 3);
     static const int need[8] = { 1, 2, 2, 3, 3, 3, 2, 1 };
     vq[nvq++] = v;
     if (nvq < need[prim]) return;
-    if (draw) {
+    if (draw && !gs_nodraw) {
         draw_setup(&d);
         uint64_t off = d.c->xyoffset; int ox = BITS(off, 0, 16), oy = BITS(off, 32, 16);
         Vtx w[3]; for (int i = 0; i < nvq; i++) { w[i] = vq[i]; w[i].x -= ox; w[i].y -= oy; }
@@ -428,10 +625,10 @@ static void vertex_kick(Vtx v, int draw) {
         if (k == 0 && getenv("HG_SPRSTAT")) {   /* configuration histogram weighted by pixels */
             char key[160]; snprintf(key, sizeof key, "fb%02x tex%d:%02x bil%d tfx%d tcc%d abe%d(%d%d%d%d fix%d) ate%d:%d zte%d:%d zmsk%d fbmsk%08x",
                 d.fpsm, d.tme, d.tme ? d.tex.psm : 0, d.tme ? d.tex.bilinear : 0, d.tme ? d.tex.tfx : 0, d.tme ? d.tex.tcc : 0, d.abe, d.a, d.b, d.cc, d.d, d.fix, d.ate, d.atst, d.zte, d.ztst, d.zmsk, d.fbmsk);
-            static struct { char k[160]; uint64_t px, n; } h[256]; static int nh;
+            static struct { char k[160]; uint64_t px, n; double t; } h[256]; static int nh;
             int j = 0; for (; j < nh; j++) if (!strcmp(h[j].k, key)) break;
             if (j == nh && nh < 256) { strcpy(h[nh].k, key); nh++; }
-            if (j < 256) { h[j].px += n_visits - vis0; h[j].n++; }
+            if (j < 256) { h[j].px += n_visits - vis0; h[j].n++; h[j].t += host_now() - t0; }
             static uint64_t calls; if (++calls % 100000 == 0 || getenv("HG_SPRSTAT")[0] == 'x') {}
             gs_sprhist_ptr = (void *)h; gs_sprhist_n = nh;
         }
@@ -623,6 +820,7 @@ static void dump_frame(uint64_t vb) {
     free(row); fclose(f); frames_written++;
 }
 void gs_vblank(uint64_t vb) {
+    gs_nodraw = gs_draw_from < 0 || (uint64_t)gs_draw_from > vb;
     static long every = -1; if (every < 0) every = getenv("HG_FRAME_EVERY") ? atol(getenv("HG_FRAME_EVERY")) : 60;
     if (every > 0 && vb % every == 0) dump_frame(vb);
     static uint64_t last_log; if (vb - last_log >= 600) { last_log = vb; L("GS: VBlank %llu: %llu prims, %llu pixels, %llu GIF tags, %llu image qwords so far\n",
@@ -631,12 +829,13 @@ void gs_vblank(uint64_t vb) {
 }
 void gs_init(uint8_t *priv) {
     gspriv = priv; build_t4_table(); build_xoff();
+    if (getenv("HG_GSDRAW")) { gs_draw_from = atol(getenv("HG_GSDRAW")); if (gs_draw_from == 0) gs_draw_from = -1; gs_nodraw = 1; }
     int bad = check_bijective(); if (bad) L("GS: WARNING: T%d column table is not a bijection\n", bad);
 }
 void gs_dump_stats(void) {
-    if (gs_sprhist_ptr) { struct { char k[160]; uint64_t px, n; } *h = gs_sprhist_ptr;
+    if (gs_sprhist_ptr) { struct { char k[160]; uint64_t px, n; double t; } *h = gs_sprhist_ptr;
         for (int r = 0; r < 12; r++) { int b = -1; for (int j = 0; j < gs_sprhist_n; j++) if (h[j].px && (b < 0 || h[j].px > h[b].px)) b = j;
-            if (b < 0) break; L("  sprite cfg %s: %llu px in %llu sprites\n", h[b].k, (unsigned long long)h[b].px, (unsigned long long)h[b].n); h[b].px = 0; } }
+            if (b < 0) break; L("  sprite cfg %s: %llu px in %llu sprites, %.2fs (%.1f ns/px)\n", h[b].k, (unsigned long long)h[b].px, (unsigned long long)h[b].n, h[b].t, h[b].t * 1e9 / (h[b].px ? h[b].px : 1)); h[b].px = 0; } }
     static const char *nm[3] = { "sprites", "triangles", "points/lines" };
     for (int k = 0; k < 3; k++) if (st_prims[k]) L("GS %s: %llu prims (%llu textured, %llu blended, %llu z-tested), %llu shaded pixels, %llu written, %.1fs\n", nm[k],
         (unsigned long long)st_prims[k], (unsigned long long)st_tex[k], (unsigned long long)st_blend[k], (unsigned long long)st_z[k], (unsigned long long)st_visits[k], (unsigned long long)st_px[k], st_time[k]);

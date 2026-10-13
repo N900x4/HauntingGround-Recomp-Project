@@ -29,6 +29,8 @@ obj/host_sdl.o: host_sdl.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) $(SDL_CFLAGS) -c $< -o $@
 obj/vu1.o: vu1.c ee_runtime.h hle.h vu1_state.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -ffp-contract=off -c $< -o $@
+obj/ipu.o: ipu.c ee_runtime.h hle.h
+	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -c $< -o $@
 obj/vu1_ref.o: vu1_ref.c ee_runtime.h hle.h vu1_state.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -ffp-contract=off -c $< -o $@
 obj/iop_cpu.o: iop_cpu.c ee_runtime.h hle.h iop.h
@@ -39,7 +41,7 @@ obj/spu2.o: spu2.c ee_runtime.h hle.h iop.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -c $< -o $@
 obj/interp.o: interp.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-hgboot: $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o obj/iop_pad_mc.o obj/overrides.o obj/gs.o obj/dmac.o obj/host_sdl.o obj/vu1.o obj/vu1_ref.o obj/iop_cpu.o obj/iop_kernel.o obj/spu2.o
+hgboot: $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o obj/iop_pad_mc.o obj/overrides.o obj/gs.o obj/dmac.o obj/host_sdl.o obj/vu1.o obj/vu1_ref.o obj/ipu.o obj/iop_cpu.o obj/iop_kernel.o obj/spu2.o
 	$(CC) -rdynamic -o $@ $^ -lm -lpthread $(SDL_LIBS)
 clean:
 	rm -rf obj hgboot

@@ -23,6 +23,7 @@
 uint8_t *ee_ram;
 static uint8_t spr[0x4000];
 static uint8_t hwreg[0x10000];         /* 0x10000000-0x1000FFFF */
+uint8_t *hwreg_base(void) { return hwreg; }
 static uint8_t gspriv[0x2000];         /* 0x12000000-0x12001FFF */
 static uint8_t vumem[0x10000];         /* 0x11000000-0x1100FFFF */
 

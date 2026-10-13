@@ -70,6 +70,7 @@ static int pick(void) {
     return best;
 }
 static void fire_vblank(void);
+static void idle_advance(void);
 static void iop_flush_idle(void);
 static void thread_trampoline(void);
 static uint64_t nswitch;
@@ -78,7 +79,7 @@ static void schedule(void) {
     if (in_intr) return;           /* no switching inside interrupt handlers; done when the handler returns */
     int n, spins = 0;
     while (!(n = pick())) {
-        fire_vblank(); idle_ticks++;
+        idle_advance(); idle_ticks++;
         if (++spins > 3000) { L("deadlock: all threads blocked after %d idle VBlanks\n", spins); dump_threads(); stop("deadlock: no runnable EE thread (thread %d blocked, wait %d/%d)", cur, th[cur].wait_type, th[cur].wait_id); }
     }
     if (n == cur) { th[cur].status = THS_RUN; return; }
@@ -130,10 +131,85 @@ static void raise_dmac(int ch) {
     for (int i = 0; i < 64; i++) if (dmac[i].used && dmac[i].cause == ch) call_handler(&dmac[i], ch);
 }
 extern uint64_t ee_cycles, ee_next_vb, ee_vb_period; extern int timing_wall;
+/* ------------------------------------------------------------------ EE timers 0-3 (0x10000000 + 0x800 n)
+   COUNT follows emulated time (guest instructions at HG_EE_MIPS); clock BUSCLK 147.456 MHz / 1, 16, 256 or HBLANK.
+   Compare (CMPE) and overflow (OVFE) events set EQUF/OVFF and raise INTC causes 9-12. Gate modes are not modelled.
+   ee_next_vb is the next emulated-time event of any kind (VBlank or timer); vb_deadline is the next VBlank. */
+typedef struct { uint32_t mode, comp, base_count; uint64_t base_cyc, next; int pend; } Tmr;
+static Tmr tmr[4] = { { .next = ~0ull }, { .next = ~0ull }, { .next = ~0ull }, { .next = ~0ull } };
+static uint64_t vb_deadline; static int vb_init;
+static double tmr_rate(int n) {   /* timer ticks per guest instruction */
+    static const double div[3] = { 1, 16, 256 }; const int clks = tmr[n].mode & 3;
+    const double hz = clks == 3 ? 15734.264 : 147456000.0 / div[clks];
+    return hz / ((double)ee_vb_period * 59.94);
+}
+static uint32_t tmr_count(int n) {
+    Tmr *t = &tmr[n];
+    if (!(t->mode & 0x80) || timing_wall) return t->base_count;
+    const uint64_t ticks = (uint64_t)((double)(ee_cycles - t->base_cyc) * tmr_rate(n));
+    if ((t->mode & 0x40) && t->comp && t->base_count <= t->comp) return (uint32_t)((t->base_count + ticks) % ((uint64_t)t->comp + 1));
+    return (uint32_t)((t->base_count + ticks) & 0xFFFF);
+}
+static void tmr_rebase(int n) { tmr[n].base_count = tmr_count(n); tmr[n].base_cyc = ee_cycles; }
+static void tmr_plan(int n) {   /* next compare/overflow event in emulated time */
+    Tmr *t = &tmr[n]; t->next = ~0ull;
+    if (timing_wall || !(t->mode & 0x80) || !(t->mode & 0x300)) return;
+    const uint32_t c = tmr_count(n); uint64_t dt = ~0ull;
+    if (t->mode & 0x100) { uint64_t d = (t->comp - c) & 0xFFFF; if (!d) d = (t->mode & 0x40) ? (uint64_t)t->comp + 1 : 0x10000; dt = d; }
+    if ((t->mode & 0x200) && !((t->mode & 0x40) && t->comp < 0xFFFF)) { uint64_t d = 0x10000 - c; if (d < dt) dt = d; }
+    if (dt == ~0ull) return;
+    t->next = ee_cycles + (uint64_t)ceil((double)dt / tmr_rate(n));
+}
+static void plan_events(void) {
+    if (!vb_init) { vb_init = 1; vb_deadline = ee_next_vb; for (int n = 0; n < 4; n++) if (!(tmr[n].mode & 0x80)) tmr[n].next = ~0ull; }
+    if (timing_wall) return;
+    uint64_t nx = vb_deadline;
+    for (int n = 0; n < 4; n++) if (tmr[n].next < nx) nx = tmr[n].next;
+    ee_next_vb = nx;
+    if (ee_cycles >= nx) vblank_due = 1;
+}
+static uint64_t n_timer_irq[4];
+static void deliver_timers(void) {
+    for (int n = 0; n < 4; n++) if (tmr[n].pend && !in_intr) { tmr[n].pend = 0; n_timer_irq[n]++; raise_intc(9 + n); }
+}
+static void run_timers(void) {   /* fire every timer event that is due */
+    for (int n = 0; n < 4; n++) {
+        Tmr *t = &tmr[n];
+        if (t->next == ~0ull || ee_cycles < t->next) continue;
+        const uint64_t now = ee_cycles; ee_cycles = t->next;           /* evaluate at the event time */
+        const uint32_t c = tmr_count(n);
+        if ((t->mode & 0x100) && c == ((t->mode & 0x40) ? 0 : t->comp)) t->mode |= 0x400;
+        else if ((t->mode & 0x100) && c == t->comp) t->mode |= 0x400;
+        else t->mode |= 0x800;
+        tmr_rebase(n); ee_cycles = now;
+        t->pend = 1;
+        tmr_plan(n);
+        if (t->next <= t->base_cyc) t->next = t->base_cyc + 1;
+    }
+}
+uint64_t hle_timer_read(uint32_t pa, uint64_t v) {
+    const int n = (pa >> 11) & 3;
+    switch (pa & 0x7F0) {
+    case 0x00: return tmr_count(n);
+    case 0x10: return tmr[n].mode;
+    case 0x20: return tmr[n].comp;
+    }
+    return v;
+}
+void hle_timer_write(uint32_t pa, uint64_t v) {
+    const int n = (pa >> 11) & 3;
+    tmr_rebase(n);
+    switch (pa & 0x7F0) {
+    case 0x00: tmr[n].base_count = (uint32_t)v & 0xFFFF; break;
+    case 0x10: tmr[n].mode = ((uint32_t)v & 0x3FF) | (tmr[n].mode & 0xC00 & ~((uint32_t)v & 0xC00)); break;   /* EQUF/OVFF: write 1 to clear */
+    case 0x20: tmr[n].comp = (uint32_t)v & 0xFFFF; break;
+    }
+    tmr_plan(n); plan_events();
+}
 static void fire_vblank(void) {
     if (in_intr) return;
     vblank_count++;
-    if (!timing_wall) { if (ee_cycles < ee_next_vb) ee_cycles = ee_next_vb; ee_next_vb += ee_vb_period; }
+    if (!timing_wall) { if (!vb_init) { vb_init = 1; vb_deadline = ee_next_vb; } if (ee_cycles < vb_deadline) ee_cycles = vb_deadline; vb_deadline += ee_vb_period; }
     { static long maxvb = -1; if (maxvb < 0) maxvb = getenv("HG_MAXVB") ? atol(getenv("HG_MAXVB")) : 0;
       if (maxvb && (long)vblank_count >= maxvb) stop("reached HG_MAXVB=%ld", maxvb); }
     for (int c = 0; c < 16; c++) if (dma_pending[c] && c != 5) { dma_pending[c] = 0; raise_dmac(c); }
@@ -145,6 +221,22 @@ static void fire_vblank(void) {
     raise_intc(2);   /* VBLANK start */
     if (vsync_flag_addr) { W32(vsync_flag_addr, 1); if (vsync_data_addr) W64(vsync_data_addr, (vblank_count & 1) << 13); }
     raise_intc(3);   /* VBLANK end */
+    run_timers(); deliver_timers(); plan_events();
+}
+/* the next emulated-time event is due: timers and/or VBlank */
+static void service_events(void) {
+    if (timing_wall) { fire_vblank(); return; }
+    if (!vb_init) { vb_init = 1; vb_deadline = ee_next_vb; }
+    run_timers(); deliver_timers();
+    if (ee_cycles >= vb_deadline) fire_vblank(); else plan_events();
+}
+/* idle: advance emulated time to the next event and service it */
+static void idle_advance(void) {
+    if (timing_wall) { fire_vblank(); return; }
+    if (!vb_init) { vb_init = 1; vb_deadline = ee_next_vb; }
+    plan_events();
+    if (ee_cycles < ee_next_vb) ee_cycles = ee_next_vb;
+    service_events();
 }
 
 
@@ -314,7 +406,7 @@ static uint64_t async_vblanks;
 void hle_async_tick(void) {
     if (in_intr || !(cop0_status & 0x10000u)) return;
     vblank_due = 0; async_vblanks++;
-    fire_vblank();
+    service_events();
     schedule();     /* preempt if a handler readied a higher-priority thread */
 }
 void ee_ei_hook(void) { iop_flush(); if (vblank_due) hle_async_tick(); }
@@ -458,25 +550,76 @@ static int chan_of(uint32_t pa) {
         case 0x1000B400: return 4; case 0x1000C000: return 5; case 0x1000C400: return 6; case 0x1000C800: return 7; case 0x1000D000: return 8; case 0x1000D400: return 9; } return -1;
 }
 static uint64_t dma_kicks[16], timer_tick, nhwpoll;
+/* scratchpad DMA: channel 8 (fromSPR) copies SPR -> memory, channel 9 (toSPR) memory -> SPR; normal mode and
+   source-chain mode for toSPR (tags in memory, as for VIF1). SADR is the scratchpad address. */
+static uint64_t n_spr_qw[2];
+static uint32_t R32hw(const uint8_t *hw, uint32_t off) { uint32_t v; memcpy(&v, hw + off, 4); return v; }
+static void spr_dma(int ch, uint8_t *hw) {
+    const uint32_t base = ch == 8 ? 0xD000 : 0xD400;
+    uint32_t chcr, madr, qwc, tadr, sadr;
+    memcpy(&chcr, hw + base, 4); memcpy(&madr, hw + base + 0x10, 4); memcpy(&qwc, hw + base + 0x20, 4); memcpy(&tadr, hw + base + 0x30, 4); memcpy(&sadr, hw + base + 0x80, 4);
+    qwc &= 0xFFFF;
+    uint8_t *spr = gptr(0x70000000u);
+    const int mode = (chcr >> 2) & 3;
+    { static int seen[2][4]; if (!seen[ch - 8][mode]++) L("SPR DMA ch%d first use of mode %d (chcr 0x%x qwc %u, D_SQWC 0x%x)\n", ch, mode, chcr, qwc, R32hw(hw, 0xE030)); }
+    #define RAMP(a) ((a) & 0x80000000u ? spr + ((a) & 0x3FF0) : gptr((a) & 0x01FFFFF0u))
+    for (int guard = 0; guard < 100000; guard++) {
+        for (uint32_t i = 0; i < qwc; i++) {
+            uint8_t *m = RAMP(madr), *sp = spr + (sadr & 0x3FF0);
+            if (ch == 8) memcpy(m, sp, 16); else memcpy(sp, m, 16);
+            madr += 16; sadr = (sadr + 16) & 0x3FFF; n_spr_qw[ch - 8]++;
+        }
+        qwc = 0;
+        if (mode != 1 || ch != 9) break;
+        uint64_t tag[2]; memcpy(tag, RAMP(tadr), 16);
+        uint32_t tq = tag[0] & 0xFFFF, id = (tag[0] >> 28) & 7, addr = (uint32_t)(tag[0] >> 32) & 0x7FFFFFF0u; if ((tag[0] >> 63) & 1) addr |= 0x80000000u;
+        int end = 0; qwc = tq;
+        switch (id) {
+        case 0: madr = addr; tadr += 16; end = 1; break;
+        case 1: madr = tadr + 16; tadr = madr + tq * 16; break;
+        case 2: madr = tadr + 16; tadr = addr; break;
+        case 3: case 4: madr = addr; tadr += 16; break;
+        default: madr = tadr + 16; end = 1; break;
+        }
+        if (end) { for (uint32_t i = 0; i < qwc; i++) { memcpy(spr + (sadr & 0x3FF0), RAMP(madr), 16); madr += 16; sadr = (sadr + 16) & 0x3FFF; n_spr_qw[1]++; } qwc = 0; break; }
+    }
+    #undef RAMP
+    if (mode == 1 && ch == 8) { static int w; if (w++ < 5) L("DMA: fromSPR chain mode not implemented (chcr 0x%x)\n", chcr); }
+    chcr &= ~0x100u;
+    memcpy(hw + base, &chcr, 4); memcpy(hw + base + 0x10, &madr, 4); memcpy(hw + base + 0x20, &qwc, 4); memcpy(hw + base + 0x30, &tadr, 4); memcpy(hw + base + 0x80, &sadr, 4);
+}
+uint64_t ipu_read(uint32_t pa, int size); void ipu_write(uint32_t pa, uint64_t v, int size); void ipu_dma_start(int ch, uint8_t *hw); void ipu_dma_stop(int ch);
+void ipu_init(uint8_t *hw); void ipu_dump_stats(void);
+void hle_dma_complete(int ch) { dma_pending[ch] = 1; }
+extern uint8_t *hwreg_base(void);
+static void ipu_ensure_init(void) { static int init; if (!init) { init = 1; ipu_init(hwreg_base()); } }
 uint64_t hle_hw_read(uint32_t pa, uint64_t v, int size) {
+    if ((pa >= 0x10002000 && pa < 0x10002040) || (pa >= 0x10007000 && pa < 0x10007010) || pa == 0x1000B000 || pa == 0x1000B400) ipu_ensure_init();
+    if ((pa >= 0x10002000 && pa < 0x10002040) || (pa >= 0x10007000 && pa < 0x10007010)) return ipu_read(pa & ~7u, size);
+    if (pa == 0x1000B000 || pa == 0x1000B400) return v;          /* IPU DMA: STR stays set while the transfer is in progress (ipu.c) */
     if (is_chcr(pa)) return v & ~0x100ull;
     switch (pa) {
-    case 0x10000000: case 0x10000800: case 0x10001000: case 0x10001800: return (timer_tick += 0x40) & 0xFFFF;
+    case 0x10000000: case 0x10000800: case 0x10001000: case 0x10001800:
+    case 0x10000010: case 0x10000810: case 0x10001010: case 0x10001810:
+    case 0x10000020: case 0x10000820: case 0x10001020: case 0x10001820: if (timing_wall) return (timer_tick += 0x40) & 0xFFFF; REC_CYC(16); return hle_timer_read(pa, v);
     case 0x1000F000: if (timing_wall) { if ((++nhwpoll & 255) == 0) fire_vblank(); } else REC_CYC(64); return v | 0xC;   /* INTC_STAT: VBlank pending; polling burns time */
     case 0x1000E010: return v | 0x3FF;                          /* D_STAT: all channels done */
     case 0x10003020: case 0x10003800: case 0x10003C00: return 0;  /* GIF/VIF0/VIF1 STAT idle */
-    case 0x10002010: return v & ~0x80000000ull;                 /* IPU_CTRL not busy */
-    case 0x10002000: return v & ~(1ull << 63);
     case 0x1000F230: return v | 0x70000;                        /* SIF SMFLG */
     }
     return v;
 }
 void hle_hw_write(uint32_t pa, uint64_t v, int size, uint8_t *hw) {
+    (void)hw; ipu_ensure_init();
+    if (pa < 0x10002000 && (pa & 0x7FF) < 0x30 && ((pa & 0x7FF) & 0xF) == 0) hle_timer_write(pa, v);
+    if ((pa >= 0x10002000 && pa < 0x10002040) || (pa >= 0x10007010 && pa < 0x10007020)) { ipu_write(pa, v, size); return; }
+    if (pa == 0x1000B000 || pa == 0x1000B400) { if (v & 0x100) ipu_dma_start(pa == 0x1000B000 ? 3 : 4, hw); else ipu_dma_stop(pa == 0x1000B000 ? 3 : 4); return; }
     if (is_chcr(pa) && (v & 0x100)) {
         int ch = chan_of(pa); uint32_t base = pa & 0xFFFF;
         uint32_t madr, qwc, tadr; memcpy(&madr, hw + base + 0x10, 4); memcpy(&qwc, hw + base + 0x20, 4); memcpy(&tadr, hw + base + 0x30, 4);
         if (dma_kicks[ch]++ < 20) L("DMA kick ch%d chcr 0x%llx madr 0x%x qwc 0x%x tadr 0x%x [in 0x%x]\n", ch, (unsigned long long)v, madr, qwc & 0xffff, tadr, rec_cur);
         if (ch == 1 || ch == 2) dma_run(ch, hw);   /* VIF1 / GIF: run the transfer now (clears STR) */
+        else if (ch == 8 || ch == 9) { spr_dma(ch, hw); dma_pending[ch] = 1; }
         else { uint32_t c = (uint32_t)v & ~0x100u; memcpy(hw + base, &c, 4); }
         dma_pending[ch] = 1;
     }
@@ -492,7 +635,11 @@ uint64_t hle_gs_read(uint32_t pa, uint64_t v, int size) {
 void hle_gs_write(uint32_t pa, uint64_t v, int size, uint8_t *gs) { (void)pa; (void)v; (void)size; if (!gs_ready++) gs_init(gs); }
 
 void hle_dump(void) {
-    gs_dump_stats(); dma_dump_stats(); vu1_dump_stats(); iop_dump();
+    L("EE timers: interrupts %llu/%llu/%llu/%llu; modes %x/%x/%x/%x comp %x/%x/%x/%x next %lld/%lld/%lld/%lld (now %llu)\n", (unsigned long long)n_timer_irq[0], (unsigned long long)n_timer_irq[1],
+      (unsigned long long)n_timer_irq[2], (unsigned long long)n_timer_irq[3], tmr[0].mode, tmr[1].mode, tmr[2].mode, tmr[3].mode, tmr[0].comp, tmr[1].comp, tmr[2].comp, tmr[3].comp,
+      (long long)tmr[0].next, (long long)tmr[1].next, (long long)tmr[2].next, (long long)tmr[3].next, (unsigned long long)ee_cycles);
+    gs_dump_stats(); dma_dump_stats(); vu1_dump_stats(); ipu_dump_stats(); iop_dump();
+    L("SPR DMA: %llu qw from scratchpad, %llu qw to scratchpad\n", (unsigned long long)n_spr_qw[0], (unsigned long long)n_spr_qw[1]);
     L("CD: %llu read calls, %llu sectors from DATA.CVM\n", (unsigned long long)n_cdreads, (unsigned long long)cd_sectors_read);
     L("IOP RPC: %d servers bound, %llu calls\n", nbinds, (unsigned long long)n_rpc_calls);
     for (int i = 0; i < nbinds; i++) L("  sid 0x%08x (%s): %llu calls\n", binds[i].sid, sidname(binds[i].sid), (unsigned long long)binds[i].calls);

@@ -40,6 +40,6 @@ obj/spu2.o: spu2.c ee_runtime.h hle.h iop.h
 obj/interp.o: interp.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 hgboot: $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o obj/iop_pad_mc.o obj/overrides.o obj/gs.o obj/dmac.o obj/host_sdl.o obj/vu1.o obj/vu1_ref.o obj/iop_cpu.o obj/iop_kernel.o obj/spu2.o
-	$(CC) -rdynamic -o $@ $^ -lm $(SDL_LIBS)
+	$(CC) -rdynamic -o $@ $^ -lm -lpthread $(SDL_LIBS)
 clean:
 	rm -rf obj hgboot

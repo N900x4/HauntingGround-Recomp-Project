@@ -9,6 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <time.h>
+#include <stdatomic.h>
 #include "ee_runtime.h"
 #include "hle.h"
 #if defined(__x86_64__)
@@ -72,7 +76,7 @@ static int check_bijective(void) {
 
 /* bw = buffer width in 64-pixel units; return element index in the format's unit (word, halfword, byte, nibble).
    32-bit layouts: the x contribution only depends on y mod 32, so it is tabulated (xoff32 / xoff32z, x < 2048). */
-static uint32_t xoff32[32][2048], xoff32z[32][2048];
+static uint32_t xoff32[33][2048], xoff32z[33][2048];   /* row 32: padding for 8-wide loads that run past x = 2047 */
 static void build_xoff(void) {
     for (int y = 0; y < 32; y++) for (int x = 0; x < 2048; x++) {
         xoff32[y][x] = (x >> 6) * 2048 + blockTable32[(y >> 3) & 3][(x >> 3) & 7] * 64 + columnTable32[y & 7][x & 7];
@@ -154,6 +158,7 @@ static float st_q = 1.0f;
 static uint32_t clut[256];
 static uint32_t cbp0, cbp1;
 static uint8_t *gspriv;
+static int mtgs;                                  /* GS runs on its own thread (see "GS thread" below) */
 static uint64_t n_prims, n_pixels, n_xfer_qw, n_kicks_frame, n_visits;
 static void *gs_sprhist_ptr; static int gs_sprhist_n;
 static uint64_t st_prims[3], st_px[3], st_visits[3], st_tex[3], st_blend[3], st_z[3]; static double st_time[3];
@@ -525,6 +530,11 @@ static void sprite_spans(const Draw *d, const Vtx *b, int px0, int px1, int py0,
     uint64_t n = (uint64_t)(px1 > px0 ? px1 - px0 : 0) * (uint64_t)(py1 > py0 ? py1 - py0 : 0);
     n_visits += n; n_pixels += n;
 }
+#if defined(__x86_64__)
+static int tri_simd_ok_ex(const Draw *d, int tex_checked);
+static int sprite_tex_overlaps(const Draw *d, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv);
+static void sprite_vec(const Draw *d, const Vtx *b, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv);
+#endif
 static void draw_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
     int x0 = a->x, x1 = b->x, y0 = a->y, y1 = b->y;
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
@@ -536,6 +546,10 @@ static void draw_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
     if (py0 < d->scy0) py0 = d->scy0; if (py1 > d->scy1 + 1) py1 = d->scy1 + 1;
     float du = x1 != x0 ? (u1 - u0) / (x1 - x0) : 0, dv = y1 != y0 ? (v1 - v0) / (y1 - y0) : 0;
     if (sprite_span_ok(d)) { sprite_spans(d, b, px0, px1, py0, py1, x0, y0, u0, v0, du, dv); return; }
+#if defined(__x86_64__)
+    if (have_avx2 < 0) have_avx2 = __builtin_cpu_supports("avx2") && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
+    if (have_avx2 && tri_simd_ok_ex(d, d->tme && !sprite_tex_overlaps(d, px0, px1, py0, py1, x0, y0, u0, v0, du, dv))) { sprite_vec(d, b, px0, px1, py0, py1, x0, y0, u0, v0, du, dv); return; }
+#endif
     for (int y = py0; y < py1; y++) {
         float vv = v0 + ((y << 4) - y0) * dv;
         for (int x = px0; x < px1; x++) {
@@ -595,7 +609,7 @@ static void draw_triangle(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx
    operations as texel()/sample()/shade()/pixel(). Covers 32-bit frame buffers, Z32/Z24, CT32/CT24/T8/T8H/T4/T4HL/T4HH
    textures (nearest or bilinear), all alpha tests and blend equations; anything else uses the scalar path. */
 #define V8 __attribute__((target("avx2"))) static inline
-static int32_t bt8_i[4][8], ct8_i[16][16], bt4_i[8][4], ct4_i[16][32];
+static int32_t bt8_i[4][8], ct8_i[16][16], bt4_i[8][4], ct4_i[16][32], bt16_i[8][4], bt16s_i[8][4], bt16z_i[8][4], ct16_i[8][16];
 V8 __m256i v_set(int32_t x) { return _mm256_set1_epi32(x); }
 V8 __m256i v_addr32(uint32_t bp, uint32_t bw, __m256i x, __m256i y, const uint32_t (*tab)[2048]) {
     __m256i idx = _mm256_or_si256(_mm256_slli_epi32(_mm256_and_si256(y, v_set(31)), 11), _mm256_and_si256(x, v_set(2047)));
@@ -617,6 +631,30 @@ V8 __m256i v_addr4(uint32_t bp, uint32_t bw, __m256i x, __m256i y) {
     __m256i blk = _mm256_add_epi32(_mm256_add_epi32(v_set((int)bp), _mm256_slli_epi32(page, 5)), _mm256_i32gather_epi32((const int *)bt4_i, bi, 4));
     return _mm256_and_si256(_mm256_add_epi32(_mm256_slli_epi32(blk, 9), _mm256_i32gather_epi32((const int *)ct4_i, ci, 4)), v_set(0x7FFFFF));
 }
+/* halfword index of a 16-bit pixel, as addr16() */
+V8 __m256i v_addr16(uint32_t bp, uint32_t bw, __m256i x, __m256i y, const int32_t (*bt)[4]) {
+    __m256i page = _mm256_add_epi32(_mm256_srai_epi32(x, 6), _mm256_mullo_epi32(_mm256_srai_epi32(y, 6), v_set((int)bw)));
+    __m256i bi = _mm256_or_si256(_mm256_slli_epi32(_mm256_and_si256(_mm256_srai_epi32(y, 3), v_set(7)), 2), _mm256_and_si256(_mm256_srai_epi32(x, 4), v_set(3)));
+    __m256i ci = _mm256_or_si256(_mm256_slli_epi32(_mm256_and_si256(y, v_set(7)), 4), _mm256_and_si256(x, v_set(15)));
+    __m256i blk = _mm256_add_epi32(_mm256_add_epi32(v_set((int)bp), _mm256_slli_epi32(page, 5)), _mm256_i32gather_epi32((const int *)bt, bi, 4));
+    return _mm256_and_si256(_mm256_add_epi32(_mm256_slli_epi32(blk, 7), _mm256_i32gather_epi32((const int *)ct16_i, ci, 4)), v_set(0x1FFFFF));
+}
+V8 __m256i v_read16(__m256i hidx) { return _mm256_and_si256(_mm256_i32gather_epi32((const int *)VM16, hidx, 2), v_set(0xFFFF)); }
+V8 __m256i v_c16to32(__m256i c, int aem, int ta0, int ta1) {   /* c16to32() */
+    const __m256i f = v_set(31);
+    __m256i o = _mm256_or_si256(_mm256_or_si256(_mm256_slli_epi32(_mm256_and_si256(c, f), 3), _mm256_slli_epi32(_mm256_and_si256(_mm256_srli_epi32(c, 5), f), 11)),
+                                _mm256_slli_epi32(_mm256_and_si256(_mm256_srli_epi32(c, 10), f), 19));
+    const __m256i hi = _mm256_cmpeq_epi32(_mm256_and_si256(c, v_set(0x8000)), v_set(0x8000));
+    __m256i a = v_set(ta0);
+    if (aem) a = _mm256_andnot_si256(_mm256_cmpeq_epi32(_mm256_and_si256(c, v_set(0x7FFF)), _mm256_setzero_si256()), a);
+    a = _mm256_blendv_epi8(a, v_set(ta1), hi);
+    return _mm256_or_si256(o, _mm256_slli_epi32(a, 24));
+}
+V8 __m256i v_c32to16(__m256i c) {   /* c32to16() */
+    const __m256i f = v_set(31);
+    return _mm256_or_si256(_mm256_or_si256(_mm256_and_si256(_mm256_srli_epi32(c, 3), f), _mm256_slli_epi32(_mm256_and_si256(_mm256_srli_epi32(c, 11), f), 5)),
+                           _mm256_or_si256(_mm256_slli_epi32(_mm256_and_si256(_mm256_srli_epi32(c, 19), f), 10), _mm256_and_si256(_mm256_srli_epi32(c, 16), v_set(0x8000))));
+}
 V8 __m256i v_texel(const TexState *t, __m256i u, __m256i v) {
     u = wrap8(u, t->tw, t->wms, t->minu, t->maxu); v = wrap8(v, t->th, t->wmt, t->minv, t->maxv);
     __m256i c, idx;
@@ -627,6 +665,8 @@ V8 __m256i v_texel(const TexState *t, __m256i u, __m256i v) {
         __m256i a = v_set((int)((uint32_t)t->ta0 << 24));
         if (t->aem) a = _mm256_andnot_si256(_mm256_cmpeq_epi32(c, _mm256_setzero_si256()), a);
         return _mm256_or_si256(c, a); }
+    case CT16: return v_c16to32(v_read16(v_addr16(t->tbp, t->tbw, u, v, bt16_i)), t->aem, t->ta0, t->ta1);
+    case CT16S: return v_c16to32(v_read16(v_addr16(t->tbp, t->tbw, u, v, bt16s_i)), t->aem, t->ta0, t->ta1);
     case T8: idx = _mm256_and_si256(_mm256_i32gather_epi32((const int *)VM8, v_addr8(t->tbp, t->tbw, u, v), 1), v_set(255)); break;
     case T8H: idx = _mm256_srli_epi32(_mm256_i32gather_epi32((const int *)vm, v_addr32(t->tbp, t->tbw, u, v, xoff32), 4), 24); break;
     case T4: { __m256i a = v_addr4(t->tbp, t->tbw, u, v);
@@ -704,8 +744,14 @@ V8 void v_pixel(const Draw *d, int xb, int y, __m256i live, __m256i z, __m256i c
         }
     }
     if (_mm256_testz_si256(live, live)) return;
-    const __m256i fa = _mm256_and_si256(_mm256_add_epi32(_mm256_loadu_si256((const __m256i *)(xoff32[y & 31] + (xb & 2047))), v_set((int)(d->fbp * 64 + (uint32_t)(y >> 5) * d->fbw * 2048))), v_set(0xFFFFF));
-    const __m256i dst = d->need_dst ? _mm256_i32gather_epi32((const int *)vm, fa, 4) : zero;
+    __m256i fa, dst, dst16 = zero;
+    if (d->fb16) {   /* fa: halfword index; dst: the pixel as 32-bit color (c16to32 with TA1 = 0x80) */
+        fa = v_addr16(d->fbp, d->fbw, _mm256_add_epi32(v_set(xb), _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7)), v_set(y), d->fpsm == CT16S ? bt16s_i : bt16_i);
+        dst16 = v_read16(fa); dst = v_c16to32(dst16, 0, 0, 0x80);
+    } else {
+        fa = _mm256_and_si256(_mm256_add_epi32(_mm256_loadu_si256((const __m256i *)(xoff32[y & 31] + (xb & 2047))), v_set((int)(d->fbp * 64 + (uint32_t)(y >> 5) * d->fbw * 2048))), v_set(0xFFFFF));
+        dst = d->need_dst ? _mm256_i32gather_epi32((const int *)vm, fa, 4) : zero;
+    }
     __m256i za = zero;
     if (d->zte) {
         za = _mm256_and_si256(_mm256_add_epi32(_mm256_loadu_si256((const __m256i *)(xoff32z[y & 31] + (xb & 2047))), v_set((int)(d->zbp * 64 + (uint32_t)(y >> 5) * d->fbw * 2048))), v_set(0xFFFFF));
@@ -733,28 +779,78 @@ V8 void v_pixel(const Draw *d, int xb, int y, __m256i live, __m256i z, __m256i c
     if (d->fba) out = _mm256_or_si256(out, v_set((int)0x80000000u));
     out = _mm256_blendv_epi8(out, _mm256_or_si256(_mm256_and_si256(out, v_set(0xFFFFFF)), _mm256_and_si256(dst, v_set((int)0xFF000000u))), rgbonly);
     const __m256i fbm = v_set((int)d->fbmsk);
-    out = _mm256_or_si256(_mm256_andnot_si256(fbm, out), _mm256_and_si256(dst, fbm));
+    if (d->fb16) out = _mm256_or_si256(_mm256_andnot_si256(fbm, v_c32to16(out)), _mm256_and_si256(dst16, _mm256_and_si256(fbm, v_set(0xFFFF))));
+    else out = _mm256_or_si256(_mm256_andnot_si256(fbm, out), _mm256_and_si256(dst, fbm));
+    if (d->fpsm == CT24) out = _mm256_or_si256(_mm256_and_si256(dst, v_set((int)0xFF000000u)), _mm256_and_si256(out, v_set(0xFFFFFF)));
     const int mfb = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_and_si256(live, fbok)));
     const int mz = (d->zte && !d->zmsk) ? _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_and_si256(live, zok))) : 0;
     uint32_t oa[8], fa_[8], za_[8], zv[8];
     _mm256_storeu_si256((__m256i *)oa, out); _mm256_storeu_si256((__m256i *)fa_, fa); _mm256_storeu_si256((__m256i *)za_, za); _mm256_storeu_si256((__m256i *)zv, z);
     for (int i = 0; i < 8; i++) {   /* lane order: fb write then z write, as pixel() does per pixel */
-        if (mfb >> i & 1) { vm[fa_[i]] = oa[i]; n_pixels++; }
+        if (mfb >> i & 1) { if (d->fb16) VM16[fa_[i]] = (uint16_t)oa[i]; else vm[fa_[i]] = oa[i]; n_pixels++; }
         if (mz >> i & 1) { uint32_t *zp = &vm[za_[i]]; *zp = d->zpsm == Z24 ? (*zp & 0xFF000000u) | (zv[i] & 0xFFFFFF) : zv[i]; }
     }
 }
 static int ranges_overlap(uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1) { return a0 < b1 && b0 < a1; }
-/* the vector pipeline handles this draw and no texture/Z read can see a frame-buffer write of the same primitive */
-static int tri_simd_ok(const Draw *d) {
-    if (d->fb16 || d->fpsm != CT32 || d->date) return 0;
-    if (d->zte && d->ztst != 0 && (d->zread || !d->zmsk) && d->zpsm != Z32 && d->zpsm != Z24) return 0;
+static uint64_t st_scalar[4];   /* draws left to the scalar path: format, frame range, Z overlap, texture overlap */
+/* 8 KB pages (2048 words) touched by the pixel rectangle [x0,x1]x[y0,y1] of a buffer at block bp, width bw, format psm;
+   a buffer not starting on a page boundary also touches the following page */
+static void mark_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int x0, int y0, int x1, int y1) {
+    int pw, ph; uint32_t stride;
+    switch (psm) {
+    case CT32: case CT24: case Z32: case Z24: case T8H: case T4HL: case T4HH: pw = 64; ph = 32; stride = bw; break;
+    case CT16: case CT16S: case Z16: case Z16S: pw = 64; ph = 64; stride = bw; break;
+    case T8: pw = 128; ph = 64; stride = (bw + 1) >> 1; break;
+    default: pw = 128; ph = 128; stride = (bw + 1) >> 1; break;
+    }
+    const uint32_t base = bp >> 5, extra = (bp & 31) != 0;
+    for (int py = y0 / ph; py <= y1 / ph; py++) for (int px = x0 / pw; px <= x1 / pw; px++)
+        for (uint32_t k = 0; k <= extra; k++) { uint32_t p = (base + (uint32_t)py * stride + (uint32_t)px + k) & 511; pages[p >> 6] |= 1ull << (p & 63); }
+}
+static int pages_meet(const uint64_t a[8], const uint64_t b[8]) { for (int i = 0; i < 8; i++) if (a[i] & b[i]) return 1; return 0; }
+/* texel range [*a,*b] after wrap(): exact for the clamp modes; returns 0 (use the whole texture) for repeat modes */
+static int clamp_range(int *a, int *b, int size, int mode, int mn, int mx) {
+    if (mode == 1) { *a = wrap(*a, size, 1, 0, 0); *b = wrap(*b, size, 1, 0, 0); return 1; }
+    if (mode == 2 && mn <= mx) { *a = wrap(*a, size, 2, mn, mx); *b = wrap(*b, size, 2, mn, mx); return 1; }
+    return 0;
+}
+/* Can the sprite read a texel that it also writes as a frame pixel? The texel bounds come from the same per-pixel
+   expressions the renderers use (u at the first and last pixel column, v at the first and last row). Same buffer and
+   format: exact pixel rectangles; otherwise 8 KB pages. Wrapping modes other than clamps use the whole texture. */
+static int sprite_tex_overlaps(const Draw *d, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv) {
+    const TexState *t = &d->tex;
+    if (px1 <= px0 || py1 <= py0) return 0;
+    const int uf = (int)(u0 + ((px0 << 4) - x0) * du), ul = (int)(u0 + (((px1 - 1) << 4) - x0) * du);
+    const int vf = (int)(v0 + ((py0 << 4) - y0) * dv), vl = (int)(v0 + (((py1 - 1) << 4) - y0) * dv);
+    const int umn = uf < ul ? uf : ul, umx = uf < ul ? ul : uf, vmn = vf < vl ? vf : vl, vmx = vf < vl ? vl : vf;
+    /* u(x) is monotonic in x (and v in y), so the end pixels bound every texel: nearest reads u >> 4; bilinear reads
+       (u - 8) >> 4 and, when the fraction is non-zero, the next texel (sample() skips taps with zero weight) */
+    int ua, ub, va, vb;
+    if (t->bilinear) { ua = (umn - 8) >> 4; ub = ((umx - 8) >> 4) + (((umx - 8) & 15) != 0); va = (vmn - 8) >> 4; vb = ((vmx - 8) >> 4) + (((vmx - 8) & 15) != 0); }
+    else { ua = umn >> 4; ub = umx >> 4; va = vmn >> 4; vb = vmx >> 4; }
+    if (!clamp_range(&ua, &ub, t->tw, t->wms, t->minu, t->maxu) || !clamp_range(&va, &vb, t->th, t->wmt, t->minv, t->maxv)) { ua = 0; ub = t->tw - 1; va = 0; vb = t->th - 1; }
+    if (ua > ub || va > vb) return 0;
+    if (t->tbp == d->fbp && t->tbw == d->fbw && t->psm == d->fpsm) {
+        return ua <= px1 - 1 && px0 <= ub && va <= py1 - 1 && py0 <= vb; }
+    uint64_t fp[8] = {0}, tp[8] = {0};
+    mark_pages(fp, d->fbp, d->fbw, d->fpsm, px0, py0, px1 - 1, py1 - 1);
+    mark_pages(tp, t->tbp, t->tbw, t->psm, ua, va, ub, vb);
+    return pages_meet(fp, tp);
+}
+static int tri_simd_ok_ex(const Draw *d, int tex_checked);
+static int tri_simd_ok(const Draw *d) { return tri_simd_ok_ex(d, 0); }
+static int tri_simd_ok_ex(const Draw *d, int tex_checked) {
+    static int off = -1; if (off < 0) off = getenv("HG_TRISIMD") && !strcmp(getenv("HG_TRISIMD"), "0");
+    if (off) return 0;
+    if ((d->fpsm != CT32 && d->fpsm != CT24 && d->fpsm != CT16 && d->fpsm != CT16S) || d->date) { st_scalar[0]++; return 0; }
+    if (d->zte && d->ztst != 0 && (d->zread || !d->zmsk) && d->zpsm != Z32 && d->zpsm != Z24) { st_scalar[0]++; return 0; }
     const uint32_t fb0 = d->fbp * 64, fb1 = fb0 + d->fbw * 2048 * ((uint32_t)(d->scy1 >> 5) + 1);
-    if (fb1 > (1u << 20)) return 0;
-    if (d->zte && d->ztst != 0 && ranges_overlap(fb0, fb1, d->zbp * 64, d->zbp * 64 + d->fbw * 2048 * ((uint32_t)(d->scy1 >> 5) + 1))) return 0;
+    if (fb1 > (1u << 20)) { st_scalar[1]++; return 0; }
+    if (d->zte && d->ztst != 0 && ranges_overlap(fb0, fb1, d->zbp * 64, d->zbp * 64 + d->fbw * 2048 * ((uint32_t)(d->scy1 >> 5) + 1))) { st_scalar[2]++; return 0; }
     if (d->tme) {
-        switch (d->tex.psm) { case CT32: case CT24: case T8: case T8H: case T4: case T4HL: case T4HH: break; default: return 0; }
+        switch (d->tex.psm) { case CT32: case CT24: case CT16: case CT16S: case T8: case T8H: case T4: case T4HL: case T4HH: break; default: st_scalar[0]++; return 0; }
         const uint32_t t0 = d->tex.tbp * 64, t1 = t0 + (d->tex.tbw ? d->tex.tbw : 1) * 2048 * ((d->tex.th >> 5) + 2);
-        if (ranges_overlap(fb0, fb1, t0, t1)) return 0;
+        if (!tex_checked && ranges_overlap(fb0, fb1, t0, t1)) { st_scalar[3]++; return 0; }
     }
     return 1;
 }
@@ -779,7 +875,7 @@ __attribute__((target("avx2"))) static void draw_triangle_avx2(const Draw *d, co
     }
     const __m256 X0 = _mm256_set1_ps(x0), X1 = _mm256_set1_ps(x1), X2 = _mm256_set1_ps(x2), INV = _mm256_set1_ps(inv), ONE = _mm256_set1_ps(1.0f), EPS = _mm256_set1_ps(-1e-6f);
     const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), bitsel = _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
-    const int simd = tri_simd_ok(d) && !(getenv("HG_TRISIMD") && !strcmp(getenv("HG_TRISIMD"), "0")), znever = d->zte && d->ztst == 0;
+    const int simd = tri_simd_ok(d), znever = d->zte && d->ztst == 0;
     /* barycentric i at (px, py) is (A_i + B_i * px) * inv in exact arithmetic: used only for the conservative span */
     const double B0 = (double)y1 - y2, B1 = (double)y2 - y0;
     for (int y = miny; y <= maxy; y++) {
@@ -878,6 +974,26 @@ __attribute__((target("avx2"))) static void draw_triangle_avx2(const Draw *d, co
         }
     }
 }
+/* Sprites the specialized paths do not take: the same vector shading and pixel pipeline as triangles, with the
+   sprite's per-pixel texture coordinate computed as in draw_sprite(). */
+__attribute__((target("avx2"))) static void sprite_vec(const Draw *d, const Vtx *b, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv) {
+    const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), col = _mm256_set1_epi32((int)b->rgba), fog = _mm256_set1_epi32(b->f);
+    const __m256i zv = _mm256_set1_epi32((int)b->z);
+    const int znever = d->zte && d->ztst == 0;
+    for (int y = py0; y < py1; y++) {
+        const __m256i v16 = _mm256_set1_epi32(d->tme ? (int)(v0 + ((y << 4) - y0) * dv) : 0);
+        for (int xb = px0; xb < px1; xb += 8) {
+            const int n = px1 - xb < 8 ? px1 - xb : 8;
+            n_visits += n;
+            if (znever) continue;
+            const __m256i xv = _mm256_add_epi32(_mm256_set1_epi32(xb), lane);
+            const __m256i live = _mm256_cmpgt_epi32(_mm256_set1_epi32(n), lane);
+            __m256i u16 = _mm256_setzero_si256();
+            if (d->tme) u16 = _mm256_cvttps_epi32(_mm256_add_ps(_mm256_set1_ps(u0), _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_slli_epi32(xv, 4), _mm256_set1_epi32(x0))), _mm256_set1_ps(du))));
+            v_pixel(d, xb, y, live, zv, v_shade(d, col, u16, v16, fog));
+        }
+    }
+}
 #endif
 static void draw_line(const Draw *d, const Vtx *a, const Vtx *b) {
     int x0 = a->x >> 4, y0 = a->y >> 4, x1 = b->x >> 4, y1 = b->y >> 4;
@@ -916,7 +1032,8 @@ static void vertex_kick(Vtx v, int draw) {
         int k = prim == 6 ? 0 : (prim >= 3 && prim <= 5) ? 1 : 2;
         st_prims[k]++; st_px[k] += n_pixels - px0; st_visits[k] += n_visits - vis0; st_time[k] += host_now() - t0;
         if (d.tme) st_tex[k]++; if (d.abe) st_blend[k]++; if (d.zte) st_z[k]++;
-        if (getenv("HG_SPRSTAT") && k == (getenv("HG_SPRSTAT")[0] == 't' ? 1 : 0)) {   /* configuration histogram weighted by pixels */
+        static int sprstat = -1; if (sprstat < 0) sprstat = !getenv("HG_SPRSTAT") ? 3 : getenv("HG_SPRSTAT")[0] == 't' ? 1 : 0;
+        if (k == sprstat) {   /* configuration histogram weighted by pixels (HG_SPRSTAT: sprites, =t: triangles) */
             char key[160]; snprintf(key, sizeof key, "fb%02x tex%d:%02x bil%d tfx%d tcc%d abe%d(%d%d%d%d fix%d) ate%d:%d zte%d:%d zmsk%d fbmsk%08x iip%d fge%d fst%d z%02x",
                 d.fpsm, d.tme, d.tme ? d.tex.psm : 0, d.tme ? d.tex.bilinear : 0, d.tme ? d.tex.tfx : 0, d.tme ? d.tex.tcc : 0, d.abe, d.a, d.b, d.cc, d.d, d.fix, d.ate, d.atst, d.zte, d.ztst, d.zmsk, d.fbmsk,
                 d.iip, d.fge, d.fst, d.zpsm);
@@ -924,7 +1041,6 @@ static void vertex_kick(Vtx v, int draw) {
             int j = 0; for (; j < nh; j++) if (!strcmp(h[j].k, key)) break;
             if (j == nh && nh < 256) { strcpy(h[nh].k, key); nh++; }
             if (j < 256) { h[j].px += n_visits - vis0; h[j].n++; h[j].t += host_now() - t0; }
-            static uint64_t calls; if (++calls % 100000 == 0 || getenv("HG_SPRSTAT")[0] == 'x') {}
             gs_sprhist_ptr = (void *)h; gs_sprhist_n = nh;
         }
         tprof[1] += host_now() - t0;
@@ -1069,7 +1185,7 @@ void gs_write_reg(int reg, uint64_t v) {
     case 0x52: r_trxreg = v; break;
     case 0x53: trxdir_write(v); break;
     case 0x54: hwreg_write(v); break;
-    case 0x61: if (gspriv) { uint32_t csr; memcpy(&csr, gspriv + 0x1000, 4); csr |= 2; memcpy(gspriv + 0x1000, &csr, 4); } break;   /* FINISH */
+    case 0x61: if (gspriv && !mtgs) { uint32_t csr;   /* reads of CSR report FINISH anyway (hle_gs_read) */ memcpy(&csr, gspriv + 0x1000, 4); csr |= 2; memcpy(gspriv + 0x1000, &csr, 4); } break;   /* FINISH */
     case 0x60: case 0x62: break;   /* SIGNAL, LABEL: not modelled */
     default: break;
     }
@@ -1102,8 +1218,7 @@ static void packed(int r, const uint64_t q[2]) {
     }
 }
 static uint64_t n_gif_tags;
-int gif_path_done(int path) { GifPath *g = &gpath[path & 3]; return !g->in_packet && g->eop; }
-void gif_qword(int path, const uint64_t q[2]) {
+static void gif_qword_exec(int path, const uint64_t q[2]) {
     GifPath *g = &gpath[path & 3];
     if (!g->in_packet) { gif_tag(g, q); n_gif_tags++; return; }
     switch (g->flg) {
@@ -1130,12 +1245,12 @@ void gif_qword(int path, const uint64_t q[2]) {
 static uint64_t frames_written;
 /* Copy the displayed picture (read circuit from PMODE, DISPFB/DISPLAY) into out as 0x00BBGGRR words.
    Returns 0 when nothing displayable is set up. */
-int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
-    if (!gspriv) return 0;
+static int display_from(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
+    if (!priv) return 0;
     uint64_t pmode, dispfb, display;
-    memcpy(&pmode, gspriv + 0x00, 8);
+    memcpy(&pmode, priv + 0x00, 8);
     int c2 = (pmode >> 1) & 1;
-    memcpy(&dispfb, gspriv + (c2 ? 0x90 : 0x70), 8); memcpy(&display, gspriv + (c2 ? 0xa0 : 0x80), 8);
+    memcpy(&dispfb, priv + (c2 ? 0x90 : 0x70), 8); memcpy(&display, priv + (c2 ? 0xa0 : 0x80), 8);
     uint32_t fbp = BITS(dispfb, 0, 9) * 32, fbw = BITS(dispfb, 9, 6), psm = BITS(dispfb, 15, 5), dbx = BITS(dispfb, 32, 11), dby = BITS(dispfb, 43, 11);
     int magh = BITS(display, 23, 4) + 1, dw = BITS(display, 32, 12) + 1, dh = BITS(display, 44, 11) + 1;
     int w = dw / magh, h = dh; if (w > maxw) w = maxw; if (h > maxh) h = maxh;
@@ -1148,10 +1263,10 @@ int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
     }
     *pw = w; *ph = h; return 1;
 }
-static void dump_frame(uint64_t vb) {
+static void dump_frame(uint64_t vb, const uint8_t *priv) {
     const char *dir = getenv("HG_FRAMES"); if (!dir) return;
     static uint32_t buf[1024 * 1024]; int w, h;
-    if (!gs_display(buf, 1024, 1024, &w, &h)) return;
+    if (!display_from(priv, buf, 1024, 1024, &w, &h)) return;
     char path[1024]; snprintf(path, sizeof path, "%s/frame_%06llu.ppm", dir, (unsigned long long)vb);
     FILE *f = fopen(path, "wb"); if (!f) return;
     fprintf(f, "P6\n%d %d\n255\n", w, h);
@@ -1162,10 +1277,109 @@ static void dump_frame(uint64_t vb) {
     }
     free(row); fclose(f); frames_written++;
 }
+/* ================================================================== GS thread
+   With HG_MTGS (default on with 2+ CPUs) the GS runs on its own thread: GIF qwords and VBlank markers go through a
+   ring buffer and are executed in the same order as in single-threaded mode, so the output is the same. The
+   producer tracks GIF packet boundaries itself to answer gif_path_done() (XGKICK), snapshots the privileged display
+   registers at each VBlank, and stays at most two VBlanks ahead. Frames are dumped and handed to the window by
+   the GS thread when it reaches the VBlank marker. */
+enum { E_PATH0 = 0, E_VBLANK = 4 };
+typedef struct { uint64_t q[2]; uint64_t kind; } GsEnt;
+#define RING (1u << 18)
+static GsEnt *ring; static _Atomic uint64_t r_head, r_tail;      /* head: written by producer, tail: by consumer */
+static pthread_t gs_thread;
+static pthread_mutex_t gs_mx = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t gs_cv_data = PTHREAD_COND_INITIALIZER, gs_cv_space = PTHREAD_COND_INITIALIZER;
+static _Atomic int cons_sleeping, prod_sleeping; static _Atomic uint64_t vb_sent, vb_done;
+static uint8_t priv_snap[4][0xB0];
+static GifPath shadow[4];                                        /* producer-side packet tracking */
+static uint32_t front[1024 * 1024]; static int front_w, front_h, front_ok; static pthread_mutex_t front_mx = PTHREAD_MUTEX_INITIALIZER;
+static int want_front;
+static void gs_vblank_exec(uint64_t vb, const uint8_t *priv);
+static void *gs_main(void *arg) {
+    (void)arg;
+    for (;;) {
+        uint64_t t = atomic_load_explicit(&r_tail, memory_order_relaxed), h = atomic_load_explicit(&r_head, memory_order_acquire);
+        if (t == h) {
+            pthread_mutex_lock(&gs_mx); atomic_store(&cons_sleeping, 1);
+            while (atomic_load(&r_tail) == atomic_load(&r_head)) pthread_cond_wait(&gs_cv_data, &gs_mx);
+            atomic_store(&cons_sleeping, 0); pthread_mutex_unlock(&gs_mx);
+            continue;
+        }
+        for (; t != h; t++) {
+            const GsEnt *e = &ring[t & (RING - 1)];
+            if (e->kind < 4) gif_qword_exec((int)e->kind, e->q);
+            else { gs_vblank_exec(e->q[0], priv_snap[e->q[0] & 3]); atomic_store_explicit(&vb_done, e->q[0], memory_order_release); }
+            if (((t + 1) & 1023) == 0) {   /* hand space back regularly */
+                atomic_store_explicit(&r_tail, t + 1, memory_order_release);
+                if (atomic_load(&prod_sleeping)) { pthread_mutex_lock(&gs_mx); pthread_cond_signal(&gs_cv_space); pthread_mutex_unlock(&gs_mx); }
+            }
+        }
+        atomic_store_explicit(&r_tail, t, memory_order_release);
+        if (atomic_load(&prod_sleeping)) { pthread_mutex_lock(&gs_mx); pthread_cond_signal(&gs_cv_space); pthread_mutex_unlock(&gs_mx); }
+    }
+    return 0;
+}
+static void wake_consumer(void) {
+    if (atomic_load(&cons_sleeping)) { pthread_mutex_lock(&gs_mx); pthread_cond_signal(&gs_cv_data); pthread_mutex_unlock(&gs_mx); }
+}
+/* wait until cond() holds, sleeping on the space condition (signalled by the consumer as it makes progress) */
+static void prod_wait(int (*cond)(void)) {
+    wake_consumer();
+    pthread_mutex_lock(&gs_mx); atomic_store(&prod_sleeping, 1);
+    while (!cond()) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 1000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&gs_cv_space, &gs_mx, &ts); }
+    atomic_store(&prod_sleeping, 0); pthread_mutex_unlock(&gs_mx);
+}
+static int ring_has_space(void) { return atomic_load(&r_head) - atomic_load(&r_tail) < RING - 1; }
+static int ring_empty(void) { return atomic_load(&r_head) == atomic_load(&r_tail); }
+static int lag_ok(void) { return atomic_load(&vb_sent) - atomic_load(&vb_done) <= 2; }
+static inline void push(uint64_t kind, const uint64_t q[2]) {
+    uint64_t h = atomic_load_explicit(&r_head, memory_order_relaxed);
+    if (h - atomic_load_explicit(&r_tail, memory_order_acquire) >= RING - 1) prod_wait(ring_has_space);
+    GsEnt *e = &ring[h & (RING - 1)]; e->q[0] = q[0]; e->q[1] = q[1]; e->kind = kind;
+    atomic_store_explicit(&r_head, h + 1, memory_order_release);
+    if (((h + 1) & 255) == 0) wake_consumer();
+}
+static void gs_sync(void) { if (mtgs) prod_wait(ring_empty); }
+static void shadow_qword(int path, const uint64_t q[2]) {
+    GifPath *g = &shadow[path & 3];
+    if (!g->in_packet) { g->nloop = BITS(q[0], 0, 15); g->eop = BITS(q[0], 15, 1); g->flg = BITS(q[0], 58, 2); g->nreg = BITS(q[0], 60, 4); if (!g->nreg) g->nreg = 16;
+        g->reg_i = 0; g->in_packet = g->nloop > 0; return; }
+    switch (g->flg) {
+    case 0: if (++g->reg_i == g->nreg) { g->reg_i = 0; if (--g->nloop == 0) g->in_packet = 0; } break;
+    case 1: for (int k = 0; k < 2 && g->in_packet; k++) if (++g->reg_i == g->nreg) { g->reg_i = 0; if (--g->nloop == 0) g->in_packet = 0; } break;
+    default: if (--g->nloop == 0) g->in_packet = 0;
+    }
+}
+int gif_path_done(int path) { const GifPath *g = mtgs ? &shadow[path & 3] : &gpath[path & 3]; return !g->in_packet && g->eop; }
+void gif_qword(int path, const uint64_t q[2]) {
+    if (!mtgs) { gif_qword_exec(path, q); return; }
+    shadow_qword(path, q); push((uint64_t)(path & 3), q);
+}
+int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
+    if (!mtgs) return display_from(gspriv, out, maxw, maxh, pw, ph);
+    want_front = 1;
+    pthread_mutex_lock(&front_mx);
+    int ok = front_ok && front_w <= maxw && front_h <= maxh;
+    if (ok) { for (int y = 0; y < front_h; y++) memcpy(out + y * front_w, front + y * front_w, (size_t)front_w * 4); *pw = front_w; *ph = front_h; }
+    pthread_mutex_unlock(&front_mx);
+    return ok;
+}
 void gs_vblank(uint64_t vb) {
+    if (!mtgs) { gs_vblank_exec(vb, gspriv); return; }
+    memcpy(priv_snap[vb & 3], gspriv, 0xB0);
+    atomic_store(&vb_sent, vb);
+    const uint64_t q[2] = { vb, 0 }; push(E_VBLANK, q); wake_consumer();
+    if (!lag_ok()) prod_wait(lag_ok);
+}
+static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
     gs_nodraw = gs_draw_from < 0 || (uint64_t)gs_draw_from > vb;
+    if (mtgs && want_front) {
+        static uint32_t tmp[1024 * 1024]; int w, h, ok = display_from(priv, tmp, 1024, 1024, &w, &h);
+        pthread_mutex_lock(&front_mx); front_ok = ok; if (ok) { memcpy(front, tmp, (size_t)w * h * 4); front_w = w; front_h = h; } pthread_mutex_unlock(&front_mx);
+    }
     static long every = -1; if (every < 0) every = getenv("HG_FRAME_EVERY") ? atol(getenv("HG_FRAME_EVERY")) : 60;
-    if (every > 0 && vb % every == 0) dump_frame(vb);
+    if (every > 0 && vb % every == 0) dump_frame(vb, priv);
     static uint64_t last_log; if (vb - last_log >= 600) { last_log = vb; L("GS: VBlank %llu: %llu prims, %llu pixels, %llu GIF tags, %llu image qwords so far\n",
         (unsigned long long)vb, (unsigned long long)n_prims, (unsigned long long)n_pixels, (unsigned long long)n_gif_tags, (unsigned long long)n_xfer_qw); }
     n_kicks_frame = 0;
@@ -1176,6 +1390,8 @@ static void build_simd_tables(void) {
     for (int i = 0; i < 16; i++) for (int j = 0; j < 16; j++) ct8_i[i][j] = columnTable8[i][j];
     for (int i = 0; i < 8; i++) for (int j = 0; j < 4; j++) bt4_i[i][j] = blockTable4[i][j];
     for (int i = 0; i < 16; i++) for (int j = 0; j < 32; j++) ct4_i[i][j] = columnTable4[i][j];
+    for (int i = 0; i < 8; i++) for (int j = 0; j < 4; j++) { bt16_i[i][j] = blockTable16[i][j]; bt16s_i[i][j] = blockTable16S[i][j]; bt16z_i[i][j] = blockTable16Z[i][j]; }
+    for (int i = 0; i < 8; i++) for (int j = 0; j < 16; j++) ct16_i[i][j] = columnTable16[i][j];
 }
 #endif
 void gs_init(uint8_t *priv) {
@@ -1184,9 +1400,21 @@ void gs_init(uint8_t *priv) {
     build_simd_tables();
 #endif
     if (getenv("HG_GSDRAW")) { gs_draw_from = atol(getenv("HG_GSDRAW")); if (gs_draw_from == 0) gs_draw_from = -1; gs_nodraw = 1; }
+    const char *m = getenv("HG_MTGS");
+    mtgs = m ? strcmp(m, "0") != 0 : sysconf(_SC_NPROCESSORS_ONLN) >= 2;
+    if (mtgs) {
+        ring = calloc(RING, sizeof *ring);
+        if (!ring || pthread_create(&gs_thread, 0, gs_main, 0)) { L("GS: no GS thread, running single-threaded\n"); mtgs = 0; }
+        else L("GS: running on its own thread (HG_MTGS=0 to disable)\n");
+    }
     int bad = check_bijective(); if (bad) L("GS: WARNING: T%d column table is not a bijection\n", bad);
 }
 void gs_dump_stats(void) {
+    gs_sync();
+#if defined(__x86_64__)
+    L("GS scalar-path draws (vector pipeline not used): format %llu, frame range %llu, Z overlaps frame %llu, texture overlaps frame %llu\n",
+      (unsigned long long)st_scalar[0], (unsigned long long)st_scalar[1], (unsigned long long)st_scalar[2], (unsigned long long)st_scalar[3]);
+#endif
     L("GS image transfers: ~%.1fs (sampled);", tprof[5]); for (int p = 0; p < 64; p++) if (st_xfer_psm[p]) L(" psm%02x %llu qw", p, (unsigned long long)st_xfer_psm[p]); L("\n");
     if (gs_sprhist_ptr) { struct { char k[160]; uint64_t px, n; double t; } *h = gs_sprhist_ptr;
         for (int r = 0; r < 12; r++) { int b = -1; for (int j = 0; j < gs_sprhist_n; j++) if (h[j].px && (b < 0 || h[j].px > h[b].px)) b = j;

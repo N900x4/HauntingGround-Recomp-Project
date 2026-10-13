@@ -263,8 +263,10 @@ static void draw_setup(Draw *d) {
     d->zread = d->zte && d->ztst >= 2;
 }
 static inline int clamp255(int v, int cc) { return cc ? (v < 0 ? 0 : v > 255 ? 255 : v) : (v & 255); }
+static int watch_x = -1, watch_y; static long watch_vb; static uint64_t cur_vb; static char watch_prim[400];
 static inline __attribute__((always_inline)) void pixel(const Draw *d, int x, int y, uint32_t z, uint32_t col /* rgba8, a 0x80 = 1.0 */) {
     n_visits++;
+    if (__builtin_expect(x == watch_x && y == watch_y, 0) && (long)cur_vb >= watch_vb) L("PIXWATCH (%d,%d) z %u col %08x fbp %u: %s\n", x, y, z, col, d->fbp, watch_prim);
     if (x < d->scx0 || x > d->scx1 || y < d->scy0 || y > d->scy1) return;
     int as = col >> 24;
     int fb_ok = 1, z_ok = 1, rgb_only = 0;
@@ -1016,12 +1018,23 @@ static void vertex_kick(Vtx v, int draw) {
         uint64_t off = d.c->xyoffset; int ox = BITS(off, 0, 16), oy = BITS(off, 32, 16);
         Vtx w[3]; for (int i = 0; i < nvq; i++) { w[i] = vq[i]; w[i].x -= ox; w[i].y -= oy; }
         n_prims++; n_kicks_frame++;
+        if (watch_x >= 0 && (long)cur_vb >= watch_vb) snprintf(watch_prim, sizeof watch_prim, "prim %d tme %d psm %02x tbp %u abe %d(%d%d%d%d) ate %d:%d:%d zte %d:%d fge %d fst %d v0 (%d,%d z%u rgba %08x st %g,%g,%g uv %d,%d) v1 (%d,%d z%u rgba %08x st %g,%g,%g) v2 (%d,%d z%u rgba %08x st %g,%g,%g)",
+            prim, d.tme, d.tex.psm, d.tex.tbp, d.abe, d.a, d.b, d.cc, d.d, d.ate, d.atst, d.afail, d.zte, d.ztst, d.fge, d.fst, w[0].x >> 4, w[0].y >> 4, w[0].z, w[0].rgba, w[0].s, w[0].t, w[0].q, w[0].u, w[0].v,
+            w[1].x >> 4, w[1].y >> 4, w[1].z, w[1].rgba, w[1].s, w[1].t, w[1].q, nvq > 2 ? w[2].x >> 4 : 0, nvq > 2 ? w[2].y >> 4 : 0, nvq > 2 ? w[2].z : 0, nvq > 2 ? w[2].rgba : 0, nvq > 2 ? w[2].s : 0, nvq > 2 ? w[2].t : 0, nvq > 2 ? w[2].q : 0);
         double t0 = host_now();
         uint64_t px0 = n_pixels, vis0 = n_visits;
         switch (prim) {
         case 0: pixel(&d, w[0].x >> 4, w[0].y >> 4, w[0].z, shade(&d, w[0].rgba, w[0].u, w[0].v, w[0].f)); break;
         case 1: case 2: draw_line(&d, &w[0], &w[1]); break;
         case 3: case 4: case 5:
+            if (getenv("HG_BIGTRI")) {   /* debugging: report triangles far larger than the screen */
+                int xs[3] = { w[0].x >> 4, w[1].x >> 4, w[2].x >> 4 }, ys[3] = { w[0].y >> 4, w[1].y >> 4, w[2].y >> 4 };
+                int mnx = xs[0], mxx = xs[0], mny = ys[0], mxy = ys[0];
+                for (int i = 1; i < 3; i++) { if (xs[i] < mnx) mnx = xs[i]; if (xs[i] > mxx) mxx = xs[i]; if (ys[i] < mny) mny = ys[i]; if (ys[i] > mxy) mxy = ys[i]; }
+                if ((mxx - mnx > 1500 || mxy - mny > 1500) && getenv("HG_BIGTRI")[0] == 's') break;   /* =s: skip them */
+                static int nb; if ((mxx - mnx > 1500 || mxy - mny > 1500) && nb++ < 30)
+                    L("BIGTRI prim %d tme %d: (%d,%d z%u q%g) (%d,%d z%u q%g) (%d,%d z%u q%g) scissor %d-%d,%d-%d\n", prim, d.tme, xs[0], ys[0], w[0].z, w[0].q, xs[1], ys[1], w[1].z, w[1].q, xs[2], ys[2], w[2].z, w[2].q, d.scx0, d.scx1, d.scy0, d.scy1);
+            }
 #if defined(__x86_64__)
             if (have_avx2 < 0) have_avx2 = __builtin_cpu_supports("avx2") && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
             if (have_avx2) { draw_triangle_avx2(&d, &w[0], &w[1], &w[2]); break; }
@@ -1044,6 +1057,14 @@ static void vertex_kick(Vtx v, int draw) {
             gs_sprhist_ptr = (void *)h; gs_sprhist_n = nh;
         }
         tprof[1] += host_now() - t0;
+    }
+    if (!draw && watch_x >= 0 && (long)cur_vb >= watch_vb && prim >= 3 && prim <= 5) {   /* triangle kicked with ADC (not drawn) over the watched pixel? */
+        Draw d; draw_setup(&d); uint64_t off = d.c->xyoffset; int ox = BITS(off, 0, 16), oy = BITS(off, 32, 16);
+        float X[3], Y[3]; for (int i = 0; i < 3; i++) { X[i] = (vq[i].x - ox) / 16.0f; Y[i] = (vq[i].y - oy) / 16.0f; }
+        float px = watch_x, py = watch_y, a = (X[1]-X[0])*(Y[2]-Y[0]) - (X[2]-X[0])*(Y[1]-Y[0]);
+        float w0 = ((X[1]-px)*(Y[2]-py) - (X[2]-px)*(Y[1]-py)) / a, w1 = ((X[2]-px)*(Y[0]-py) - (X[0]-px)*(Y[2]-py)) / a, w2 = 1 - w0 - w1;
+        if (a != 0 && w0 >= 0 && w1 >= 0 && w2 >= 0) L("PIXWATCH-ADC (%d,%d) fbp %u: triangle not drawn (ADC): (%.0f,%.0f q%g) (%.0f,%.0f q%g) (%.0f,%.0f q%g)\n", watch_x, watch_y, d.fbp,
+            X[0], Y[0], vq[0].q, X[1], Y[1], vq[1].q, X[2], Y[2], vq[2].q);
     }
     switch (prim) {
     case 2: vq[0] = vq[1]; nvq = 1; break;
@@ -1374,6 +1395,8 @@ void gs_vblank(uint64_t vb) {
 }
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
     gs_nodraw = gs_draw_from < 0 || (uint64_t)gs_draw_from > vb;
+    cur_vb = vb;
+    { static int init; if (!init) { init = 1; const char *p = getenv("HG_PIXWATCH"); if (p) sscanf(p, "%d,%d,%ld", &watch_x, &watch_y, &watch_vb); } }
     if (mtgs && want_front) {
         static uint32_t tmp[1024 * 1024]; int w, h, ok = display_from(priv, tmp, 1024, 1024, &w, &h);
         pthread_mutex_lock(&front_mx); front_ok = ok; if (ok) { memcpy(front, tmp, (size_t)w * h * 4); front_w = w; front_h = h; } pthread_mutex_unlock(&front_mx);

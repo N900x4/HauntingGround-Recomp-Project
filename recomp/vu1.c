@@ -64,16 +64,35 @@ static inline void lanes_copy(Vec *dst, const Vec *src, int dest) {
     dst->vi = _mm_or_si128(_mm_and_si128(lane_mask[dest], src->vi), _mm_andnot_si128(lane_mask[dest], dst->vi));
 }
 
+/* Flag pipeline: an FMAC instruction's MAC/status and CLIP results reach the flag registers flag_delay
+   instructions later (the FMAC pipeline; flags do not interlock like VF registers do), so FMxxx/FSxxx/FCxxx read the
+   flags of an older instruction. HG_VUFLAGDELAY=4 enables this; the default 0 keeps flags immediate, because the
+   interpreter does not model stalls (the game only reads clip flags, and stage 1 renders the same either way). */
+typedef struct { uint64_t due; int clip; uint32_t val; } FlagUpd;
+static FlagUpd fq[16]; static int fq_n; static uint64_t vcyc; static int flag_delay = -1;
+static inline void apply_mac(uint32_t m) {
+    mac = m;
+    uint32_t s = 0;
+    if (mac & 0x000F) s |= 1; if (mac & 0x00F0) s |= 2; if (mac & 0x0F00) s |= 4; if (mac & 0xF000) s |= 8;
+    status = (status & 0xFF0) | s | (s << 6);
+}
+static inline void flag_push(int is_clip, uint32_t val) {
+    if (!flag_delay) { if (is_clip) clip = ((clip << 6) | val) & 0xFFFFFF; else apply_mac(val); return; }
+    if (fq_n == 16) { if (fq[0].clip) clip = ((clip << 6) | fq[0].val) & 0xFFFFFF; else apply_mac(fq[0].val); memmove(fq, fq + 1, sizeof fq[0] * 15); fq_n--; }
+    fq[fq_n].due = vcyc + (uint64_t)flag_delay; fq[fq_n].clip = is_clip; fq[fq_n].val = val; fq_n++;
+}
+static inline void flag_commit(int all) {
+    int k = 0;
+    while (k < fq_n && (all || fq[k].due <= vcyc)) { if (fq[k].clip) clip = ((clip << 6) | fq[k].val) & 0xFFFFFF; else apply_mac(fq[k].val); k++; }
+    if (k) { memmove(fq, fq + k, sizeof fq[0] * (size_t)(fq_n - k)); fq_n -= k; }
+}
 /* MAC flags: bit 3-i = zero(field i), 7-i = sign, 11-i = underflow, 15-i = overflow (field 0 = x); only dest fields */
 static inline void set_flags(__m128 v, int dest) {
     const __m128i b = _mm_castps_si128(v);
     const int z = _mm_movemask_ps(_mm_cmpeq_ps(v, _mm_setzero_ps()));
     const int sg = _mm_movemask_ps(v) & ~z;
     const int ov = _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(b, _mm_set1_epi32(0x7FFFFFFF)), _mm_set1_epi32(0x7F7FFFFF))));
-    mac = (rev4[z] & dest) | (rev4[sg] & dest) << 4 | (rev4[ov] & dest) << 12;
-    uint32_t s = 0;
-    if (mac & 0x000F) s |= 1; if (mac & 0x00F0) s |= 2; if (mac & 0x0F00) s |= 4; if (mac & 0xF000) s |= 8;
-    status = (status & 0xFF0) | s | (s << 6);
+    flag_push(0, (rev4[z] & dest) | (rev4[sg] & dest) << 4 | (rev4[ov] & dest) << 12);
 }
 
 /* ---------------------------------------------------------------- decode */
@@ -241,7 +260,8 @@ static inline void upper(const Dec *d, UpRes *r) {
         float w = fabsf(rdf(T.u[3])); uint32_t c = 0;
         float x = rdf(S.u[0]), y = rdf(S.u[1]), z = rdf(S.u[2]);
         if (x > w) c |= 1; if (x < -w) c |= 2; if (y > w) c |= 4; if (y < -w) c |= 8; if (z > w) c |= 16; if (z < -w) c |= 32;
-        clip = ((clip << 6) | c) & 0xFFFFFF; return; }
+        if (getenv("HG_CLIPLOG")) { static int n; if (n++ < 40) L("VU1 CLIP @%u fs vf%d (%g %g %g %g) ft vf%d.w %g -> %02x\n", 0, d->fs, x, y, z, rdf(S.u[3]), d->ft, rdf(T.u[3]), c); }
+        flag_push(1, c); return; }
     }
 }
 static inline void upper_commit(const UpRes *r) {
@@ -267,7 +287,9 @@ static void kick(uint32_t addr) {
     }
 }
 /* returns 1 if a branch is taken (target in *tgt). *wvi = VI register written (-1: none) and *wold its previous value */
+static uint64_t lk_count[64];
 static inline int lower(const Dec *d, uint32_t pc, int prev_vi, uint16_t prev_old, int *wvi, uint16_t *wold, uint32_t *tgt) {
+    lk_count[d->lk]++;
     const int dest = d->ldest, ft = d->lft, fs = d->lfs, it = d->lit, is = d->lis;
 #define SETVI(r, v) do { const int r_ = (r) & 15; if (r_) { const uint16_t nv_ = (uint16_t)(v); *wold = vi[r_]; *wvi = r_; vi[r_] = nv_; } } while (0)
 #define VIB(r) ((r) == prev_vi ? prev_old : vi[r])     /* branch operand: old value if written by the previous instruction */
@@ -371,7 +393,8 @@ static void vu1_run_inner(uint32_t start) {
     vf[0].f[0] = vf[0].f[1] = vf[0].f[2] = 0; vf[0].f[3] = 1.0f; vi[0] = 0;
     for (long n = 0; n < 4000000; n++) {
         const Dec *d = decoded(pc);
-        n_insns++;
+        n_insns++; vcyc++;
+        if (fq_n) flag_commit(0);
         if (q_wait && --q_wait == 0) q_reg = q_pend;
         if (p_wait && --p_wait == 0) p_reg = p_pend;
         UpRes ur; upper(d, &ur);
@@ -384,7 +407,7 @@ static void vu1_run_inner(uint32_t start) {
         uint32_t next = (pc + 1) & 2047;
         if (branch_pending) { next = branch_tgt & 2047; branch_pending = 0; }
         if (taken) { branch_pending = 1; branch_tgt = tgt; }
-        if (ebit_pending) { vu1_tpc = next; q_commit(); p_commit(); return; }
+        if (ebit_pending) { vu1_tpc = next; q_commit(); p_commit(); flag_commit(1); return; }
         if (d->ebit) ebit_pending = 1;                      /* E bit: run the next instruction, then stop */
         pc = next;
     }
@@ -433,6 +456,7 @@ void vu1_run(uint32_t start) {
     static int init, check;
     if (!init) {
         init = 1; check = getenv("HG_VU1CHECK") != 0;
+        flag_delay = getenv("HG_VUFLAGDELAY") ? atoi(getenv("HG_VUFLAGDELAY")) : 0;   /* 4 matches the FMAC pipeline, but stalls are not modelled: off until checked against a reference */
         for (int m = 0; m < 16; m++) {
             rev4[m] = (uint8_t)(((m & 1) << 3) | ((m & 2) << 1) | ((m & 4) >> 1) | ((m & 8) >> 3));
             lane_mask[m] = _mm_setr_epi32(m & 8 ? -1 : 0, m & 4 ? -1 : 0, m & 2 ? -1 : 0, m & 1 ? -1 : 0);
@@ -442,4 +466,7 @@ void vu1_run(uint32_t start) {
     if (check) check_run(start); else vu1_run_inner(start);
     tprof[0] += host_now() - t0;
 }
-void vu1_dump_stats(void) { L("VU1: %llu runs, %llu instructions, %llu XGKICKs\n", (unsigned long long)n_runs, (unsigned long long)n_insns, (unsigned long long)n_kicks); }
+void vu1_dump_stats(void) {
+    static const char *nm[] = { [L_FCEQ]="FCEQ", [L_FCSET]="FCSET", [L_FCAND]="FCAND", [L_FCOR]="FCOR", [L_FSEQ]="FSEQ", [L_FSSET]="FSSET", [L_FSAND]="FSAND", [L_FSOR]="FSOR",
+        [L_FMEQ]="FMEQ", [L_FMAND]="FMAND", [L_FMOR]="FMOR", [L_FCGET]="FCGET" };
+    L("VU1 flag reads:"); for (int i = 0; i < 64; i++) if (i < (int)(sizeof nm / sizeof nm[0]) && nm[i] && lk_count[i]) L(" %s %llu", nm[i], (unsigned long long)lk_count[i]); L("\n"); L("VU1: %llu runs, %llu instructions, %llu XGKICKs\n", (unsigned long long)n_runs, (unsigned long long)n_insns, (unsigned long long)n_kicks); }

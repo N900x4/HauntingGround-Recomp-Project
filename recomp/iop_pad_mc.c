@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <strings.h>
 #include <fnmatch.h>
 #include <dirent.h>
@@ -57,10 +58,34 @@ static void pad_script_load(void) {
 }
 void pad_set_input(uint16_t held, const uint8_t analog[4]) { pad_held = held; if (analog) memcpy(pad_analog, analog, 4); }
 
+/* HG_EXPLORE=vb: from that VBlank on, a simple explorer drives Fiona (testing): it holds one direction until her
+   position (player object *(0x44f818) + 0x10) stops changing, then turns to the next direction (pseudo-random),
+   taps Cross every 2 s to read text and use doors, and logs the position every second. */
+static uint16_t explore(uint64_t vb) {
+    static long start = -2; if (start == -2) start = getenv("HG_EXPLORE") ? atol(getenv("HG_EXPLORE")) : -1;
+    if (start < 0 || (long)vb < start) return 0;
+    static const int dirs[4] = { B_UP, B_RIGHT, B_DOWN, B_LEFT };
+    static int dir; static float lx, lz; static uint32_t rng = 12345; static long since;
+    uint32_t obj = 0; memcpy(&obj, gptr(0x44f818), 4);
+    float x = 0, y = 0, z = 0;
+    if (obj) { memcpy(&x, gptr(obj + 0x10), 4); memcpy(&y, gptr(obj + 0x14), 4); memcpy(&z, gptr(obj + 0x18), 4); }
+    long t = (long)vb - start;
+    if (t % 30 == 0) {
+        float moved = fabsf(x - lx) + fabsf(z - lz);
+        since += 30;
+        if ((moved < 1.0f && since >= 60) || since >= 900) { rng = rng * 1103515245u + 12345u; dir = (dir + 1 + (int)((rng >> 16) % 3)) & 3; since = 0; }
+        lx = x; lz = z;
+    }
+    if (t % 60 == 0) L("explore: VBlank %llu pos %.1f %.1f %.1f (obj 0x%x) dir %s\n", (unsigned long long)vb, x, y, z, obj, bnames[dirs[dir]]);
+    uint16_t h = 1u << dirs[dir];
+    if (t % 120 < 6) h |= 1u << B_CROSS;
+    return h;
+}
 void pad_vblank(uint64_t vb) {
     if (npev < 0) pad_script_load();
-    if (npev > 0) {
-        uint16_t h = 0;
+    uint16_t ex = explore(vb);
+    if (npev > 0 || ex) {
+        uint16_t h = ex;
         for (int i = 0; i < npev; i++) if ((long)vb >= pev[i].from && (long)vb < pev[i].to) h |= pev[i].bits;
         static uint16_t last; if (h != last) { L("pad: buttons 0x%04x at VBlank %llu\n", h, (unsigned long long)vb); last = h; }
         pad_held = h;

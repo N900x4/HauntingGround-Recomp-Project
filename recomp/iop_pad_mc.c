@@ -173,23 +173,27 @@ static void mc_entry(uint32_t ee, const char *name, const struct stat *st) {   /
     strncpy((char *)e + 0x20, name, 31);
     memcpy(gptr(ee), e, 64);
 }
-static int mc_getdir(int port, const char *name, uint32_t maxent, uint32_t table) {
+/* Sony's MCSERV treats a negative maxent as no limit (the game asks with maxent -1 and no table to count a save
+   directory's entries; seen on PCSX2 with the disc's own module: 5 for a save). With no table, only count. */
+static int mc_getdir(int port, const char *name, uint32_t maxent_u, uint32_t table) {
     char path[1100]; if (!mc_host(port, name, path, sizeof path)) return MC_NOENTRY;
+    int maxent = (int32_t)maxent_u < 0 ? 0x7FFFFFFF : (int)maxent_u;
     char *slash = strrchr(path, '/'); char pat[256]; snprintf(pat, sizeof pat, "%s", slash + 1); *slash = 0;
     int is_root = !strcmp(path, mc_dir(port));
     DIR *d = opendir(path); if (!d) return MC_NOENTRY;
     int n = 0; struct dirent *de; struct stat st;
     if (!is_root && strpbrk(pat, "*?")) {                 /* real cards list "." and ".." inside a directory */
         stat(path, &st);
-        if (n < (int)maxent && !fnmatch(pat, ".", 0)) mc_entry(table + 64 * n++, ".", &st);
-        if (n < (int)maxent && !fnmatch(pat, "..", 0)) mc_entry(table + 64 * n++, "..", &st);
+        if (n < maxent && !fnmatch(pat, ".", 0)) { if (table) mc_entry(table + 64 * n, ".", &st); n++; }
+        if (n < maxent && !fnmatch(pat, "..", 0)) { if (table) mc_entry(table + 64 * n, "..", &st); n++; }
     }
-    while ((de = readdir(d)) && n < (int)maxent) {
+    while ((de = readdir(d)) && n < maxent) {
         if (de->d_name[0] == '.') continue;
         if (fnmatch(pat, de->d_name, 0)) continue;
         char fp[1400]; snprintf(fp, sizeof fp, "%s/%s", path, de->d_name);
         if (stat(fp, &st)) continue;
-        mc_entry(table + 64 * n++, de->d_name, &st);
+        if (table) mc_entry(table + 64 * n, de->d_name, &st);
+        n++;
     }
     closedir(d);
     return n;
@@ -264,7 +268,7 @@ int mc_rpc(uint32_t sid, uint32_t fn, const uint8_t *S, uint32_t ssize, uint32_t
     }
     if (recv && rsize >= 4) W32(recv, (uint32_t)r);
     if (mc_calls < 400 || bg_verbose > 1) {
-        if (fn == 0x02 || fn == 0x0d || fn == 0x0c || fn == 0x0e || fn == 0x0f) L("MCSERV: fn 0x%x port %d \"%s\" flags 0x%x -> %d\n", fn, bport, bname, bflags, r);
+        if (fn == 0x02 || fn == 0x0d || fn == 0x0c || fn == 0x0e || fn == 0x0f) L("MCSERV: fn 0x%x port %d \"%s\" flags 0x%x max %u tab 0x%x -> %d\n", fn, bport, bname, bflags, bmax, btab, r);
         else L("MCSERV: fn 0x%x fd/port %d size 0x%x -> %d\n", fn, fn == 1 ? port : fd, size, r);
     }
     return 1;

@@ -72,11 +72,18 @@ Full run from boot to stage 1 (2600 VBlanks, everything drawn): 70.6 s → 23.6 
   remaining cost is mostly gather-bound texture fetch. Real time at higher resolutions needs the GPU renderer
   (not possible here: VMware 3D is off).
 
+## GS workers (2026-10-14, Windows, 9800X3D)
+
+Rasterizing is split across `HG_GSTHREADS` worker threads by 8-row bands. Page-level dependency tracking keeps the
+output bit-identical to serial drawing; the rules are at "GS workers" in `gs.c` and in `handoff.md`. Stage 1 went
+from 0.51x to 1.49x real time and the Castle Suite from 0.68x to 1.63x. The VU1 ahead-of-time compilation helped too.
+
 ## Switches
 
 | Variable | Effect |
 |---|---|
 | `HG_MTGS=0` | GS on the main thread |
+| `HG_GSTHREADS=n` | n rasterizing threads (default half the CPUs, at most 8; 0 = draw on the GS thread) |
 | `HG_GSSIMD=0` | no AVX2 sprite paths |
 | `HG_TRISIMD=0` | no vector pixel pipeline |
 | `HG_GSDRAW=0` | no rasterizing (sound/logic runs) |

@@ -155,11 +155,32 @@ static GsCtx gc[2];
 static uint64_t r_prim, r_rgbaq, r_st, r_uv, r_fog, r_prmodecont = 1, r_prmode, r_texclut, r_texa, r_fogcol, r_dimx, r_dthe, r_colclamp = 1, r_pabe;
 static uint64_t r_bitbltbuf, r_trxpos, r_trxreg;
 static float st_q = 1.0f;
-static uint32_t clut[256];
+/* CLUT snapshots: every load writes a new one, so draws queued for the GS workers keep the palette they were set up
+   with (TexState.clut) */
+#define CLUT_RING 64
+static uint32_t clut_ring[CLUT_RING][256]; static int clut_slot; static uint64_t clut_slot_seq[CLUT_RING];
+static uint32_t *clut = clut_ring[0];
 static uint32_t cbp0, cbp1;
 static uint8_t *gspriv;
 static int mtgs;                                  /* GS runs on its own thread (see "GS thread" below) */
-static uint64_t n_prims, n_pixels, n_xfer_qw, n_kicks_frame, n_visits;
+static uint64_t n_prims, n_xfer_qw, n_kicks_frame;
+/* pixel counters per rasterizing thread (the GS workers draw in parallel); gs_count() sums them */
+#define GS_MAXW 16
+typedef struct { uint64_t pixels, visits; char pad[48]; } GsCount;
+static GsCount gs_cnt[GS_MAXW + 1];
+static _Thread_local GsCount *gcnt = &gs_cnt[0];
+#define n_pixels (gcnt->pixels)
+#define n_visits (gcnt->visits)
+static uint64_t gs_count(int visits) { uint64_t s = 0; for (int i = 0; i <= GS_MAXW; i++) s += visits ? gs_cnt[i].visits : gs_cnt[i].pixels; return s; }
+/* rows this thread draws: all of them, or for GS worker band_k of band_n its 8-row bands */
+static _Thread_local int band_k, band_n = 1;
+#define ROW_MINE(y) (band_n == 1 || (((y) >> 3) % band_n) == band_k)
+/* GS workers (see "GS workers" below), used from the CLUT and transfer code */
+static int gsw_n;
+static void gsw_drain(void);
+static void gsw_wait_seq(uint64_t seq);
+static void gsw_access(const uint64_t pages[8], int write);
+static void mark_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int x0, int y0, int x1, int y1);
 static void *gs_sprhist_ptr; static int gs_sprhist_n;
 static uint64_t st_prims[3], st_px[3], st_visits[3], st_tex[3], st_blend[3], st_z[3]; static double st_time[3];
 
@@ -180,6 +201,15 @@ static void clut_load(uint64_t tex0) {
     int psm = BITS(tex0, 20, 6), cpsm = BITS(tex0, 51, 4), csm = BITS(tex0, 55, 1), csa = BITS(tex0, 56, 5);
     int n = (psm == T8 || psm == T8H) ? 256 : 16;
     int off = n == 16 ? (cpsm == CT32 ? (csa & 15) * 16 : csa * 16) : 0;
+    if (gsw_n) {   /* the CLUT is read from local memory now: queued draws must have written it */
+        uint64_t pg[8] = {0}; const int cps = (cpsm == CT32 || cpsm == CT24) ? CT32 : cpsm == CT16S ? CT16S : CT16;
+        if (csm) mark_pages(pg, cbp, BITS(r_texclut, 0, 6), cps, BITS(r_texclut, 6, 6) * 16, BITS(r_texclut, 12, 10), BITS(r_texclut, 6, 6) * 16 + n - 1, BITS(r_texclut, 12, 10));
+        else mark_pages(pg, cbp, 1, cps, 0, 0, 15, 15);
+        gsw_access(pg, 0);
+        /* a new snapshot, once no queued draw reads the slot it reuses */
+        const int s = (clut_slot + 1) % CLUT_RING; gsw_wait_seq(clut_slot_seq[s]);
+        memcpy(clut_ring[s], clut, sizeof clut_ring[s]); clut_slot = s; clut = clut_ring[s];
+    }
     for (int i = 0; i < n; i++) {
         int x, y;
         if (csm == 0) { if (n == 256) { x = (i & 7) | ((i & 0x10) >> 1); y = ((i & 0xE0) >> 4) | ((i & 8) >> 3); } else { x = i & 7; y = i >> 3; } }
@@ -192,7 +222,7 @@ static void clut_load(uint64_t tex0) {
 }
 
 /* ================================================================== texturing */
-typedef struct { uint32_t tbp, tbw, psm, tw, th, tcc, tfx, csa, cpsm; int wms, wmt, minu, maxu, minv, maxv; int bilinear; int aem; uint8_t ta0, ta1; } TexState;
+typedef struct { uint32_t tbp, tbw, psm, tw, th, tcc, tfx, csa, cpsm; int wms, wmt, minu, maxu, minv, maxv; int bilinear; int aem; uint8_t ta0, ta1; const uint32_t *clut; } TexState;
 static void tex_setup(TexState *t, const GsCtx *c) {
     uint64_t t0 = c->tex0;
     t->tbp = BITS(t0, 0, 14); t->tbw = BITS(t0, 14, 6); t->psm = BITS(t0, 20, 6);
@@ -203,6 +233,7 @@ static void tex_setup(TexState *t, const GsCtx *c) {
     t->minu = BITS(c->clamp, 4, 10); t->maxu = BITS(c->clamp, 14, 10); t->minv = BITS(c->clamp, 24, 10); t->maxv = BITS(c->clamp, 34, 10);
     t->bilinear = BITS(c->tex1, 5, 1);
     t->aem = BITS(r_texa, 15, 1); t->ta0 = BITS(r_texa, 0, 8); t->ta1 = BITS(r_texa, 32, 8);
+    t->clut = clut;
 }
 static inline int wrap(int v, int size, int mode, int mn, int mx) {
     switch (mode) {
@@ -218,8 +249,8 @@ static inline uint32_t texel(const TexState *t, int u, int v) {
     case CT32: return read_px(t->tbp, t->tbw, CT32, u, v);
     case CT24: { uint32_t c = read_px(t->tbp, t->tbw, CT32, u, v) & 0xFFFFFF; return c | (uint32_t)((t->aem && !c) ? 0 : t->ta0) << 24; }
     case CT16: case CT16S: return c16to32(read_px(t->tbp, t->tbw, t->psm, u, v), t->aem, t->ta0, t->ta1);
-    case T8: case T8H: return clut[read_px(t->tbp, t->tbw, t->psm, u, v) & 255];
-    case T4: case T4HL: case T4HH: return clut[((t->cpsm == CT32 ? (t->csa & 15) : t->csa) * 16 + read_px(t->tbp, t->tbw, t->psm, u, v)) & 255];
+    case T8: case T8H: return t->clut[read_px(t->tbp, t->tbw, t->psm, u, v) & 255];
+    case T4: case T4HL: case T4HH: return t->clut[((t->cpsm == CT32 ? (t->csa & 15) : t->csa) * 16 + read_px(t->tbp, t->tbw, t->psm, u, v)) & 255];
     /* depth formats used as textures (depth-based effects): the Z layouts, read like CT32/CT24/CT16 */
     case Z32: return read_px(t->tbp, t->tbw, Z32, u, v);
     case Z24: { uint32_t c = read_px(t->tbp, t->tbw, Z32, u, v) & 0xFFFFFF; return c | (uint32_t)((t->aem && !c) ? 0 : t->ta0) << 24; }
@@ -248,6 +279,7 @@ typedef struct {
     int ate, atst, aref, afail, date, datm, zte, ztst;
     int a, b, cc, d, fix, pabe, fba, colclamp;
     int need_dst, zread, fb16;     /* derived: destination needed, Z must be read, 16-bit frame buffer */
+    uint32_t fogcol;               /* FOGCOL at setup (draws may be queued for the GS workers) */
 } Draw;
 static void draw_setup(Draw *d) {
     int ctxt = BITS(r_prmodecont ? r_prim : r_prmode, 9, 1);
@@ -265,10 +297,12 @@ static void draw_setup(Draw *d) {
     d->fb16 = d->fpsm == CT16 || d->fpsm == CT16S || d->fpsm == Z16 || d->fpsm == Z16S;   /* Z16 frame buffers: 16-bit colour in the Z16 layouts */
     d->need_dst = d->abe || d->date || d->fbmsk || (d->ate && d->afail == 3) || d->fpsm == CT24 || d->fpsm == Z24 || d->fb16;
     d->zread = d->zte && d->ztst >= 2;
+    d->fogcol = (uint32_t)r_fogcol;
 }
 static inline int clamp255(int v, int cc) { return cc ? (v < 0 ? 0 : v > 255 ? 255 : v) : (v & 255); }
 static int watch_x = -1, watch_y; static long watch_vb; static uint64_t cur_vb; static char watch_prim[400];
 static inline __attribute__((always_inline)) void pixel(const Draw *d, int x, int y, uint32_t z, uint32_t col /* rgba8, a 0x80 = 1.0 */) {
+    if (!ROW_MINE(y)) return;
     n_visits++;
     if (__builtin_expect(x == watch_x && y == watch_y, 0) && (long)cur_vb >= watch_vb) L("PIXWATCH (%d,%d) z %u zbuf-now %u col %08x fbp %u: %s\n", x, y, z, read_px(d->zbp, d->fbw, d->zpsm, x, y) & (d->zpsm == Z24 ? 0xFFFFFF : 0xFFFFFFFF), col, d->fbp, watch_prim);
     if (x < d->scx0 || x > d->scx1 || y < d->scy0 || y > d->scy1) return;
@@ -331,7 +365,7 @@ static inline __attribute__((always_inline)) uint32_t shade(const Draw *d, uint3
         c = out | (uint32_t)(a > 255 ? 255 : a) << 24;
     }
     if (d->fge) {
-        uint32_t fc = (uint32_t)r_fogcol, out = c & 0xFF000000u;
+        uint32_t fc = d->fogcol, out = c & 0xFF000000u;
         for (int s = 0; s < 24; s += 8) out |= (uint32_t)(((((c >> s) & 255) * fog) + (((fc >> s) & 255) * (255 - fog))) >> 8) << s;
         c = out;
     }
@@ -516,15 +550,17 @@ __attribute__((target("avx2"))) static void sprite_row_avx2(const Draw *d, const
 }
 static int have_avx2 = -1;
 #endif
-#define SPRITE_ROWS(TEX, TFX, TCC, BL) for (int y = py0; y < py1; y++) sprite_row(d, b, y, px0, px1, x0, u0, du, d->tme ? (int)(v0 + ((y << 4) - y0) * dv) : 0, TEX, TFX, TCC, BL)
+/* the if-else keeps a following "else" bound to the caller's if */
+#define SPRITE_ROWS(TEX, TFX, TCC, BL) for (int y = py0; y < py1; y++) if (!ROW_MINE(y)) ; else sprite_row(d, b, y, px0, px1, x0, u0, du, d->tme ? (int)(v0 + ((y << 4) - y0) * dv) : 0, TEX, TFX, TCC, BL)
+static int rows_mine(int y0, int y1) { int n = 0; for (int y = y0; y < y1; y++) n += ROW_MINE(y); return n; }
 static void sprite_spans(const Draw *d, const Vtx *b, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv) {
     const int tex = !d->tme ? 0 : (d->tex.psm == CT32 && !d->tex.bilinear) ? 1 : 2, tfx = d->tex.tfx, tcc = d->tex.tcc, bl = d->abe;
 #if defined(__x86_64__)
     if (have_avx2 < 0) have_avx2 = __builtin_cpu_supports("avx2") && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
     if (have_avx2 && !(d->zte && (d->zread || !d->zmsk)) && (tex != 2 || d->tex.psm == CT32)) {
         const int k = tex == 2 ? 3 : tex;
-        for (int y = py0; y < py1; y++) sprite_row_avx2(d, b, y, px0, px1, x0, u0, du, d->tme ? (int)(v0 + ((y << 4) - y0) * dv) : 0, k);
-        uint64_t n = (uint64_t)(px1 > px0 ? px1 - px0 : 0) * (uint64_t)(py1 > py0 ? py1 - py0 : 0);
+        for (int y = py0; y < py1; y++) if (ROW_MINE(y)) sprite_row_avx2(d, b, y, px0, px1, x0, u0, du, d->tme ? (int)(v0 + ((y << 4) - y0) * dv) : 0, k);
+        uint64_t n = (uint64_t)(px1 > px0 ? px1 - px0 : 0) * (uint64_t)rows_mine(py0, py1);
         n_visits += n; n_pixels += n; return;
     }
 #endif
@@ -533,7 +569,7 @@ static void sprite_spans(const Draw *d, const Vtx *b, int px0, int px1, int py0,
     else if (tex == 2 && tfx == 0 && tcc) { if (bl) SPRITE_ROWS(2, 0, 1, 1); else SPRITE_ROWS(2, 0, 1, 0); }
     else if (tex == 1) { if (bl) SPRITE_ROWS(1, tfx, tcc, 1); else SPRITE_ROWS(1, tfx, tcc, 0); }
     else { if (bl) SPRITE_ROWS(2, tfx, tcc, 1); else SPRITE_ROWS(2, tfx, tcc, 0); }
-    uint64_t n = (uint64_t)(px1 > px0 ? px1 - px0 : 0) * (uint64_t)(py1 > py0 ? py1 - py0 : 0);
+    uint64_t n = (uint64_t)(px1 > px0 ? px1 - px0 : 0) * (uint64_t)rows_mine(py0, py1);
     n_visits += n; n_pixels += n;
 }
 #if defined(__x86_64__)
@@ -541,15 +577,11 @@ static int tri_simd_ok_ex(const Draw *d, int tex_checked);
 static int sprite_tex_overlaps(const Draw *d, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv);
 static void sprite_vec(const Draw *d, const Vtx *b, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv);
 #endif
-static void draw_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
+/* a sprite's pixel rectangle [px0,px1) x [py0,py1) inside the scissor and its texture mapping (u0, v0 at x0, y0 in
+   1/16 pixels; du, dv per 1/16 pixel) */
+typedef struct { int px0, px1, py0, py1, x0, y0; float u0, v0, du, dv; } SprGeo;
+static void sprite_geo(const Draw *d, const Vtx *a, const Vtx *b, SprGeo *g) {
     int x0 = a->x, x1 = b->x, y0 = a->y, y1 = b->y;
-    {   /* HG_SPRLOG=vb: log every sprite drawn during that VBlank */
-        static long svb = -2; if (svb == -2) svb = getenv("HG_SPRLOG") ? atol(getenv("HG_SPRLOG")) : -1;
-        if (svb >= 0 && (long)cur_vb == svb)
-            L("SPRITE fbp %u psm %02x fbmsk %08x zbp %u zpsm %02x zte %d:%d zmsk %d z %u (0x%x) tme %d tbp %u tpsm %02x abe %d(%d%d%d%d fix %d) rgba %08x x %d-%d y %d-%d\n",
-              d->fbp, d->fpsm, d->fbmsk, d->zbp, d->zpsm, d->zte, d->ztst, d->zmsk, b->z, b->z, d->tme, d->tme ? d->tex.tbp : 0, d->tme ? d->tex.psm : 0,
-              d->abe, d->a, d->b, d->cc, d->d, d->fix, b->rgba, x0 >> 4, x1 >> 4, y0 >> 4, y1 >> 4);
-    }
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
     if (d->tme) { vtx_uv(d, a, &u0, &v0); vtx_uv(d, b, &u1, &v1); }
     if (x0 > x1) { int t = x0; x0 = x1; x1 = t; float f = u0; u0 = u1; u1 = f; }
@@ -557,13 +589,27 @@ static void draw_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
     int px0 = (x0 + 15) >> 4, px1 = (x1 + 15) >> 4, py0 = (y0 + 15) >> 4, py1 = (y1 + 15) >> 4;
     if (px0 < d->scx0) px0 = d->scx0; if (px1 > d->scx1 + 1) px1 = d->scx1 + 1;
     if (py0 < d->scy0) py0 = d->scy0; if (py1 > d->scy1 + 1) py1 = d->scy1 + 1;
-    float du = x1 != x0 ? (u1 - u0) / (x1 - x0) : 0, dv = y1 != y0 ? (v1 - v0) / (y1 - y0) : 0;
+    g->du = x1 != x0 ? (u1 - u0) / (x1 - x0) : 0; g->dv = y1 != y0 ? (v1 - v0) / (y1 - y0) : 0;
+    g->px0 = px0; g->px1 = px1; g->py0 = py0; g->py1 = py1; g->x0 = x0; g->y0 = y0; g->u0 = u0; g->v0 = v0;
+}
+static void draw_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
+    {   /* HG_SPRLOG=vb: log every sprite drawn during that VBlank */
+        int x0 = a->x, x1 = b->x, y0 = a->y, y1 = b->y;
+        static long svb = -2; if (svb == -2) svb = getenv("HG_SPRLOG") ? atol(getenv("HG_SPRLOG")) : -1;
+        if (svb >= 0 && (long)cur_vb == svb)
+            L("SPRITE fbp %u psm %02x fbmsk %08x zbp %u zpsm %02x zte %d:%d zmsk %d z %u (0x%x) tme %d tbp %u tpsm %02x abe %d(%d%d%d%d fix %d) rgba %08x x %d-%d y %d-%d\n",
+              d->fbp, d->fpsm, d->fbmsk, d->zbp, d->zpsm, d->zte, d->ztst, d->zmsk, b->z, b->z, d->tme, d->tme ? d->tex.tbp : 0, d->tme ? d->tex.psm : 0,
+              d->abe, d->a, d->b, d->cc, d->d, d->fix, b->rgba, x0 >> 4, x1 >> 4, y0 >> 4, y1 >> 4);
+    }
+    SprGeo g; sprite_geo(d, a, b, &g);
+    const int px0 = g.px0, px1 = g.px1, py0 = g.py0, py1 = g.py1, x0 = g.x0, y0 = g.y0; const float u0 = g.u0, v0 = g.v0, du = g.du, dv = g.dv;
     if (sprite_span_ok(d)) { sprite_spans(d, b, px0, px1, py0, py1, x0, y0, u0, v0, du, dv); return; }
 #if defined(__x86_64__)
     if (have_avx2 < 0) have_avx2 = __builtin_cpu_supports("avx2") && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
     if (have_avx2 && tri_simd_ok_ex(d, d->tme && !sprite_tex_overlaps(d, px0, px1, py0, py1, x0, y0, u0, v0, du, dv))) { sprite_vec(d, b, px0, px1, py0, py1, x0, y0, u0, v0, du, dv); return; }
 #endif
     for (int y = py0; y < py1; y++) {
+        if (!ROW_MINE(y)) continue;
         float vv = v0 + ((y << 4) - y0) * dv;
         for (int x = px0; x < px1; x++) {
             float uu = u0 + ((x << 4) - x0) * du;
@@ -587,7 +633,7 @@ static void draw_triangle(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx
         if (d->fst) { ua[i] = vs[i]->u; va[i] = vs[i]->v; qa[i] = 1; }
         else { ua[i] = vs[i]->s * d->tex.tw * 16.0f; va[i] = vs[i]->t * d->tex.th * 16.0f; qa[i] = vs[i]->q != 0 ? vs[i]->q : 1.0f; }
     }
-    for (int y = miny; y <= maxy; y++) for (int x = minx; x <= maxx; x++) {
+    for (int y = miny; y <= maxy; y++) if (ROW_MINE(y)) for (int x = minx; x <= maxx; x++) {
         float px = (float)x, py = (float)y;
         float w0 = ((x1 - px) * (y2 - py) - (x2 - px) * (y1 - py)) * inv;
         float w1 = ((x2 - px) * (y0 - py) - (x0 - px) * (y2 - py)) * inv;
@@ -690,7 +736,7 @@ V8 __m256i v_texel(const TexState *t, __m256i u, __m256i v) {
     }
     if (t->psm == T4 || t->psm == T4HL || t->psm == T4HH)
         idx = _mm256_and_si256(_mm256_add_epi32(v_set((int)((t->cpsm == CT32 ? (t->csa & 15) : t->csa) * 16)), idx), v_set(255));
-    return _mm256_i32gather_epi32((const int *)clut, idx, 4);
+    return _mm256_i32gather_epi32((const int *)t->clut, idx, 4);
 }
 V8 __m256i v_sample(const TexState *t, __m256i u16, __m256i v16) {
     if (!t->bilinear) return v_texel(t, _mm256_srai_epi32(u16, 4), _mm256_srai_epi32(v16, 4));
@@ -725,7 +771,7 @@ V8 __m256i v_shade(const Draw *d, __m256i vcol, __m256i u16, __m256i v16, __m256
         c = _mm256_or_si256(out, _mm256_slli_epi32(_mm256_min_epi32(a, m255), 24));
     }
     if (d->fge) {   /* unsigned arithmetic as in shade() */
-        const uint32_t fc = (uint32_t)r_fogcol; const __m256i nf = _mm256_sub_epi32(m255, fog);
+        const uint32_t fc = d->fogcol; const __m256i nf = _mm256_sub_epi32(m255, fog);
         __m256i out = _mm256_and_si256(c, v_set((int)0xFF000000u));
         for (int s = 0; s < 24; s += 8) {
             __m256i x = _mm256_add_epi32(_mm256_mullo_epi32(_mm256_and_si256(_mm256_srli_epi32(c, s), m255), fog), _mm256_mullo_epi32(v_set((int)((fc >> s) & 255)), nf));
@@ -830,7 +876,8 @@ static int clamp_range(int *a, int *b, int size, int mode, int mn, int mx) {
 /* Can the sprite read a texel that it also writes as a frame pixel? The texel bounds come from the same per-pixel
    expressions the renderers use (u at the first and last pixel column, v at the first and last row). Same buffer and
    format: exact pixel rectangles; otherwise 8 KB pages. Wrapping modes other than clamps use the whole texture. */
-static int sprite_tex_overlaps(const Draw *d, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv) {
+/* the texels [*ua,*ub] x [*va,*vb] a sprite can read (after wrap); 0 if it draws nothing */
+static int sprite_texels(const Draw *d, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv, int *pua, int *pub, int *pva, int *pvb) {
     const TexState *t = &d->tex;
     if (px1 <= px0 || py1 <= py0) return 0;
     const int uf = (int)(u0 + ((px0 << 4) - x0) * du), ul = (int)(u0 + (((px1 - 1) << 4) - x0) * du);
@@ -843,6 +890,11 @@ static int sprite_tex_overlaps(const Draw *d, int px0, int px1, int py0, int py1
     else { ua = umn >> 4; ub = umx >> 4; va = vmn >> 4; vb = vmx >> 4; }
     if (!clamp_range(&ua, &ub, t->tw, t->wms, t->minu, t->maxu) || !clamp_range(&va, &vb, t->th, t->wmt, t->minv, t->maxv)) { ua = 0; ub = t->tw - 1; va = 0; vb = t->th - 1; }
     if (ua > ub || va > vb) return 0;
+    *pua = ua; *pub = ub; *pva = va; *pvb = vb; return 1;
+}
+static int sprite_tex_overlaps(const Draw *d, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv) {
+    const TexState *t = &d->tex; int ua, ub, va, vb;
+    if (!sprite_texels(d, px0, px1, py0, py1, x0, y0, u0, v0, du, dv, &ua, &ub, &va, &vb)) return 0;
     if (t->tbp == d->fbp && t->tbw == d->fbw && t->psm == d->fpsm) {
         return ua <= px1 - 1 && px0 <= ub && va <= py1 - 1 && py0 <= vb; }
     uint64_t fp[8] = {0}, tp[8] = {0};
@@ -892,6 +944,7 @@ __attribute__((target("avx2"))) static void draw_triangle_avx2(const Draw *d, co
     /* barycentric i at (px, py) is (A_i + B_i * px) * inv in exact arithmetic: used only for the conservative span */
     const double B0 = (double)y1 - y2, B1 = (double)y2 - y0;
     for (int y = miny; y <= maxy; y++) {
+        if (!ROW_MINE(y)) continue;
         const float py = (float)y;
         const __m256 PY = _mm256_set1_ps(py), Y0 = _mm256_set1_ps(y0 - py), Y1 = _mm256_set1_ps(y1 - py), Y2 = _mm256_set1_ps(y2 - py);
         double lo = minx, hi = maxx;
@@ -994,6 +1047,7 @@ __attribute__((target("avx2"))) static void sprite_vec(const Draw *d, const Vtx 
     const __m256i zv = _mm256_set1_epi32((int)b->z);
     const int znever = d->zte && d->ztst == 0;
     for (int y = py0; y < py1; y++) {
+        if (!ROW_MINE(y)) continue;
         const __m256i v16 = _mm256_set1_epi32(d->tme ? (int)(v0 + ((y << 4) - y0) * dv) : 0);
         for (int xb = px0; xb < px1; xb += 8) {
             const int n = px1 - xb < 8 ? px1 - xb : 8;
@@ -1019,6 +1073,168 @@ static void draw_line(const Draw *d, const Vtx *a, const Vtx *b) {
 }
 /* HG_GSDRAW=0 skips rasterizing (sound/logic runs; emulated time is unaffected); HG_GSDRAW=N starts drawing at VBlank N */
 static int gs_nodraw; static long gs_draw_from;
+static void rasterize(const Draw *d, int prim, const Vtx *w) {
+    switch (prim) {
+    case 0: pixel(d, w[0].x >> 4, w[0].y >> 4, w[0].z, shade(d, w[0].rgba, w[0].u, w[0].v, w[0].f)); break;
+    case 1: case 2: draw_line(d, &w[0], &w[1]); break;
+    case 3: case 4: case 5:
+#if defined(__x86_64__)
+        if (have_avx2) { draw_triangle_avx2(d, &w[0], &w[1], &w[2]); break; }
+#endif
+        draw_triangle(d, &w[0], &w[1], &w[2]); break;
+    case 6: draw_sprite(d, &w[0], &w[1]); break;
+    }
+}
+
+/* ================================================================== GS workers
+   With HG_GSTHREADS=n (default: half the CPUs, at most 8; 0 turns them off) the GS thread parses GIF and sets draws
+   up, and n worker threads rasterize them. Every worker takes every draw but draws only its own rows: the 8-row bands
+   with (y >> 3) % n == k. A pixel is thus always written by the same worker in submission order, and the output is
+   the same as drawing serially, given these rules (pages of 8 KB, tracked until the workers have all caught up):
+   - a draw reading texture pages that queued draws write, or writing pages that queued draws read as texture, waits
+     for the workers: texture reads cross bands;
+   - a draw writing pages that queued draws write with another address layout (base, width or format) waits too;
+   - a draw whose texture or Z buffer shares pages with its own frame buffer depends on the pixel order inside the
+     draw: it is drawn here, serially, once the workers have caught up;
+   - local memory accessed outside draws (CLUT loads, transfers, the display at VBlank) waits as needed. */
+#if defined(__x86_64__)
+typedef struct { Draw d; Vtx w[3]; int prim; } GsCmd;
+#define GSQ (1u << 13)
+static GsCmd *gsq; static _Atomic uint64_t gsq_head;
+static struct { _Atomic uint64_t tail; char pad[56]; } gsw_tail[GS_MAXW];
+static pthread_t gsw_thr[GS_MAXW];
+static pthread_mutex_t gsw_mx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gsw_cv_work = PTHREAD_COND_INITIALIZER, gsw_cv_done = PTHREAD_COND_INITIALIZER;
+static _Atomic int gsw_sleepers, gsw_front_waiting;
+static uint64_t pend_w[8], pend_r[8]; static uint32_t page_key[512]; static int pend_any;
+static uint64_t n_gsw_issued, n_gsw_drains, n_gsw_serial;
+static void *gsw_main(void *arg) {
+    const int k = (int)(intptr_t)arg; band_k = k; band_n = gsw_n; gcnt = &gs_cnt[k + 1];
+    char nm[16]; snprintf(nm, sizeof nm, "gsw%d", k); host_prof_thread(nm);
+    uint64_t t = 0;
+    for (;;) {
+        uint64_t h = atomic_load_explicit(&gsq_head, memory_order_acquire);
+        for (int spin = 0; t == h && spin < 20000; spin++) { _mm_pause(); h = atomic_load_explicit(&gsq_head, memory_order_acquire); }
+        if (t == h) {
+            pthread_mutex_lock(&gsw_mx); atomic_fetch_add(&gsw_sleepers, 1);
+            while (t == atomic_load(&gsq_head)) pthread_cond_wait(&gsw_cv_work, &gsw_mx);
+            atomic_fetch_sub(&gsw_sleepers, 1); pthread_mutex_unlock(&gsw_mx);
+            continue;
+        }
+        for (; t != h; t++) {
+            const GsCmd *c = &gsq[t & (GSQ - 1)];
+            rasterize(&c->d, c->prim, c->w);
+            atomic_store_explicit(&gsw_tail[k].tail, t + 1, memory_order_release);
+        }
+        if (atomic_load(&gsw_front_waiting)) { pthread_mutex_lock(&gsw_mx); pthread_cond_broadcast(&gsw_cv_done); pthread_mutex_unlock(&gsw_mx); }
+    }
+    return 0;
+}
+static uint64_t gsw_min_tail(void) {
+    uint64_t m = UINT64_MAX;
+    for (int k = 0; k < gsw_n; k++) { const uint64_t t = atomic_load_explicit(&gsw_tail[k].tail, memory_order_acquire); if (t < m) m = t; }
+    return m;
+}
+/* wait until every worker has finished the draws before seq */
+static void gsw_wait_seq(uint64_t seq) {
+    if (!gsw_n || gsw_min_tail() >= seq) return;
+    for (int spin = 0; spin < 20000; spin++) { _mm_pause(); if (gsw_min_tail() >= seq) return; }
+    pthread_mutex_lock(&gsw_mx); atomic_store(&gsw_front_waiting, 1);
+    while (gsw_min_tail() < seq) {
+        struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 1000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        pthread_cond_timedwait(&gsw_cv_done, &gsw_mx, &ts);
+    }
+    atomic_store(&gsw_front_waiting, 0); pthread_mutex_unlock(&gsw_mx);
+}
+static void pend_clear(void) { memset(pend_w, 0, sizeof pend_w); memset(pend_r, 0, sizeof pend_r); pend_any = 0; }
+/* all queued draws done: local memory is current for this thread */
+static void gsw_drain(void) {
+    if (!gsw_n || !pend_any) return;
+    const uint64_t h = atomic_load_explicit(&gsq_head, memory_order_relaxed);
+    if (gsw_min_tail() < h) { n_gsw_drains++; gsw_wait_seq(h); }
+    pend_clear();
+}
+/* pages this thread is about to read (write = 0) or write outside a draw */
+static void gsw_access(const uint64_t pages[8], int write) {
+    if (!gsw_n || !pend_any) return;
+    if (pages_meet(pages, pend_w) || (write && pages_meet(pages, pend_r))) gsw_drain();
+}
+/* address layout of a frame or Z buffer: draws with equal keys map a pixel (x, y) to the same address */
+static uint32_t lay_key(uint32_t bp, uint32_t bw, int psm) {
+    int cls;
+    switch (psm) { case CT32: case CT24: cls = 1; break; case CT16: cls = 2; break; case CT16S: cls = 3; break;
+        case Z32: case Z24: cls = 4; break; case Z16: case Z16S: cls = 5; break; default: cls = 8 + psm; }
+    return 0x80000000u | (uint32_t)cls << 20 | (bw & 63) << 14 | (bp & 0x3FFF);
+}
+static int key_clash(const uint64_t pg[8], uint32_t key) {   /* a page of pg written by a queued draw with another layout */
+    for (int i = 0; i < 8; i++) for (uint64_t m = pg[i] & pend_w[i]; m; m &= m - 1) if (page_key[i * 64 + __builtin_ctzll(m)] != key) return 1;
+    return 0;
+}
+static void key_set(const uint64_t pg[8], uint32_t key) {
+    for (int i = 0; i < 8; i++) for (uint64_t m = pg[i]; m; m &= m - 1) page_key[i * 64 + __builtin_ctzll(m)] = key;
+}
+static int xfer_busy(void);
+static void gsw_issue(const Draw *d, int prim, const Vtx *w) {
+    /* the pixels the draw can touch, generous by a pixel or two, inside the scissor (every path clips to it) */
+    static const int nv[8] = { 1, 2, 2, 3, 3, 3, 2, 1 };
+    int x0 = w[0].x >> 4, y0 = w[0].y >> 4, x1 = x0, y1 = y0;
+    for (int i = 1; i < nv[prim]; i++) { const int x = w[i].x >> 4, y = w[i].y >> 4; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    x0 -= 1; y0 -= 1; x1 += 2; y1 += 2;
+    if (x0 < d->scx0) x0 = d->scx0; if (x1 > d->scx1) x1 = d->scx1; if (y0 < d->scy0) y0 = d->scy0; if (y1 > d->scy1) y1 = d->scy1;
+    if (x0 > x1 || y0 > y1) return;
+    uint64_t F[8] = {0}, Z[8] = {0}, T[8] = {0};
+    mark_pages(F, d->fbp, d->fbw, d->fpsm, x0, y0, x1, y1);
+    const int zuse = d->zte && d->ztst != 0 && (d->zread || !d->zmsk);   /* Z memory read or written */
+    if (zuse) mark_pages(Z, d->zbp, d->fbw, d->zpsm, x0, y0, x1, y1);
+    int self = 0;
+    if (d->tme && prim == 6) {   /* sprites: the texels they read, from the renderer's own expressions */
+        SprGeo g; sprite_geo(d, &w[0], &w[1], &g); int ua, ub, va, vb;
+        if (sprite_texels(d, g.px0, g.px1, g.py0, g.py1, g.x0, g.y0, g.u0, g.v0, g.du, g.dv, &ua, &ub, &va, &vb)) {
+            mark_pages(T, d->tex.tbp, d->tex.tbw, d->tex.psm, ua, va, ub, vb);
+            self = sprite_tex_overlaps(d, g.px0, g.px1, g.py0, g.py1, g.x0, g.y0, g.u0, g.v0, g.du, g.dv);
+        }
+    } else if (d->tme) {   /* every texel wrap() can return */
+        const TexState *t = &d->tex; int tw = t->tw, th = t->th;
+        if (t->wms >= 2 && (t->minu | t->maxu) + 1 > tw) tw = (t->minu | t->maxu) + 1;
+        if (t->wmt >= 2 && (t->minv | t->maxv) + 1 > th) th = (t->minv | t->maxv) + 1;
+        mark_pages(T, t->tbp, t->tbw, t->psm, 0, 0, tw - 1, th - 1);
+    }
+    const uint32_t kf = lay_key(d->fbp, d->fbw, d->fpsm), kz = lay_key(d->zbp, d->fbw, d->zpsm);
+    if (prim != 6) self = pages_meet(T, F);
+    if (self || pages_meet(T, Z) || (zuse && pages_meet(F, Z) && kf != kz) || xfer_busy()) {
+        gsw_drain(); n_gsw_serial++; rasterize(d, prim, w); return;
+    }
+    const uint64_t h = atomic_load_explicit(&gsq_head, memory_order_relaxed);
+    if (pend_any && gsw_min_tail() == h) pend_clear();
+    if (pend_any && (pages_meet(T, pend_w) || pages_meet(F, pend_r) || pages_meet(Z, pend_r) || key_clash(F, kf) || (zuse && key_clash(Z, kz)))) gsw_drain();
+    for (int i = 0; i < 8; i++) { pend_w[i] |= F[i] | Z[i]; pend_r[i] |= T[i]; }
+    key_set(F, kf); if (zuse) key_set(Z, kz); pend_any = 1;
+    if (h - gsw_min_tail() >= GSQ) gsw_wait_seq(h - GSQ + 1);
+    GsCmd *c = &gsq[h & (GSQ - 1)]; c->d = *d; memcpy(c->w, w, sizeof c->w); c->prim = prim;
+    clut_slot_seq[clut_slot] = h + 1;
+    atomic_store(&gsq_head, h + 1);
+    if (atomic_load(&gsw_sleepers)) { pthread_mutex_lock(&gsw_mx); pthread_cond_broadcast(&gsw_cv_work); pthread_mutex_unlock(&gsw_mx); }
+    n_gsw_issued++;
+}
+static void gsw_init(void) {
+    const char *e = getenv("HG_GSTHREADS"); int n = e ? atoi(e) : host_ncpus() / 2;
+    if (!e && n > 8) n = 8;
+    if (n > GS_MAXW) n = GS_MAXW;
+    if (getenv("HG_PIXWATCH") || getenv("HG_SPRLOG") || getenv("HG_SPRSTAT")) n = 0;   /* per-pixel debugging: one drawing thread */
+    if (n < 1 || !(gsq = calloc(GSQ, sizeof *gsq))) { L("GS: drawing on the GS thread (HG_GSTHREADS=0)\n"); return; }
+    gsw_n = n;
+    for (int k = 0; k < n; k++) if (pthread_create(&gsw_thr[k], 0, gsw_main, (void *)(intptr_t)k)) { L("GS: worker %d failed to start\n", k); exit(1); }
+    L("GS: %d drawing threads (HG_GSTHREADS)\n", n);
+}
+#else
+static void gsw_drain(void) {}
+static void gsw_wait_seq(uint64_t seq) { (void)seq; }
+static void gsw_access(const uint64_t pages[8], int write) { (void)pages; (void)write; }
+static void gsw_issue(const Draw *d, int prim, const Vtx *w) { rasterize(d, prim, w); }
+static void gsw_init(void) {}
+static void mark_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int x0, int y0, int x1, int y1) { (void)pages; (void)bp; (void)bw; (void)psm; (void)x0; (void)y0; (void)x1; (void)y1; }
+#endif
+
 static void vertex_kick(Vtx v, int draw) {
     Draw d; int prim = BITS(r_prim, 0, 3);
     {   /* HG_VTXLOG=path:vb writes every vertex kicked during that VBlank and the next (x, y in 1/16 pixel with offset, z, drawing kick) */
@@ -1040,25 +1256,18 @@ static void vertex_kick(Vtx v, int draw) {
             w[1].x >> 4, w[1].y >> 4, w[1].z, w[1].rgba, w[1].s, w[1].t, w[1].q, nvq > 2 ? w[2].x >> 4 : 0, nvq > 2 ? w[2].y >> 4 : 0, nvq > 2 ? w[2].z : 0, nvq > 2 ? w[2].rgba : 0, nvq > 2 ? w[2].s : 0, nvq > 2 ? w[2].t : 0, nvq > 2 ? w[2].q : 0);
         double t0 = host_now();
         uint64_t px0 = n_pixels, vis0 = n_visits;
-        switch (prim) {
-        case 0: pixel(&d, w[0].x >> 4, w[0].y >> 4, w[0].z, shade(&d, w[0].rgba, w[0].u, w[0].v, w[0].f)); break;
-        case 1: case 2: draw_line(&d, &w[0], &w[1]); break;
-        case 3: case 4: case 5:
+        int skip = 0;
+        if (prim >= 3 && prim <= 5) {
             if (GETENV_ONCE("HG_BIGTRI")) {   /* debugging: report triangles far larger than the screen */
                 int xs[3] = { w[0].x >> 4, w[1].x >> 4, w[2].x >> 4 }, ys[3] = { w[0].y >> 4, w[1].y >> 4, w[2].y >> 4 };
                 int mnx = xs[0], mxx = xs[0], mny = ys[0], mxy = ys[0];
                 for (int i = 1; i < 3; i++) { if (xs[i] < mnx) mnx = xs[i]; if (xs[i] > mxx) mxx = xs[i]; if (ys[i] < mny) mny = ys[i]; if (ys[i] > mxy) mxy = ys[i]; }
-                if ((mxx - mnx > 1500 || mxy - mny > 1500) && GETENV_ONCE("HG_BIGTRI")[0] == 's') break;   /* =s: skip them */
+                if ((mxx - mnx > 1500 || mxy - mny > 1500) && GETENV_ONCE("HG_BIGTRI")[0] == 's') skip = 1;   /* =s: skip them */
                 static int nb; if ((mxx - mnx > 1500 || mxy - mny > 1500) && nb++ < 30)
                     L("BIGTRI prim %d tme %d: (%d,%d z%u q%g) (%d,%d z%u q%g) (%d,%d z%u q%g) scissor %d-%d,%d-%d\n", prim, d.tme, xs[0], ys[0], w[0].z, w[0].q, xs[1], ys[1], w[1].z, w[1].q, xs[2], ys[2], w[2].z, w[2].q, d.scx0, d.scx1, d.scy0, d.scy1);
             }
-#if defined(__x86_64__)
-            if (have_avx2 < 0) have_avx2 = __builtin_cpu_supports("avx2") && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
-            if (have_avx2) { draw_triangle_avx2(&d, &w[0], &w[1], &w[2]); break; }
-#endif
-            draw_triangle(&d, &w[0], &w[1], &w[2]); break;
-        case 6: draw_sprite(&d, &w[0], &w[1]); break;
         }
+        if (!skip) { if (gsw_n) gsw_issue(&d, prim, w); else rasterize(&d, prim, w); }
         int k = prim == 6 ? 0 : (prim >= 3 && prim <= 5) ? 1 : 2;
         st_prims[k]++; st_px[k] += n_pixels - px0; st_visits[k] += n_visits - vis0; st_time[k] += host_now() - t0;
         if (d.tme) st_tex[k]++; if (d.abe) st_blend[k]++; if (d.zte) st_z[k]++;
@@ -1160,6 +1369,7 @@ rowend:
     if (xfer.x >= xfer.w) { xfer.x = 0; xfer.y++; }
     if (xfer.y >= xfer.h) xfer.active = 0;
 }
+static int xfer_busy(void) { return xfer.active; }   /* draws during a transfer are drawn serially (GS workers) */
 static void trxdir_write(uint64_t v) {
     int xdir = v & 3;
     if (xdir == 0) {
@@ -1167,7 +1377,11 @@ static void trxdir_write(uint64_t v) {
         xfer.sx = BITS(r_trxpos, 32, 11); xfer.sy = BITS(r_trxpos, 48, 11); xfer.w = BITS(r_trxreg, 0, 12); xfer.h = BITS(r_trxreg, 32, 12);
         xfer.x = xfer.y = 0; xfer.carry = 0; xfer.ncarry = 0;
         if (!xfer.w || !xfer.h) xfer.active = 0;
+        if (xfer.active && gsw_n) {   /* queued draws must be done with the pages the image goes to */
+            uint64_t pg[8] = {0}; mark_pages(pg, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1); gsw_access(pg, 1);
+        }
     } else if (xdir == 2) {        /* local -> local */
+        gsw_drain();
         uint32_t sbp = BITS(r_bitbltbuf, 0, 14), sbw = BITS(r_bitbltbuf, 16, 6), spsm = BITS(r_bitbltbuf, 24, 6);
         uint32_t dbp = BITS(r_bitbltbuf, 32, 14), dbw = BITS(r_bitbltbuf, 48, 6), dpsm = BITS(r_bitbltbuf, 56, 6);
         int sx = BITS(r_trxpos, 0, 11), sy = BITS(r_trxpos, 16, 11), dx = BITS(r_trxpos, 32, 11), dy = BITS(r_trxpos, 48, 11);
@@ -1395,7 +1609,7 @@ void gif_qword(int path, const uint64_t q[2]) {
     shadow_qword(path, q); push((uint64_t)(path & 3), q);
 }
 int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
-    if (!mtgs) return display_from(gspriv, out, maxw, maxh, pw, ph);
+    if (!mtgs) { gsw_drain(); return display_from(gspriv, out, maxw, maxh, pw, ph); }
     want_front = 1;
     pthread_mutex_lock(&front_mx);
     int ok = front_ok && front_w <= maxw && front_h <= maxh;
@@ -1411,6 +1625,7 @@ void gs_vblank(uint64_t vb) {
     if (!lag_ok()) prod_wait(lag_ok);
 }
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
+    gsw_drain();   /* the display and frame dumps read local memory */
     gs_nodraw = gs_draw_from < 0 || (uint64_t)gs_draw_from > vb;
     cur_vb = vb;
     { static int init; if (!init) { init = 1; const char *p = getenv("HG_PIXWATCH"); if (p) sscanf(p, "%d,%d,%ld", &watch_x, &watch_y, &watch_vb); } }
@@ -1421,7 +1636,7 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
     static long every = -1; if (every < 0) every = getenv("HG_FRAME_EVERY") ? atol(getenv("HG_FRAME_EVERY")) : 60;
     if (every > 0 && vb % every == 0) dump_frame(vb, priv);
     static uint64_t last_log; if (vb - last_log >= 600) { last_log = vb; L("GS: VBlank %llu: %llu prims, %llu pixels, %llu GIF tags, %llu image qwords so far\n",
-        (unsigned long long)vb, (unsigned long long)n_prims, (unsigned long long)n_pixels, (unsigned long long)n_gif_tags, (unsigned long long)n_xfer_qw); }
+        (unsigned long long)vb, (unsigned long long)n_prims, (unsigned long long)gs_count(0), (unsigned long long)n_gif_tags, (unsigned long long)n_xfer_qw); }
     n_kicks_frame = 0;
 }
 #if defined(__x86_64__)
@@ -1448,9 +1663,18 @@ void gs_init(uint8_t *priv) {
         else L("GS: running on its own thread (HG_MTGS=0 to disable)\n");
     }
     int bad = check_bijective(); if (bad) L("GS: WARNING: T%d column table is not a bijection\n", bad);
+#if defined(__x86_64__)
+    have_avx2 = __builtin_cpu_supports("avx2") && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
+#endif
+    gsw_init();
 }
 void gs_dump_stats(void) {
     gs_sync();
+#if defined(__x86_64__)
+    if (gsw_n) { gsw_wait_seq(atomic_load(&gsq_head));
+        L("GS workers: %d threads, %llu draws queued, %llu drawn serially (texture or Z on their own frame buffer), %llu waits for the workers; "
+          "the per-primitive pixel counts below cover only the serial draws\n", gsw_n, (unsigned long long)n_gsw_issued, (unsigned long long)n_gsw_serial, (unsigned long long)n_gsw_drains); }
+#endif
 #if defined(__x86_64__)
     L("GS scalar-path draws (vector pipeline not used): format %llu, frame range %llu, Z overlaps frame %llu, texture overlaps frame %llu\n",
       (unsigned long long)st_scalar[0], (unsigned long long)st_scalar[1], (unsigned long long)st_scalar[2], (unsigned long long)st_scalar[3]);
@@ -1462,6 +1686,6 @@ void gs_dump_stats(void) {
     static const char *nm[3] = { "sprites", "triangles", "points/lines" };
     for (int k = 0; k < 3; k++) if (st_prims[k]) L("GS %s: %llu prims (%llu textured, %llu blended, %llu z-tested), %llu shaded pixels, %llu written, %.1fs\n", nm[k],
         (unsigned long long)st_prims[k], (unsigned long long)st_tex[k], (unsigned long long)st_blend[k], (unsigned long long)st_z[k], (unsigned long long)st_visits[k], (unsigned long long)st_px[k], st_time[k]);
-    L("GS: %llu prims, %llu pixels, %llu GIF tags, %llu image qwords, %llu frames written\n", (unsigned long long)n_prims, (unsigned long long)n_pixels,
+    L("GS: %llu prims, %llu pixels, %llu GIF tags, %llu image qwords, %llu frames written\n", (unsigned long long)n_prims, (unsigned long long)gs_count(0),
       (unsigned long long)n_gif_tags, (unsigned long long)n_xfer_qw, (unsigned long long)frames_written);
 }

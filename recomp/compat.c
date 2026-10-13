@@ -69,7 +69,7 @@ static void (*cb_prof)(void), (*cb_alarm)(void);
    hgboot.exe, marked with the high bit. host_prof_dump() writes "thread rva count" lines to hostprof.txt;
    tools/verify/hostprof.py names them from the exe's symbol table. */
 #define HP_SLOTS (1 << 16)
-#define HP_THREADS 4
+#define HP_THREADS 20
 typedef struct { HANDLE h; char name[16]; uint32_t key[HP_SLOTS], cnt[HP_SLOTS]; uint64_t total, lost; } HpThread;
 static HpThread *hp; static volatile LONG hp_n; static volatile int hp_on; static uint64_t exe_lo, exe_hi;
 static void hp_add(HpThread *t, uint32_t key) {

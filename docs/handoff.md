@@ -20,6 +20,31 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### Session 2026-10-14, GS workers: full speed
+
+- `HG_GSTHREADS=n` (default: half the CPUs, at most 8; 0 turns them off): the GS thread parses and sets up draws, and
+  n workers rasterize. Each worker draws every primitive but only its own 8-row bands. The output is identical to
+  serial drawing because dependencies are tracked per 8 KB page:
+  - texture reads of pages that queued draws write (and the reverse) wait for the workers;
+  - writes to pages that queued draws write with a different layout wait too;
+  - draws that read their own frame buffer run serially. Sprites use their exact texel rectangle, from the
+    renderer's own expressions; triangles use the whole texture.
+  - CLUTs are snapshotted per load, and FOGCOL per draw.
+- Checked against serial drawing, frame for frame:
+  - New Game → stage 1: 702 frames to VB 4000, identical to `hashA.md5`;
+  - LOAD GAME → Castle Suite: 742 frames;
+  - logos, movies and title: 502 frames.
+- Speed with 4 workers (Windows reports 8 logical CPUs; 5 or 6 workers are slower):
+
+  | Scene | Speed | EE thread per VBlank |
+  |---|---|---|
+  | Stage 1 | 1.49x real time | 11.2 ms (VU1 7.3) |
+  | Castle Suite | 1.63x real time | 10.2 ms (VU1 6.9) |
+
+  The EE thread is now the limit. About 4% of draws are drawn serially (self-reading passes), and there are about
+  25 waits for the workers per frame (each effect pass reads the previous pass).
+- With a window the game is paced to real time. That is full speed for playtesting at native resolution.
+
 ### Session 2026-10-13, VU1 ahead-of-time compilation
 
 - `recomp/vu1gen.py` (run by `bulk2.py`) extracts the 19 VU1 programs from the ELF and writes `gen/vu1_aot_NN.c`.

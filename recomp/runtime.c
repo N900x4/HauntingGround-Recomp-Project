@@ -204,7 +204,7 @@ int main(int argc, char **argv) {
     }
     if (time_limit < 0) time_limit = host_window_wanted() ? 0 : 60;
     timing_wall = getenv("HG_TIMING") && !strcmp(getenv("HG_TIMING"), "wall");
-    { double ips = getenv("HG_EE_MIPS") ? atof(getenv("HG_EE_MIPS")) * 1e6 : 150e6;   /* guest instructions per second (EE ~294.9 MHz at ~2 CPI) */
+    { double ips = getenv("HG_EE_MIPS") ? atof(getenv("HG_EE_MIPS")) * 1e6 : 300e6;   /* guest instructions per second (EE 294.9 MHz at about one instruction per cycle; 150 starves movie audio) */
       ee_vb_period = (uint64_t)(ips / 59.94); ee_next_vb = timing_wall ? (1ull << 62) : ee_vb_period; }
     const char *exe = getenv("HG_ELF") ? getenv("HG_ELF") : game_path("SLUS_210.75");
     ee_ram = mmap(0, 32 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

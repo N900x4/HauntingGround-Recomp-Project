@@ -32,7 +32,7 @@ static int ov_mwply_get_stat(Ctx *c) { if (!is_skipped(c->r[4].u32[0])) return 0
 
 void overrides_init(void) {
     const char *m = getenv("HG_MOVIES");
-    movie_skip = !m || strcmp(m, "play");
+    movie_skip = m && !strcmp(m, "skip");   /* movies play (IPU emulation); HG_MOVIES=skip skips them */
     if (movie_skip) {
         set_hook(0x23b618, ov_mwply_start_fname);
         set_hook(0x23b8e8, ov_mwply_stop);

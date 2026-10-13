@@ -12,7 +12,7 @@
 void gif_qword(int path, const uint64_t q[2]);
 
 extern uint8_t vu1_mem[16384], vu1_code[16384];
-extern uint32_t vu1_tpc, vu1_top, vu1_itop;
+extern uint32_t vu1_tpc, vu1_top, vu1_itop, vu1_code_gen;
 void vu1_run(uint32_t start);
 static uint64_t n_mscal, n_direct_qw, n_unpack, n_mpg, n_dma_qw[10], n_tags;
 static int vu1_exec = -1;   /* HG_VU1=0 disables execution */
@@ -108,7 +108,7 @@ static void vif_word(uint32_t w) {
             vif.q[vif.nq++] = w;
             if (vif.nq == 4) { uint64_t q[2] = { vif.q[0] | (uint64_t)vif.q[1] << 32, vif.q[2] | (uint64_t)vif.q[3] << 32 }; gif_qword(2, q); vif.nq = 0; n_direct_qw++; }
             break;
-        case 3: memcpy(vu1_code + (vif.addr & 0x3FFC), &w, 4); vif.addr += 4; break;
+        case 3: memcpy(vu1_code + (vif.addr & 0x3FFC), &w, 4); vif.addr += 4; vu1_code_gen++; break;
         default: if (vif.nbuf < 1100) vif.buf[vif.nbuf++] = w; break;
         }
         if (!vif.left) payload_done();

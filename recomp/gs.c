@@ -16,7 +16,7 @@
 #endif
 
 /* ================================================================== local memory and swizzling */
-static uint32_t vm[1 << 20];                     /* 4 MB = 1M words */
+static uint32_t vm[(1 << 20) + 4];               /* 4 MB = 1M words (+ padding for 4-byte gathers at byte addresses) */
 #define VM8 ((uint8_t *)vm)
 #define VM16 ((uint16_t *)vm)
 
@@ -590,6 +590,295 @@ static void draw_triangle(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx
         pixel(d, x, y, z, shade(d, col, u16, v16, f));
     }
 }
+#if defined(__x86_64__)
+/* ---- AVX2 pixel pipeline for triangles: 8 pixels of one row at a time, lane for lane the same integer/float
+   operations as texel()/sample()/shade()/pixel(). Covers 32-bit frame buffers, Z32/Z24, CT32/CT24/T8/T8H/T4/T4HL/T4HH
+   textures (nearest or bilinear), all alpha tests and blend equations; anything else uses the scalar path. */
+#define V8 __attribute__((target("avx2"))) static inline
+static int32_t bt8_i[4][8], ct8_i[16][16], bt4_i[8][4], ct4_i[16][32];
+V8 __m256i v_set(int32_t x) { return _mm256_set1_epi32(x); }
+V8 __m256i v_addr32(uint32_t bp, uint32_t bw, __m256i x, __m256i y, const uint32_t (*tab)[2048]) {
+    __m256i idx = _mm256_or_si256(_mm256_slli_epi32(_mm256_and_si256(y, v_set(31)), 11), _mm256_and_si256(x, v_set(2047)));
+    __m256i o = _mm256_i32gather_epi32((const int *)tab, idx, 4);
+    __m256i base = _mm256_add_epi32(v_set((int)(bp * 64)), _mm256_mullo_epi32(_mm256_srai_epi32(y, 5), v_set((int)(bw * 2048))));
+    return _mm256_and_si256(_mm256_add_epi32(base, o), v_set(0xFFFFF));
+}
+V8 __m256i v_addr8(uint32_t bp, uint32_t bw, __m256i x, __m256i y) {
+    __m256i page = _mm256_add_epi32(_mm256_srai_epi32(x, 7), _mm256_mullo_epi32(_mm256_srai_epi32(y, 6), v_set((int)((bw + 1) >> 1))));
+    __m256i bi = _mm256_or_si256(_mm256_slli_epi32(_mm256_and_si256(_mm256_srai_epi32(y, 4), v_set(3)), 3), _mm256_and_si256(_mm256_srai_epi32(x, 4), v_set(7)));
+    __m256i ci = _mm256_or_si256(_mm256_slli_epi32(_mm256_and_si256(y, v_set(15)), 4), _mm256_and_si256(x, v_set(15)));
+    __m256i blk = _mm256_add_epi32(_mm256_add_epi32(v_set((int)bp), _mm256_slli_epi32(page, 5)), _mm256_i32gather_epi32((const int *)bt8_i, bi, 4));
+    return _mm256_and_si256(_mm256_add_epi32(_mm256_slli_epi32(blk, 8), _mm256_i32gather_epi32((const int *)ct8_i, ci, 4)), v_set(0x3FFFFF));
+}
+V8 __m256i v_addr4(uint32_t bp, uint32_t bw, __m256i x, __m256i y) {
+    __m256i page = _mm256_add_epi32(_mm256_srai_epi32(x, 7), _mm256_mullo_epi32(_mm256_srai_epi32(y, 7), v_set((int)((bw + 1) >> 1))));
+    __m256i bi = _mm256_or_si256(_mm256_slli_epi32(_mm256_and_si256(_mm256_srai_epi32(y, 4), v_set(7)), 2), _mm256_and_si256(_mm256_srai_epi32(x, 5), v_set(3)));
+    __m256i ci = _mm256_or_si256(_mm256_slli_epi32(_mm256_and_si256(y, v_set(15)), 5), _mm256_and_si256(x, v_set(31)));
+    __m256i blk = _mm256_add_epi32(_mm256_add_epi32(v_set((int)bp), _mm256_slli_epi32(page, 5)), _mm256_i32gather_epi32((const int *)bt4_i, bi, 4));
+    return _mm256_and_si256(_mm256_add_epi32(_mm256_slli_epi32(blk, 9), _mm256_i32gather_epi32((const int *)ct4_i, ci, 4)), v_set(0x7FFFFF));
+}
+V8 __m256i v_texel(const TexState *t, __m256i u, __m256i v) {
+    u = wrap8(u, t->tw, t->wms, t->minu, t->maxu); v = wrap8(v, t->th, t->wmt, t->minv, t->maxv);
+    __m256i c, idx;
+    switch (t->psm) {
+    case CT32: return _mm256_i32gather_epi32((const int *)vm, v_addr32(t->tbp, t->tbw, u, v, xoff32), 4);
+    case CT24: {
+        c = _mm256_and_si256(_mm256_i32gather_epi32((const int *)vm, v_addr32(t->tbp, t->tbw, u, v, xoff32), 4), v_set(0xFFFFFF));
+        __m256i a = v_set((int)((uint32_t)t->ta0 << 24));
+        if (t->aem) a = _mm256_andnot_si256(_mm256_cmpeq_epi32(c, _mm256_setzero_si256()), a);
+        return _mm256_or_si256(c, a); }
+    case T8: idx = _mm256_and_si256(_mm256_i32gather_epi32((const int *)VM8, v_addr8(t->tbp, t->tbw, u, v), 1), v_set(255)); break;
+    case T8H: idx = _mm256_srli_epi32(_mm256_i32gather_epi32((const int *)vm, v_addr32(t->tbp, t->tbw, u, v, xoff32), 4), 24); break;
+    case T4: { __m256i a = v_addr4(t->tbp, t->tbw, u, v);
+        __m256i byte = _mm256_i32gather_epi32((const int *)VM8, _mm256_srli_epi32(a, 1), 1);
+        idx = _mm256_and_si256(_mm256_srlv_epi32(byte, _mm256_slli_epi32(_mm256_and_si256(a, v_set(1)), 2)), v_set(15)); break; }
+    case T4HL: idx = _mm256_and_si256(_mm256_srli_epi32(_mm256_i32gather_epi32((const int *)vm, v_addr32(t->tbp, t->tbw, u, v, xoff32), 4), 24), v_set(15)); break;
+    default: /* T4HH */ idx = _mm256_srli_epi32(_mm256_i32gather_epi32((const int *)vm, v_addr32(t->tbp, t->tbw, u, v, xoff32), 4), 28); break;
+    }
+    if (t->psm == T4 || t->psm == T4HL || t->psm == T4HH)
+        idx = _mm256_and_si256(_mm256_add_epi32(v_set((int)((t->cpsm == CT32 ? (t->csa & 15) : t->csa) * 16)), idx), v_set(255));
+    return _mm256_i32gather_epi32((const int *)clut, idx, 4);
+}
+V8 __m256i v_sample(const TexState *t, __m256i u16, __m256i v16) {
+    if (!t->bilinear) return v_texel(t, _mm256_srai_epi32(u16, 4), _mm256_srai_epi32(v16, 4));
+    const __m256i uu = _mm256_sub_epi32(u16, v_set(8)), vv = _mm256_sub_epi32(v16, v_set(8));
+    const __m256i fu = _mm256_and_si256(uu, v_set(15)), fv = _mm256_and_si256(vv, v_set(15)), ui = _mm256_srai_epi32(uu, 4), vi = _mm256_srai_epi32(vv, 4);
+    const __m256i ui1 = _mm256_add_epi32(ui, v_set(1)), vi1 = _mm256_add_epi32(vi, v_set(1));
+    const __m256i c00 = v_texel(t, ui, vi), c10 = v_texel(t, ui1, vi), c01 = v_texel(t, ui, vi1), c11 = v_texel(t, ui1, vi1);
+    const __m256i gu = _mm256_sub_epi32(v_set(16), fu), gv = _mm256_sub_epi32(v_set(16), fv);
+    const __m256i w00 = _mm256_mullo_epi32(gu, gv), w10 = _mm256_mullo_epi32(fu, gv), w01 = _mm256_mullo_epi32(gu, fv), w11 = _mm256_mullo_epi32(fu, fv), m = v_set(0xFF00FF);
+#define WSUM(sh) _mm256_add_epi32(_mm256_add_epi32(_mm256_mullo_epi32(_mm256_and_si256(_mm256_srli_epi32(c00, sh), m), w00), _mm256_mullo_epi32(_mm256_and_si256(_mm256_srli_epi32(c10, sh), m), w10)), \
+                                  _mm256_add_epi32(_mm256_mullo_epi32(_mm256_and_si256(_mm256_srli_epi32(c01, sh), m), w01), _mm256_mullo_epi32(_mm256_and_si256(_mm256_srli_epi32(c11, sh), m), w11)))
+    const __m256i rb = WSUM(0), ag = WSUM(8);
+#undef WSUM
+    return _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi32(rb, 8), m), _mm256_slli_epi32(_mm256_and_si256(_mm256_srli_epi32(ag, 8), m), 8));
+}
+V8 __m256i v_shade(const Draw *d, __m256i vcol, __m256i u16, __m256i v16, __m256i fog) {
+    __m256i c = vcol;
+    const __m256i m255 = v_set(255);
+    if (d->tme) {
+        const __m256i t = v_sample(&d->tex, u16, v16), ta = _mm256_srli_epi32(t, 24), fa = _mm256_srli_epi32(vcol, 24);
+        const int tfx = d->tex.tfx, tcc = d->tex.tcc;
+        __m256i out = _mm256_setzero_si256();
+        for (int s = 0; s < 24; s += 8) {
+            const __m256i ct = _mm256_and_si256(_mm256_srli_epi32(t, s), m255), cf = _mm256_and_si256(_mm256_srli_epi32(vcol, s), m255);
+            __m256i v;
+            if (tfx == 1) v = ct;
+            else { v = _mm256_srai_epi32(_mm256_mullo_epi32(ct, cf), 7); if (tfx != 0) v = _mm256_add_epi32(v, fa); }
+            out = _mm256_or_si256(out, _mm256_slli_epi32(_mm256_min_epi32(v, m255), s));
+        }
+        __m256i a;
+        if (!tcc) a = fa; else if (tfx == 0) a = _mm256_srai_epi32(_mm256_mullo_epi32(ta, fa), 7); else if (tfx == 2) a = _mm256_add_epi32(ta, fa); else a = ta;
+        c = _mm256_or_si256(out, _mm256_slli_epi32(_mm256_min_epi32(a, m255), 24));
+    }
+    if (d->fge) {   /* unsigned arithmetic as in shade() */
+        const uint32_t fc = (uint32_t)r_fogcol; const __m256i nf = _mm256_sub_epi32(m255, fog);
+        __m256i out = _mm256_and_si256(c, v_set((int)0xFF000000u));
+        for (int s = 0; s < 24; s += 8) {
+            __m256i x = _mm256_add_epi32(_mm256_mullo_epi32(_mm256_and_si256(_mm256_srli_epi32(c, s), m255), fog), _mm256_mullo_epi32(v_set((int)((fc >> s) & 255)), nf));
+            out = _mm256_or_si256(out, _mm256_slli_epi32(_mm256_srli_epi32(x, 8), s));
+        }
+        c = out;
+    }
+    return c;
+}
+V8 __m256i v_ucmplt(__m256i a, __m256i b) { const __m256i k = v_set((int)0x80000000u); return _mm256_cmpgt_epi32(_mm256_xor_si256(b, k), _mm256_xor_si256(a, k)); }
+/* the per-pixel tests and writes of pixel() for the lanes in `live` (x = xb + lane, row y; scissor already applied) */
+V8 void v_pixel(const Draw *d, int xb, int y, __m256i live, __m256i z, __m256i col) {
+    const __m256i ones = _mm256_set1_epi32(-1), m255 = v_set(255), zero = _mm256_setzero_si256();
+    const __m256i as = _mm256_srli_epi32(col, 24);
+    __m256i fbok = ones, zok = ones, rgbonly = zero;
+    if (d->ate) {
+        const __m256i ar = v_set(d->aref); __m256i pass;
+        switch (d->atst) {
+        case 0: pass = zero; break; case 1: pass = ones; break;
+        case 2: pass = _mm256_cmpgt_epi32(ar, as); break; case 3: pass = _mm256_xor_si256(_mm256_cmpgt_epi32(as, ar), ones); break;
+        case 4: pass = _mm256_cmpeq_epi32(as, ar); break; case 5: pass = _mm256_xor_si256(_mm256_cmpgt_epi32(ar, as), ones); break;
+        case 6: pass = _mm256_cmpgt_epi32(as, ar); break; default: pass = _mm256_xor_si256(_mm256_cmpeq_epi32(as, ar), ones);
+        }
+        switch (d->afail) {
+        case 0: live = _mm256_and_si256(live, pass); break;
+        case 1: zok = pass; break;
+        case 2: fbok = pass; break;
+        default: zok = pass; rgbonly = _mm256_xor_si256(pass, ones);
+        }
+    }
+    if (_mm256_testz_si256(live, live)) return;
+    const __m256i fa = _mm256_and_si256(_mm256_add_epi32(_mm256_loadu_si256((const __m256i *)(xoff32[y & 31] + (xb & 2047))), v_set((int)(d->fbp * 64 + (uint32_t)(y >> 5) * d->fbw * 2048))), v_set(0xFFFFF));
+    const __m256i dst = d->need_dst ? _mm256_i32gather_epi32((const int *)vm, fa, 4) : zero;
+    __m256i za = zero;
+    if (d->zte) {
+        za = _mm256_and_si256(_mm256_add_epi32(_mm256_loadu_si256((const __m256i *)(xoff32z[y & 31] + (xb & 2047))), v_set((int)(d->zbp * 64 + (uint32_t)(y >> 5) * d->fbw * 2048))), v_set(0xFFFFF));
+        if (d->zread) {
+            __m256i zd = _mm256_i32gather_epi32((const int *)vm, za, 4);
+            if (d->zpsm == Z24) zd = _mm256_and_si256(zd, v_set(0xFFFFFF));
+            const __m256i fail = d->ztst == 2 ? v_ucmplt(z, zd) : _mm256_xor_si256(v_ucmplt(zd, z), ones);   /* GEQUAL fails if z < zd; GREATER fails if z <= zd */
+            live = _mm256_andnot_si256(fail, live);
+        }
+    } else zok = zero;
+    __m256i out = col;
+    if (d->abe) {
+        const __m256i ad = _mm256_srli_epi32(dst, 24), cf = d->cc == 0 ? as : d->cc == 1 ? ad : v_set(d->fix);
+        __m256i o = _mm256_and_si256(col, v_set((int)0xFF000000u));
+        for (int s = 0; s < 24; s += 8) {
+            const __m256i cs = _mm256_and_si256(_mm256_srli_epi32(col, s), m255), cd = _mm256_and_si256(_mm256_srli_epi32(dst, s), m255);
+            const __m256i A = d->a == 0 ? cs : d->a == 1 ? cd : zero, B = d->b == 0 ? cs : d->b == 1 ? cd : zero, D = d->d == 0 ? cs : d->d == 1 ? cd : zero;
+            __m256i v = _mm256_add_epi32(_mm256_srai_epi32(_mm256_mullo_epi32(_mm256_sub_epi32(A, B), cf), 7), D);
+            v = d->colclamp ? _mm256_min_epi32(_mm256_max_epi32(v, zero), m255) : _mm256_and_si256(v, m255);
+            o = _mm256_or_si256(o, _mm256_slli_epi32(v, s));
+        }
+        if (d->pabe) o = _mm256_blendv_epi8(col, o, _mm256_cmpeq_epi32(_mm256_and_si256(as, v_set(0x80)), v_set(0x80)));
+        out = o;
+    }
+    if (d->fba) out = _mm256_or_si256(out, v_set((int)0x80000000u));
+    out = _mm256_blendv_epi8(out, _mm256_or_si256(_mm256_and_si256(out, v_set(0xFFFFFF)), _mm256_and_si256(dst, v_set((int)0xFF000000u))), rgbonly);
+    const __m256i fbm = v_set((int)d->fbmsk);
+    out = _mm256_or_si256(_mm256_andnot_si256(fbm, out), _mm256_and_si256(dst, fbm));
+    const int mfb = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_and_si256(live, fbok)));
+    const int mz = (d->zte && !d->zmsk) ? _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_and_si256(live, zok))) : 0;
+    uint32_t oa[8], fa_[8], za_[8], zv[8];
+    _mm256_storeu_si256((__m256i *)oa, out); _mm256_storeu_si256((__m256i *)fa_, fa); _mm256_storeu_si256((__m256i *)za_, za); _mm256_storeu_si256((__m256i *)zv, z);
+    for (int i = 0; i < 8; i++) {   /* lane order: fb write then z write, as pixel() does per pixel */
+        if (mfb >> i & 1) { vm[fa_[i]] = oa[i]; n_pixels++; }
+        if (mz >> i & 1) { uint32_t *zp = &vm[za_[i]]; *zp = d->zpsm == Z24 ? (*zp & 0xFF000000u) | (zv[i] & 0xFFFFFF) : zv[i]; }
+    }
+}
+static int ranges_overlap(uint32_t a0, uint32_t a1, uint32_t b0, uint32_t b1) { return a0 < b1 && b0 < a1; }
+/* the vector pipeline handles this draw and no texture/Z read can see a frame-buffer write of the same primitive */
+static int tri_simd_ok(const Draw *d) {
+    if (d->fb16 || d->fpsm != CT32 || d->date) return 0;
+    if (d->zte && d->ztst != 0 && (d->zread || !d->zmsk) && d->zpsm != Z32 && d->zpsm != Z24) return 0;
+    const uint32_t fb0 = d->fbp * 64, fb1 = fb0 + d->fbw * 2048 * ((uint32_t)(d->scy1 >> 5) + 1);
+    if (fb1 > (1u << 20)) return 0;
+    if (d->zte && d->ztst != 0 && ranges_overlap(fb0, fb1, d->zbp * 64, d->zbp * 64 + d->fbw * 2048 * ((uint32_t)(d->scy1 >> 5) + 1))) return 0;
+    if (d->tme) {
+        switch (d->tex.psm) { case CT32: case CT24: case T8: case T8H: case T4: case T4HL: case T4HH: break; default: return 0; }
+        const uint32_t t0 = d->tex.tbp * 64, t1 = t0 + (d->tex.tbw ? d->tex.tbw : 1) * 2048 * ((d->tex.th >> 5) + 2);
+        if (ranges_overlap(fb0, fb1, t0, t1)) return 0;
+    }
+    return 1;
+}
+/* draw_triangle with the coverage test done for 8 pixels at a time (same float operations per lane, no FMA) and
+   chunks outside a conservative per-row span skipped; covered pixels are interpolated and drawn by the same scalar
+   code as draw_triangle, so the output is identical. */
+__attribute__((target("avx2"))) static void draw_triangle_avx2(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2) {
+    float x0 = v0->x / 16.0f, y0 = v0->y / 16.0f, x1 = v1->x / 16.0f, y1 = v1->y / 16.0f, x2 = v2->x / 16.0f, y2 = v2->y / 16.0f;
+    float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if (area == 0) return;
+    int minx = (int)floorf(fminf(x0, fminf(x1, x2))), maxx = (int)ceilf(fmaxf(x0, fmaxf(x1, x2)));
+    int miny = (int)floorf(fminf(y0, fminf(y1, y2))), maxy = (int)ceilf(fmaxf(y0, fmaxf(y1, y2)));
+    if (minx < d->scx0) minx = d->scx0; if (maxx > d->scx1) maxx = d->scx1;
+    if (miny < d->scy0) miny = d->scy0; if (maxy > d->scy1) maxy = d->scy1;
+    float inv = 1.0f / area;
+    float ua[3] = {0}, va[3] = {0}, qa[3] = {1, 1, 1};
+    const Vtx *vs[3] = { v0, v1, v2 };
+    for (int i = 0; i < 3; i++) {
+        if (!d->tme) continue;
+        if (d->fst) { ua[i] = vs[i]->u; va[i] = vs[i]->v; qa[i] = 1; }
+        else { ua[i] = vs[i]->s * d->tex.tw * 16.0f; va[i] = vs[i]->t * d->tex.th * 16.0f; qa[i] = vs[i]->q != 0 ? vs[i]->q : 1.0f; }
+    }
+    const __m256 X0 = _mm256_set1_ps(x0), X1 = _mm256_set1_ps(x1), X2 = _mm256_set1_ps(x2), INV = _mm256_set1_ps(inv), ONE = _mm256_set1_ps(1.0f), EPS = _mm256_set1_ps(-1e-6f);
+    const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7), bitsel = _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+    const int simd = tri_simd_ok(d) && !(getenv("HG_TRISIMD") && !strcmp(getenv("HG_TRISIMD"), "0")), znever = d->zte && d->ztst == 0;
+    /* barycentric i at (px, py) is (A_i + B_i * px) * inv in exact arithmetic: used only for the conservative span */
+    const double B0 = (double)y1 - y2, B1 = (double)y2 - y0;
+    for (int y = miny; y <= maxy; y++) {
+        const float py = (float)y;
+        const __m256 PY = _mm256_set1_ps(py), Y0 = _mm256_set1_ps(y0 - py), Y1 = _mm256_set1_ps(y1 - py), Y2 = _mm256_set1_ps(y2 - py);
+        double lo = minx, hi = maxx;
+        const double A0 = (double)x1 * (y2 - (double)py) - (double)x2 * (y1 - (double)py), A1 = (double)x2 * (y0 - (double)py) - (double)x0 * (y2 - (double)py);
+        const double As[3] = { A0, A1, (double)area - A0 - A1 }, Bs[3] = { B0, B1, -(B0 + B1) };   /* w2 = 1 - w0 - w1 */
+        for (int i = 0; i < 3; i++) {   /* w_i >= 0  <=>  sign(area) * (A_i + B_i px) >= 0 */
+            double a = area > 0 ? As[i] : -As[i], bb = area > 0 ? Bs[i] : -Bs[i];
+            if (bb > 1e-12) { double t = -a / bb; if (t > lo) lo = t; }
+            else if (bb < -1e-12) { double t = -a / bb; if (t < hi) hi = t; }
+        }
+        int xs = (int)floor(lo) - 2, xe = (int)ceil(hi) + 2;
+        if (xs < minx) xs = minx; if (xe > maxx) xe = maxx;
+        for (int xb = xs; xb <= xe; xb += 8) {
+            const __m256 px = _mm256_cvtepi32_ps(_mm256_add_epi32(_mm256_set1_epi32(xb), lane));
+            /* scalar: (x1 - px) * (y2 - py) - (x2 - px) * (y1 - py), where (y2 - py) etc. are per-row constants */
+            const __m256 w0 = _mm256_mul_ps(_mm256_sub_ps(_mm256_mul_ps(_mm256_sub_ps(X1, px), Y2), _mm256_mul_ps(_mm256_sub_ps(X2, px), Y1)), INV);
+            const __m256 w1 = _mm256_mul_ps(_mm256_sub_ps(_mm256_mul_ps(_mm256_sub_ps(X2, px), Y0), _mm256_mul_ps(_mm256_sub_ps(X0, px), Y2)), INV);
+            const __m256 w2 = _mm256_sub_ps(_mm256_sub_ps(ONE, w0), w1);
+            __m256 ok = _mm256_and_ps(_mm256_and_ps(_mm256_cmp_ps(w0, EPS, _CMP_NLT_UQ), _mm256_cmp_ps(w1, EPS, _CMP_NLT_UQ)), _mm256_cmp_ps(w2, EPS, _CMP_NLT_UQ));
+            int m = _mm256_movemask_ps(ok);
+            if (xe - xb < 7) m &= (1 << (xe - xb + 1)) - 1;
+            if (!m) continue;
+            if (simd) {
+                const __m256i live = _mm256_cmpgt_epi32(_mm256_and_si256(_mm256_set1_epi32(m), bitsel), _mm256_setzero_si256());
+                n_visits += __builtin_popcount(m);
+                if (znever) continue;
+                __m256i col;
+                if (d->iip) {
+                    col = _mm256_setzero_si256();
+                    for (int s = 0; s < 32; s += 8) {
+                        const __m256 c = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(_mm256_set1_ps((float)((v0->rgba >> s) & 255)), w0), _mm256_mul_ps(_mm256_set1_ps((float)((v1->rgba >> s) & 255)), w1)),
+                                                       _mm256_mul_ps(_mm256_set1_ps((float)((v2->rgba >> s) & 255)), w2));
+                        __m256i ci = _mm256_cvttps_epi32(_mm256_add_ps(c, _mm256_set1_ps(0.5f)));
+                        ci = _mm256_min_epi32(_mm256_max_epi32(ci, _mm256_setzero_si256()), _mm256_set1_epi32(255));
+                        col = _mm256_or_si256(col, _mm256_slli_epi32(ci, s));
+                    }
+                } else col = _mm256_set1_epi32((int)v2->rgba);
+                __m128i zh[2];
+                for (int h = 0; h < 2; h++) {
+                    const __m256d a0 = _mm256_cvtps_pd(h ? _mm256_extractf128_ps(w0, 1) : _mm256_castps256_ps128(w0));
+                    const __m256d a1 = _mm256_cvtps_pd(h ? _mm256_extractf128_ps(w1, 1) : _mm256_castps256_ps128(w1));
+                    const __m256d a2 = _mm256_cvtps_pd(h ? _mm256_extractf128_ps(w2, 1) : _mm256_castps256_ps128(w2));
+                    const __m256d zf = _mm256_add_pd(_mm256_add_pd(_mm256_mul_pd(_mm256_set1_pd((double)v0->z), a0), _mm256_mul_pd(_mm256_set1_pd((double)v1->z), a1)), _mm256_mul_pd(_mm256_set1_pd((double)v2->z), a2));
+                    const __m256d two31 = _mm256_set1_pd(2147483648.0);
+                    const __m128i lo = _mm256_cvttpd_epi32(zf), hi = _mm_add_epi32(_mm256_cvttpd_epi32(_mm256_sub_pd(zf, two31)), _mm_set1_epi32((int)0x80000000u));
+                    __m128i zi = _mm_blendv_epi8(lo, hi, _mm256_cvtpd_epi32(_mm256_and_pd(_mm256_cmp_pd(zf, two31, _CMP_GE_OQ), _mm256_set1_pd(-1.0))));
+                    const __m128i le0 = _mm256_cvtpd_epi32(_mm256_and_pd(_mm256_cmp_pd(zf, _mm256_setzero_pd(), _CMP_LE_OQ), _mm256_set1_pd(-1.0)));
+                    const __m128i gemax = _mm256_cvtpd_epi32(_mm256_and_pd(_mm256_cmp_pd(zf, _mm256_set1_pd(4294967295.0), _CMP_GE_OQ), _mm256_set1_pd(-1.0)));
+                    zi = _mm_andnot_si128(le0, zi); zi = _mm_or_si128(zi, gemax);
+                    zh[h] = zi;
+                }
+                const __m256i zv = _mm256_set_m128i(zh[1], zh[0]);
+                __m256i u16 = _mm256_setzero_si256(), v16 = _mm256_setzero_si256();
+                if (d->tme) {
+                    const __m256 q = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(_mm256_set1_ps(qa[0]), w0), _mm256_mul_ps(_mm256_set1_ps(qa[1]), w1)), _mm256_mul_ps(_mm256_set1_ps(qa[2]), w2));
+                    __m256 uu = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(_mm256_set1_ps(ua[0]), w0), _mm256_mul_ps(_mm256_set1_ps(ua[1]), w1)), _mm256_mul_ps(_mm256_set1_ps(ua[2]), w2));
+                    __m256 vv = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(_mm256_set1_ps(va[0]), w0), _mm256_mul_ps(_mm256_set1_ps(va[1]), w1)), _mm256_mul_ps(_mm256_set1_ps(va[2]), w2));
+                    if (!d->fst) {
+                        const __m256 nz = _mm256_cmp_ps(q, _mm256_setzero_ps(), _CMP_NEQ_UQ);
+                        uu = _mm256_blendv_ps(uu, _mm256_div_ps(uu, q), nz); vv = _mm256_blendv_ps(vv, _mm256_div_ps(vv, q), nz);
+                    }
+                    u16 = _mm256_cvttps_epi32(uu); v16 = _mm256_cvttps_epi32(vv);
+                }
+                __m256i fog = _mm256_setzero_si256();
+                if (d->fge) fog = _mm256_cvttps_epi32(_mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(_mm256_set1_ps((float)v0->f), w0), _mm256_mul_ps(_mm256_set1_ps((float)v1->f), w1)), _mm256_mul_ps(_mm256_set1_ps((float)v2->f), w2)));
+                v_pixel(d, xb, y, live, zv, v_shade(d, col, u16, v16, fog));
+                continue;
+            }
+            float W0[8], W1[8], W2[8]; _mm256_storeu_ps(W0, w0); _mm256_storeu_ps(W1, w1); _mm256_storeu_ps(W2, w2);
+            while (m) {
+                const int i = __builtin_ctz(m); m &= m - 1;
+                const int x = xb + i; const float fw0 = W0[i], fw1 = W1[i], fw2 = W2[i];
+                uint32_t col;
+                if (d->iip) {
+                    col = 0;
+                    for (int s = 0; s < 32; s += 8) {
+                        float c = ((v0->rgba >> s) & 255) * fw0 + ((v1->rgba >> s) & 255) * fw1 + ((v2->rgba >> s) & 255) * fw2;
+                        int ci = (int)(c + 0.5f); col |= (uint32_t)(ci < 0 ? 0 : ci > 255 ? 255 : ci) << s;
+                    }
+                } else col = v2->rgba;
+                double zf = (double)v0->z * fw0 + (double)v1->z * fw1 + (double)v2->z * fw2;
+                uint32_t z = zf <= 0 ? 0 : zf >= 4294967295.0 ? 0xFFFFFFFFu : (uint32_t)zf;
+                int u16 = 0, v16 = 0;
+                if (d->tme) {
+                    float q = qa[0] * fw0 + qa[1] * fw1 + qa[2] * fw2;
+                    float uu = ua[0] * fw0 + ua[1] * fw1 + ua[2] * fw2, vv = va[0] * fw0 + va[1] * fw1 + va[2] * fw2;
+                    if (!d->fst && q != 0) { uu /= q; vv /= q; }
+                    u16 = (int)uu; v16 = (int)vv;
+                }
+                int f = (int)(v0->f * fw0 + v1->f * fw1 + v2->f * fw2);
+                pixel(d, x, y, z, shade(d, col, u16, v16, f));
+            }
+        }
+    }
+}
+#endif
 static void draw_line(const Draw *d, const Vtx *a, const Vtx *b) {
     int x0 = a->x >> 4, y0 = a->y >> 4, x1 = b->x >> 4, y1 = b->y >> 4;
     int dx = abs(x1 - x0), dy = abs(y1 - y0), n = dx > dy ? dx : dy;
@@ -616,15 +905,21 @@ static void vertex_kick(Vtx v, int draw) {
         switch (prim) {
         case 0: pixel(&d, w[0].x >> 4, w[0].y >> 4, w[0].z, shade(&d, w[0].rgba, w[0].u, w[0].v, w[0].f)); break;
         case 1: case 2: draw_line(&d, &w[0], &w[1]); break;
-        case 3: case 4: case 5: draw_triangle(&d, &w[0], &w[1], &w[2]); break;
+        case 3: case 4: case 5:
+#if defined(__x86_64__)
+            if (have_avx2 < 0) have_avx2 = __builtin_cpu_supports("avx2") && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
+            if (have_avx2) { draw_triangle_avx2(&d, &w[0], &w[1], &w[2]); break; }
+#endif
+            draw_triangle(&d, &w[0], &w[1], &w[2]); break;
         case 6: draw_sprite(&d, &w[0], &w[1]); break;
         }
         int k = prim == 6 ? 0 : (prim >= 3 && prim <= 5) ? 1 : 2;
         st_prims[k]++; st_px[k] += n_pixels - px0; st_visits[k] += n_visits - vis0; st_time[k] += host_now() - t0;
         if (d.tme) st_tex[k]++; if (d.abe) st_blend[k]++; if (d.zte) st_z[k]++;
-        if (k == 0 && getenv("HG_SPRSTAT")) {   /* configuration histogram weighted by pixels */
-            char key[160]; snprintf(key, sizeof key, "fb%02x tex%d:%02x bil%d tfx%d tcc%d abe%d(%d%d%d%d fix%d) ate%d:%d zte%d:%d zmsk%d fbmsk%08x",
-                d.fpsm, d.tme, d.tme ? d.tex.psm : 0, d.tme ? d.tex.bilinear : 0, d.tme ? d.tex.tfx : 0, d.tme ? d.tex.tcc : 0, d.abe, d.a, d.b, d.cc, d.d, d.fix, d.ate, d.atst, d.zte, d.ztst, d.zmsk, d.fbmsk);
+        if (getenv("HG_SPRSTAT") && k == (getenv("HG_SPRSTAT")[0] == 't' ? 1 : 0)) {   /* configuration histogram weighted by pixels */
+            char key[160]; snprintf(key, sizeof key, "fb%02x tex%d:%02x bil%d tfx%d tcc%d abe%d(%d%d%d%d fix%d) ate%d:%d zte%d:%d zmsk%d fbmsk%08x iip%d fge%d fst%d z%02x",
+                d.fpsm, d.tme, d.tme ? d.tex.psm : 0, d.tme ? d.tex.bilinear : 0, d.tme ? d.tex.tfx : 0, d.tme ? d.tex.tcc : 0, d.abe, d.a, d.b, d.cc, d.d, d.fix, d.ate, d.atst, d.zte, d.ztst, d.zmsk, d.fbmsk,
+                d.iip, d.fge, d.fst, d.zpsm);
             static struct { char k[160]; uint64_t px, n; double t; } h[256]; static int nh;
             int j = 0; for (; j < nh; j++) if (!strcmp(h[j].k, key)) break;
             if (j == nh && nh < 256) { strcpy(h[nh].k, key); nh++; }
@@ -644,6 +939,7 @@ static void vertex_kick(Vtx v, int draw) {
 
 /* ================================================================== transfers */
 static struct { int active, dir; uint32_t bp, bw, psm; int sx, sy, w, h, x, y; uint64_t carry; int ncarry; } xfer;
+static uint64_t st_xfer_psm[64];
 static void xfer_put_px(uint32_t v) {
     if (xfer.y >= xfer.h) return;
     write_px(xfer.bp, xfer.bw, xfer.psm, xfer.sx + xfer.x, xfer.sy + xfer.y, v);
@@ -664,6 +960,50 @@ static void hwreg_write(uint64_t v) {
     case T4: case T4HL: case T4HH: for (int i = 0; i < 16; i++) xfer_put_px((v >> (4 * i)) & 15); break;
     default: xfer_put_px((uint32_t)v); xfer_put_px((uint32_t)(v >> 32));
     }
+    if (xfer.y >= xfer.h) xfer.active = 0;
+}
+/* One qword of image data: whole-qword fast paths when the qword covers an aligned run of pixels inside one row
+   (PSMT8: 16 pixels in one block row, PSMT4: 32, PSMCT32: 4); same addresses as write_px(). */
+static void xfer_qword(const uint64_t q[2]) {
+    if (!xfer.active) return;
+    const int X = xfer.sx + xfer.x, Y = xfer.sy + xfer.y;
+    const uint8_t *b = (const uint8_t *)q;
+    if (xfer.y < xfer.h) switch (xfer.psm) {
+    case T8:
+        if (!(X & 15) && xfer.x + 16 <= xfer.w) {
+            const uint32_t page = (X >> 7) + (Y >> 6) * ((xfer.bw + 1) >> 1);
+            const uint32_t blk = (xfer.bp + page * 32 + blockTable8[(Y >> 4) & 3][(X >> 4) & 7]) * 256;
+            const uint8_t *ct = columnTable8[Y & 15];
+            for (int i = 0; i < 16; i++) VM8[(blk + ct[i]) & 0x3FFFFF] = b[i];
+            goto advance16;
+        }
+        break;
+    case T4:
+        if (!(X & 31) && xfer.x + 32 <= xfer.w) {
+            const uint32_t page = (X >> 7) + (Y >> 7) * ((xfer.bw + 1) >> 1);
+            const uint32_t blk = (xfer.bp + page * 32 + blockTable4[(Y >> 4) & 7][(X >> 5) & 3]) * 512;
+            const uint16_t *ct = columnTable4[Y & 15];
+            for (int i = 0; i < 32; i++) {
+                const uint32_t a = (blk + ct[i]) & 0x7FFFFF; const uint8_t v = (b[i >> 1] >> ((i & 1) * 4)) & 15;
+                uint8_t *p = &VM8[a >> 1]; *p = (a & 1) ? (*p & 0x0F) | (v << 4) : (*p & 0xF0) | v;
+            }
+            xfer.x += 32; goto rowend;
+        }
+        break;
+    case CT32:
+        if (xfer.x + 4 <= xfer.w) {
+            const uint32_t base = xfer.bp * 64 + (uint32_t)(Y >> 5) * xfer.bw * 2048; const uint32_t *xo = xoff32[Y & 31];
+            for (int i = 0; i < 4; i++) { uint32_t v; memcpy(&v, b + 4 * i, 4); vm[(base + xo[(X + i) & 2047]) & 0xFFFFF] = v; }
+            xfer.x += 4; goto rowend;
+        }
+        break;
+    }
+    hwreg_write(q[0]); hwreg_write(q[1]);
+    return;
+advance16:
+    xfer.x += 16;
+rowend:
+    if (xfer.x >= xfer.w) { xfer.x = 0; xfer.y++; }
     if (xfer.y >= xfer.h) xfer.active = 0;
 }
 static void trxdir_write(uint64_t v) {
@@ -777,8 +1117,11 @@ void gif_qword(int path, const uint64_t q[2]) {
             if (++g->reg_i == g->nreg) { g->reg_i = 0; if (--g->nloop == 0) g->in_packet = 0; }
         }
         break;
-    default:
-        hwreg_write(q[0]); hwreg_write(q[1]); n_xfer_qw++;
+    default: {
+        static uint64_t ncall; const int timed = (++ncall & 63) == 0; double t0 = timed ? host_now() : 0;
+        xfer_qword(q); n_xfer_qw++;
+        if (timed) tprof[5] += (host_now() - t0) * 64;
+        st_xfer_psm[xfer.psm & 63]++; }
         if (--g->nloop == 0) g->in_packet = 0;
     }
 }
@@ -827,12 +1170,24 @@ void gs_vblank(uint64_t vb) {
         (unsigned long long)vb, (unsigned long long)n_prims, (unsigned long long)n_pixels, (unsigned long long)n_gif_tags, (unsigned long long)n_xfer_qw); }
     n_kicks_frame = 0;
 }
+#if defined(__x86_64__)
+static void build_simd_tables(void) {
+    for (int i = 0; i < 4; i++) for (int j = 0; j < 8; j++) bt8_i[i][j] = blockTable8[i][j];
+    for (int i = 0; i < 16; i++) for (int j = 0; j < 16; j++) ct8_i[i][j] = columnTable8[i][j];
+    for (int i = 0; i < 8; i++) for (int j = 0; j < 4; j++) bt4_i[i][j] = blockTable4[i][j];
+    for (int i = 0; i < 16; i++) for (int j = 0; j < 32; j++) ct4_i[i][j] = columnTable4[i][j];
+}
+#endif
 void gs_init(uint8_t *priv) {
     gspriv = priv; build_t4_table(); build_xoff();
+#if defined(__x86_64__)
+    build_simd_tables();
+#endif
     if (getenv("HG_GSDRAW")) { gs_draw_from = atol(getenv("HG_GSDRAW")); if (gs_draw_from == 0) gs_draw_from = -1; gs_nodraw = 1; }
     int bad = check_bijective(); if (bad) L("GS: WARNING: T%d column table is not a bijection\n", bad);
 }
 void gs_dump_stats(void) {
+    L("GS image transfers: ~%.1fs (sampled);", tprof[5]); for (int p = 0; p < 64; p++) if (st_xfer_psm[p]) L(" psm%02x %llu qw", p, (unsigned long long)st_xfer_psm[p]); L("\n");
     if (gs_sprhist_ptr) { struct { char k[160]; uint64_t px, n; double t; } *h = gs_sprhist_ptr;
         for (int r = 0; r < 12; r++) { int b = -1; for (int j = 0; j < gs_sprhist_n; j++) if (h[j].px && (b < 0 || h[j].px > h[b].px)) b = j;
             if (b < 0) break; L("  sprite cfg %s: %llu px in %llu sprites, %.2fs (%.1f ns/px)\n", h[b].k, (unsigned long long)h[b].px, (unsigned long long)h[b].n, h[b].t, h[b].t * 1e9 / (h[b].px ? h[b].px : 1)); h[b].px = 0; } }

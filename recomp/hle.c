@@ -484,7 +484,7 @@ void rec_syscall(Ctx *ctx, uint32_t pc) {
     case 0x25: case -0x25: th[a0].status = THS_DORMANT; break;
     case 0x29: case -0x2a: { int id = tid(a0); ret = th[id].prio; th[id].prio = a1;
         if (th[id].status == THS_READY || th[id].status == THS_RUN) th[id].seq = seqno++;
-        L("ChangeThreadPriority(%d, %d) [old %d]\n", id, a1, (int)ret); ctx->r[2].s64[0] = ret; if (num > 0) schedule(); return; }
+        if (bg_verbose) L("ChangeThreadPriority(%d, %d) [old %d]\n", id, a1, (int)ret); ctx->r[2].s64[0] = ret; if (num > 0) schedule(); return; }
     case 0x2b: case -0x2c: { /* RotateThreadReadyQueue(prio) */
         if (th[cur].prio == (int)a0) th[cur].seq = seqno++;
         else { int b = 0; for (int i = 1; i < MAXT; i++) if (th[i].used && th[i].status == THS_READY && th[i].prio == (int)a0 && (!b || th[i].seq < th[b].seq)) b = i; if (b) th[b].seq = seqno++; }

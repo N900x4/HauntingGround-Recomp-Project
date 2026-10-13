@@ -10,6 +10,7 @@ Findings from the October 2026 feasibility studies. Claims are tagged [OBS] (obs
 | [hardware.md](hardware.md) | VU1 programs, GS usage and post-effects, IOP modules, timing (30 fps logic) |
 | [audio.md](audio.md) | Sound bank formats, Hewie's sound IDs and samples, the replacement plan |
 | [textures.md](textures.md) | Texture formats, the upload path, the replacement plan |
+| [handoff.md](handoff.md) | **Start here when resuming:** current state, rules, next steps, verification scripts |
 
 ## Verdict (summary)
 

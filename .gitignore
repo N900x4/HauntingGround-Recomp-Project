@@ -34,6 +34,7 @@ SLPM_*
 recomp/gen/
 recomp/obj/
 recomp/hgboot
+recomp/hgboot.*
 *.o
 *.a
 *.so

@@ -20,6 +20,40 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### Night 2026-10-14/15 (unattended): playtest 1 findings, Castle Suite, frame timing, crash reports
+
+- **Beeps (playtest 1): fixed.**
+  - The game's own mix, replayed with `HG_WAV`, has no faulty tones. `tools/verify/tones.py` finds only menu music
+    onsets, interaction sounds and footsteps; clips are in `D:\ps2-work\scratch\beeps`.
+  - The cause was the live SDL queue: 0–49 ms deep on the real device, giving 20 underruns (ticks) in 3 minutes.
+    Playback now starts, and restarts after an underrun, with 100 ms queued, and drops only beyond 250 ms. Result:
+    0 underruns and 0 drops, queue 51–99 ms (`023da10`). `HG_AUDIO_MUTE=1` (test only) sends silence to the real
+    device.
+- **Dark drifting specks by a door (playtest 1): open.**
+  - They are in stage `0x20` (Castle Suite `0x21` → `0x10` → `0x20`). The traced pixel comes from a real dark,
+    alpha-tested texture strip (`tbp 15360`, T8). It is not a coverage gap, and VU1 rounding (`HG_VU1CHOP`) does
+    not change them.
+  - In the Castle Suite, PCSX2 shows isolated dark pixels too (11 of our 14 at the same places), so these are partly
+    genuine.
+  - Deciding needs PCSX2 in stage `0x20`. Its Fiona cannot open the Castle Suite's far door with save 01; the door was
+    open in the user's save 02, which exists only on our card. A folder memory card made from our card is seen as
+    unformatted (no `_pcsx2_superblock`).
+  - Ways forward: the user walks PCSX2 there and saves a state (about 2 minutes); permission to use their own PCSX2
+    states; or format a folder card in PCSX2's GUI and copy our save in.
+- **Castle Suite against PCSX2: passes.** Save 01 loaded in both: 99.8–99.9 % of pixels within 8 levels, mean
+  difference 1.6 (`docs/rooms-checklist.md`).
+- **Frame timing: the game runs at 30 fps.** There are two hard-coded VBlank waits per frame; the frame driver is
+  `0x1beef0`. 60 fps needs frame interpolation (`docs/frame-timing.md`).
+- **Crash reports and the F3 overlay:** see the commits. Also fixed: the window is DPI aware (it looks smaller on
+  scaled displays; F11 or `HG_SCALE`).
+- **PCSX2 navigation, as learned:**
+  - A PINE teleport moves Fiona's picture, but she cannot walk afterwards. Teleport only for screenshots.
+  - `pcsx2_walk.py` steers her by her live position, with the D-pad learned from her movement. It followed the user's
+    whole Castle Suite route.
+  - Pad keys reach PCSX2 only while its window has focus; hotkeys (F8, Space) work anyway.
+  - The VM's state 1 has a stale memory card directory: cold-boot instead (`pcsx2_ref.py start 0`).
+  - MSYS2 rewrites `path:number` in environment variables: pass Windows-style paths (`D:/...`).
+
 ### Session 2026-10-14, input recording, playtest speed, room checklist
 
 - **Input recording:**

@@ -181,6 +181,10 @@ static void gsw_drain(void);
 static void gsw_wait_seq(uint64_t seq);
 static void gsw_access(const uint64_t pages[8], int write);
 static void mark_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int x0, int y0, int x1, int y1);
+#ifdef HAVE_VULKAN
+static int vk_live; static void gsvk_live_need(const uint64_t pages[8]); static void gsvk_live_wrote(const uint64_t pages[8]);
+static void gsvk_xfer_touch(void);
+#endif
 static void *gs_sprhist_ptr; static int gs_sprhist_n;
 static uint64_t st_prims[3], st_px[3], st_visits[3], st_tex[3], st_blend[3], st_z[3]; static double st_time[3];
 
@@ -201,6 +205,14 @@ static void clut_load(uint64_t tex0) {
     int psm = BITS(tex0, 20, 6), cpsm = BITS(tex0, 51, 4), csm = BITS(tex0, 55, 1), csa = BITS(tex0, 56, 5);
     int n = (psm == T8 || psm == T8H) ? 256 : 16;
     int off = n == 16 ? (cpsm == CT32 ? (csa & 15) * 16 : csa * 16) : 0;
+#ifdef HAVE_VULKAN
+    if (vk_live) {   /* the CPU reads the CLUT: the GPU's version of its pages first */
+        uint64_t pg[8] = {0}; const int cps = (cpsm == CT32 || cpsm == CT24) ? CT32 : cpsm == CT16S ? CT16S : CT16;
+        if (csm) mark_pages(pg, cbp, BITS(r_texclut, 0, 6), cps, BITS(r_texclut, 6, 6) * 16, BITS(r_texclut, 12, 10), BITS(r_texclut, 6, 6) * 16 + n - 1, BITS(r_texclut, 12, 10));
+        else mark_pages(pg, cbp, 1, cps, 0, 0, 15, 15);
+        gsvk_live_need(pg);
+    }
+#endif
     if (gsw_n) {   /* the CLUT is read from local memory now: queued draws must have written it */
         uint64_t pg[8] = {0}; const int cps = (cpsm == CT32 || cpsm == CT24) ? CT32 : cpsm == CT16S ? CT16S : CT16;
         if (csm) mark_pages(pg, cbp, BITS(r_texclut, 0, 6), cps, BITS(r_texclut, 6, 6) * 16, BITS(r_texclut, 12, 10), BITS(r_texclut, 6, 6) * 16 + n - 1, BITS(r_texclut, 12, 10));
@@ -1079,7 +1091,6 @@ static int gs_nodraw; static long gs_draw_from;
    (gsvk.c) from the same local memory, and the two results are compared word for word. Drawing is serial then. */
 #ifdef HAVE_VULKAN
 #include "gsvk.h"
-static long vkchk_from = -2, vkchk_to; static uint64_t vkchk_n, vkchk_exact, vkchk_words, vkchk_skipped;
 /* buffers that share memory make the result depend on the order of the pixels: frame and Z pixels [x0,x1]x[y0,y1],
    texels [ua,ub]x[va,vb] (tex: whether the texture is read) */
 static int vk_tex, vk_ua, vk_va, vk_ub, vk_vb;   /* texels read by the primitive last tested (for batches) */
@@ -1121,110 +1132,190 @@ static void gsvk_tables(int32_t *t) {   /* the shader's BT8, CT8, BT4, CT4, BT16
     for (int i = 0; i < 32; i++) t[k++] = blockTable16Z[i / 4][i % 4];
     for (int i = 0; i < 128; i++) t[k++] = columnTable16[i / 16][i % 16];
 }
-/* HG_GSVKBATCH=1 (with HG_GSVKCHECK): supported primitives are collected into batches that one dispatch draws in
-   order (gsvk_batch_*), and local memory is compared after each batch instead of after each primitive. A batch ends
-   when a primitive reads pages an earlier one wrote or writes pages an earlier one read, when the frame or Z buffer
-   changes, and before anything else writes local memory (transfers, primitives left to the CPU). */
-static int vkb_mode = -1, vkb_open; static uint32_t vkb_key[5]; static uint64_t vkb_w[8], vkb_r[8];
-static uint64_t vkb_nbatch, vkb_nprim, vkb_badb, vkb_words, vkb_maxn, vkb_curn; static double vkb_ms;
+/* Modes. HG_GSVKCHECK=FROM[:TO] (VBlanks): every primitive in that range is drawn on the GPU (gsvk.c) from the same
+   local memory as the CPU, and the two are compared word for word, after each primitive or, with HG_GSVKBATCH=1,
+   after each batch. HG_GSVK=1: the GPU draws everything and the CPU none of it (live). Both draw serially (no GS
+   workers).
+   Batches: primitives collected into one dispatch, each invocation owning a pixel and going through the list in
+   order. A batch ends when a primitive reads pages an earlier one wrote or writes pages one read, when the frame or Z
+   buffer changes, and before anything else touches local memory. Primitives that read what they write (frame,
+   texture or Z overlap) are drawn alone by one invocation in the CPU's order (serial).
+   Live mode keeps the CPU's copy of local memory (vm) for what the CPU itself reads (CLUT loads, transfers, the
+   display) and tracks 8 KB pages: written by the GPU since the CPU last read them back (pg_gpu), or written by the
+   CPU since they last went up (pg_cpu). A page is never in both. */
+static long vkchk_from = -2, vkchk_to; static int vkb_mode;
+static uint64_t vk_n[3], vk_alone[3], vk_exact[3], vk_words[3], vk_cpu[3];   /* sprites, triangles, lines and points */
 static uint64_t vk_serial;   /* primitives drawn by one invocation in the CPU's order (their buffers overlap) */
-static int gsvk_batching(void) { if (vkb_mode < 0) vkb_mode = getenv("HG_GSVKBATCH") && atoi(getenv("HG_GSVKBATCH")) > 0; return vkb_mode; }
-static void gsvk_batch_close(void) {
-    if (!vkb_open) return;
-    vkb_open = 0;
-    double ms; const uint32_t *gpu = gsvk_batch_flush(&ms);
-    if (!gpu) return;
+static int vkb_open; static uint32_t vkb_key[5]; static uint64_t vkb_w[8], vkb_r[8];
+static uint64_t vkb_nbatch, vkb_nprim, vkb_badb, vkb_words, vkb_maxn, vkb_curn; static double vkb_ms;
+static uint64_t pg_gpu[8], pg_cpu[8], vk_downloads, vk_dl_pages, vk_ul_pages;
+static const uint64_t all_pages[8] = { ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull };
+static int vk_pending = -1; static int vk_box[4];   /* a single checked primitive waiting for the CPU's drawing */
+static void draw_triangle_cpu(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2);
+static void gsvk_setup(void) {
+    if (vkchk_from != -2) return;
+    vkchk_from = -1;
+    const char *e = getenv("HG_GSVKCHECK"), *lv = getenv("HG_GSVK");
+    vk_live = lv && atoi(lv) > 0;
+    vkb_mode = getenv("HG_GSVKBATCH") && atoi(getenv("HG_GSVKBATCH")) > 0;
+    if (e) { vkchk_from = atol(e); const char *c = strchr(e, ':'); vkchk_to = c ? atol(c + 1) : vkchk_from;
+             if (vk_live) { L("GSVK: HG_GSVKCHECK given: checking, not live\n"); vk_live = 0; } }
+    if (vkchk_from < 0 && !vk_live) return;
+    static int32_t tabs[GSVK_TABLES]; gsvk_tables(tabs);
+    if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0], tabs)) { vkchk_from = -1; vk_live = 0; return; }
+    if (vk_live) { memcpy(pg_cpu, all_pages, sizeof pg_cpu); vkb_mode = 1; L("GSVK: live, the GPU draws everything\n"); }
+}
+static int gsvk_checking(void) { gsvk_setup(); return vkchk_from >= 0 && (long)cur_vb >= vkchk_from && (long)cur_vb <= vkchk_to; }
+static void gsvk_log_bad(const char *what, const Draw *d, int x0, int x1, int y0, int y1, const uint32_t *gpu) {
     uint64_t bad = 0; long first = -1;
     for (uint32_t i = 0; i < (1u << 20); i++) if (gpu[i] != vm[i]) { bad++; if (first < 0) first = i; }
-    vkb_nbatch++; vkb_ms += ms; if (vkb_curn > vkb_maxn) vkb_maxn = vkb_curn;
-    if (bad) { vkb_badb++; vkb_words += bad; static int nlog; if (nlog++ < 40)
-        L("GSVKBATCH: VB %llu batch of %llu (fbp %u psm %02x): %llu words differ, first at %lu (cpu %08x gpu %08x)\n", (unsigned long long)cur_vb,
-          (unsigned long long)vkb_curn, vkb_key[0], vkb_key[2], (unsigned long long)bad, first, vm[first], gpu[first]); }
+    (void)bad;
+    const TexState *t = &d->tex;
+    L("GSVKCHECK: VB %llu %s fbp %u psm %02x zpsm %02x zte %d:%d tex %d:%02x fst %d bil %d tfx %d iip %d abe %d(%d%d%d%d) ate %d:%d fge %d box %d-%d,%d-%d: first difference at %lu (cpu %08x gpu %08x)\n",
+      (unsigned long long)cur_vb, what, d->fbp, d->fpsm, d->zpsm, d->zte, d->ztst, d->tme, d->tme ? t->psm : 0, d->fst, t->bilinear, t->tfx, d->iip,
+      d->abe, d->a, d->b, d->cc, d->d, d->ate, d->atst, d->fge, x0, x1, y0, y1, first, first >= 0 ? vm[first] : 0, first >= 0 ? gpu[first] : 0);
 }
-static void gsvk_batch_prim(const Draw *d, const GsVkSprite *s, int x0, int y0, int x1, int y1) {
+static uint64_t gsvk_diff(const uint32_t *gpu) { uint64_t bad = 0; for (uint32_t i = 0; i < (1u << 20); i++) bad += gpu[i] != vm[i]; return bad; }
+static void gsvk_batch_close(void) {
+    if (!vkb_open) return;
+    vkb_open = 0; vkb_nbatch++; if (vkb_curn > vkb_maxn) vkb_maxn = vkb_curn;
+    if (vk_live) { gsvk_break(); return; }
+    double ms; const uint32_t *gpu = gsvk_check_end(&ms);
+    if (!gpu) return;
+    vkb_ms += ms;
+    uint64_t bad = gsvk_diff(gpu);
+    if (bad) { vkb_badb++; vkb_words += bad; static int nlog; if (nlog++ < 40)
+        L("GSVKBATCH: VB %llu batch of %llu (fbp %u psm %02x): %llu words differ\n", (unsigned long long)cur_vb, (unsigned long long)vkb_curn, vkb_key[0], vkb_key[2], (unsigned long long)bad); }
+}
+/* live: pages the CPU wrote go up (before any GPU work that may use them) */
+static void gsvk_live_upload(void) {
+    int any = 0; for (int i = 0; i < 8; i++) any |= pg_cpu[i] != 0;
+    if (!any) return;
+    gsvk_batch_close();
+    for (uint32_t p = 0; p < 512; ) {
+        if (!(pg_cpu[p >> 6] >> (p & 63) & 1)) { p++; continue; }
+        uint32_t q = p; while (q < 512 && (pg_cpu[q >> 6] >> (q & 63) & 1)) q++;
+        gsvk_upload(p * 2048, (q - p) * 2048, vm + p * 2048); vk_ul_pages += q - p; p = q;
+    }
+    memset(pg_cpu, 0, sizeof pg_cpu);
+}
+/* live: the CPU is about to read (or partly write) these pages: the GPU's version comes back first */
+static void gsvk_live_need(const uint64_t pages[8]) {
+    if (!vk_live) return;
+    uint64_t m[8]; int any = 0;
+    for (int i = 0; i < 8; i++) { m[i] = pages[i] & pg_gpu[i]; any |= m[i] != 0; }
+    if (!any) return;
+    gsvk_batch_close(); gsvk_download(m, vm); vk_downloads++;
+    for (int i = 0; i < 8; i++) { pg_gpu[i] &= ~m[i]; vk_dl_pages += (uint64_t)__builtin_popcountll(m[i]); }
+}
+static void gsvk_live_wrote(const uint64_t pages[8]) { if (vk_live) for (int i = 0; i < 8; i++) pg_cpu[i] |= pages[i]; }
+/* image data is about to be written into local memory (pages xfer_pg, set when the transfer starts) */
+static uint64_t xfer_pg[8];
+static void gsvk_xfer_touch(void) {
+    if (vkb_open && !vk_live) { gsvk_batch_close(); return; }
+    if (!vk_live) return;
+    gsvk_live_need(xfer_pg); gsvk_live_wrote(xfer_pg);
+}
+/* the CPU draws a primitive the GPU cannot (an unknown frame format) */
+static void gsvk_cpu_before(void) { if (vk_live) gsvk_live_need(all_pages); else gsvk_batch_close(); }
+static void gsvk_cpu_after(const Draw *d, int x0, int y0, int x1, int y1) {
+    if (!vk_live) return;
+    uint64_t w[8] = {0};
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > 2047) x1 = 2047; if (y1 > 2047) y1 = 2047;
+    if (x1 >= x0 && y1 >= y0) { mark_pages(w, d->fbp, d->fbw, d->fpsm, x0, y0, x1, y1); if (d->zte) mark_pages(w, d->zbp, d->fbw, d->zpsm, x0, y0, x1, y1); }
+    gsvk_live_wrote(w);
+}
+/* a GPU primitive; pixels [x0,x1]x[y0,y1]; alone: lines and serial primitives. Returns 1 when the CPU is not to draw
+   it (live); when checking one primitive at a time, gsvk_after_cpu() compares once the CPU has drawn. */
+static int gsvk_take(const Draw *d, const GsVkSprite *s, int x0, int y0, int x1, int y1, int alone, int kind) {
     static const uint32_t noclut[256];
+    const uint32_t *cl = d->tme && d->tex.clut ? d->tex.clut : noclut;
     uint32_t key[5] = { d->fbp, d->fbw, d->fpsm, d->zbp, d->zpsm };
     uint64_t w[8] = {0}, r[8] = {0};
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > 2047) x1 = 2047; if (y1 > 2047) y1 = 2047;
-    mark_pages(w, d->fbp, d->fbw, d->fpsm, x0, y0, x1, y1);
-    if (d->zte && d->ztst != 0) mark_pages(w, d->zbp, d->fbw, d->zpsm, x0, y0, x1, y1);
-    if (vk_tex) mark_pages(r, d->tex.tbp, d->tex.tbw, d->tex.psm, vk_ua, vk_va, vk_ub, vk_vb);
-    if (vkb_open && (memcmp(key, vkb_key, sizeof key) || pages_meet(r, vkb_w) || pages_meet(w, vkb_r))) gsvk_batch_close();
-    const uint32_t *cl = d->tme && d->tex.clut ? d->tex.clut : noclut;
-    if (vkb_open && !gsvk_batch_add(s, cl)) gsvk_batch_close();
-    if (!vkb_open) {
-        gsvk_batch_begin(vm); vkb_open = 1; vkb_curn = 0; memcpy(vkb_key, key, sizeof key); memset(vkb_w, 0, sizeof vkb_w); memset(vkb_r, 0, sizeof vkb_r);
-        gsvk_batch_add(s, cl);
+    if (x1 >= x0 && y1 >= y0) {
+        mark_pages(w, d->fbp, d->fbw, d->fpsm, x0, y0, x1, y1);
+        if (d->zte && d->ztst != 0) mark_pages(w, d->zbp, d->fbw, d->zpsm, x0, y0, x1, y1);
     }
-    for (int i = 0; i < 8; i++) { vkb_w[i] |= w[i]; vkb_r[i] |= r[i]; }
-    vkb_nprim++; vkb_curn++;
-}
-static void gsvk_check_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
-    SprGeo g; sprite_geo(d, a, b, &g);
-    int serial = 0;
-    if (!gsvk_sprite_supported(d, &g)) {
-        if (g.px1 <= g.px0 || g.py1 <= g.py0 || !gsvk_fpsm_ok(d)) { vkchk_skipped++; gsvk_batch_close(); draw_sprite(d, a, b); return; }
-        serial = 1; vk_serial++;
+    if (!alone && vk_tex) mark_pages(r, d->tex.tbp, d->tex.tbw, d->tex.psm, vk_ua, vk_va, vk_ub, vk_vb);
+    if (vk_live) gsvk_live_upload();
+    if (!alone && vkb_mode) {
+        if (vkb_open && (memcmp(key, vkb_key, sizeof key) || pages_meet(r, vkb_w) || pages_meet(w, vkb_r))) gsvk_batch_close();
+        if (!vkb_open) {
+            if (!vk_live) gsvk_check_begin(vm);
+            vkb_open = 1; vkb_curn = 0; memcpy(vkb_key, key, sizeof key); memset(vkb_w, 0, sizeof vkb_w); memset(vkb_r, 0, sizeof vkb_r);
+        }
+        gsvk_prim(s, cl, 0);
+        for (int i = 0; i < 8; i++) { vkb_w[i] |= w[i]; vkb_r[i] |= r[i]; if (vk_live) pg_gpu[i] |= w[i]; }
+        vkb_nprim++; vkb_curn++; vk_n[kind]++;
+        return vk_live;
     }
-    const TexState *t = &d->tex;
-    GsVkSprite s = { g.px0, g.px1, g.py0, g.py1, g.x0, g.y0, g.u0, g.v0, g.du, g.dv,
-        b->rgba, (uint32_t)b->f, d->fbp, d->fbw, d->fpsm, d->fbmsk, d->scx0, d->scx1, d->scy0, d->scy1,
-        d->tme, (int)t->tbp, (int)t->tbw, (int)t->psm, (int)t->tw, (int)t->th, (int)t->tcc, (int)t->tfx, t->wms, t->wmt, t->minu, t->maxu, t->minv, t->maxv,
-        t->bilinear, t->aem, t->ta0, t->ta1, (int)t->csa, (int)t->cpsm,
-        d->ate, d->atst, d->aref, d->afail, d->abe, d->a, d->b, d->cc, d->d, d->fix, d->pabe, d->fba, d->colclamp, d->fge, d->need_dst, d->zte, d->ztst, d->fogcol,
-        b->z, d->zbp, d->zpsm, d->zmsk, d->zread, d->date, d->datm, d->fb16, 0 };
-    s.serial = serial;
-    if (gsvk_batching() && !serial) { gsvk_batch_prim(d, &s, g.px0, g.py0, g.px1 - 1, g.py1 - 1); draw_sprite(d, a, b); return; }
     gsvk_batch_close();
-    static const uint32_t noclut[256];
-    const uint32_t *gpu = gsvk_draw(&s, d->tme && t->clut ? t->clut : noclut, vm);
-    draw_sprite(d, a, b);
-    if (!gpu) return;
-    uint64_t bad = 0; long first = -1;
-    for (uint32_t i = 0; i < (1u << 20); i++) if (gpu[i] != vm[i]) { bad++; if (first < 0) first = i; }
-    vkchk_n++; if (!bad) vkchk_exact++; vkchk_words += bad;
-    static int nlog; if (bad && nlog++ < 40)
-        L("GSVKCHECK: VB %llu sprite fbp %u psm %02x tex %d:%02x bil %d tfx %d abe %d(%d%d%d%d) ate %d:%d fge %d rect %d-%d,%d-%d: %llu words differ, first at %lu (cpu %08x gpu %08x)\n",
-          (unsigned long long)cur_vb, d->fbp, d->fpsm, d->tme, d->tme ? t->psm : 0, t->bilinear, t->tfx, d->abe, d->a, d->b, d->cc, d->d, d->ate, d->atst, d->fge,
-          g.px0, g.px1, g.py0, g.py1, (unsigned long long)bad, first, vm[first], gpu[first]);
+    vk_n[kind]++;
+    if (vk_live) { gsvk_prim(s, cl, 1); for (int i = 0; i < 8; i++) pg_gpu[i] |= w[i]; return 1; }
+    gsvk_check_begin(vm); gsvk_prim(s, cl, 1); vk_alone[kind]++;
+    vk_pending = kind; vk_box[0] = x0; vk_box[1] = x1; vk_box[2] = y0; vk_box[3] = y1;
+    return 0;
 }
-/* the same for triangles: the set-up of draw_triangle() is done here (same float operations), the pixels on the GPU */
-static uint64_t vkt_n, vkt_exact, vkt_words, vkt_skipped;
-static void draw_triangle_cpu(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2);
-/* lines (prim 2) and points (prim 3): b is the vertex that gives colour, Z and fog */
-static uint64_t vkl_n, vkl_exact, vkl_words, vkl_skipped;
-static void gsvk_check_line(const Draw *d, const Vtx *a, const Vtx *b, int point) {
+static void gsvk_after_cpu(const Draw *d) {
+    if (vk_pending < 0) return;
+    const int kind = vk_pending; vk_pending = -1;
+    const uint32_t *gpu = gsvk_check_end(0);
+    if (!gpu) return;
+    uint64_t bad = gsvk_diff(gpu);
+    if (!bad) vk_exact[kind]++;
+    vk_words[kind] += bad;
+    static int nlog; static const char *nm[3] = { "sprite", "triangle", "line/point" };
+    if (bad && nlog++ < 40) gsvk_log_bad(nm[kind], d, vk_box[0], vk_box[1], vk_box[2], vk_box[3], gpu);
+}
+static GsVkSprite gsvk_base(const Draw *d) {   /* the draw state every primitive carries */
+    const TexState *t = &d->tex;
+    GsVkSprite s = { 0 };
+    s.fbp = d->fbp; s.fbw = d->fbw; s.fpsm = d->fpsm; s.fbmsk = d->fbmsk; s.scx0 = d->scx0; s.scx1 = d->scx1; s.scy0 = d->scy0; s.scy1 = d->scy1;
+    s.tme = d->tme; s.tbp = (int)t->tbp; s.tbw = (int)t->tbw; s.tpsm = (int)t->psm; s.tw = (int)t->tw; s.th = (int)t->th; s.tcc = (int)t->tcc; s.tfx = (int)t->tfx;
+    s.wms = t->wms; s.wmt = t->wmt; s.minu = t->minu; s.maxu = t->maxu; s.minv = t->minv; s.maxv = t->maxv;
+    s.bilinear = t->bilinear; s.aem = t->aem; s.ta0 = t->ta0; s.ta1 = t->ta1; s.csa = (int)t->csa; s.cpsm = (int)t->cpsm;
+    s.ate = d->ate; s.atst = d->atst; s.aref = d->aref; s.afail = d->afail; s.abe = d->abe; s.a = d->a; s.b = d->b; s.cc = d->cc; s.d = d->d; s.fix = d->fix;
+    s.pabe = d->pabe; s.fba = d->fba; s.colclamp = d->colclamp; s.fge = d->fge; s.need_dst = d->need_dst; s.zte = d->zte; s.ztst = d->ztst; s.fogcol = d->fogcol;
+    s.zbp = d->zbp; s.zpsm = d->zpsm; s.zmsk = d->zmsk; s.zread = d->zread; s.date = d->date; s.datm = d->datm; s.fb16 = d->fb16;
+    return s;
+}
+static void gsvk_sprite_prim(const Draw *d, const Vtx *a, const Vtx *b) {
+    SprGeo g; sprite_geo(d, a, b, &g);
+    if (g.px1 <= g.px0 || g.py1 <= g.py0) { if (!vk_live) draw_sprite(d, a, b); return; }   /* draws nothing */
+    if (!gsvk_fpsm_ok(d)) { vk_cpu[0]++; gsvk_cpu_before(); draw_sprite(d, a, b); gsvk_cpu_after(d, g.px0, g.py0, g.px1 - 1, g.py1 - 1); return; }
+    int serial = !gsvk_sprite_supported(d, &g);
+    vk_serial += serial;
+    if (serial) vk_tex = 0;
+    GsVkSprite s = gsvk_base(d);
+    s.px0 = g.px0; s.px1 = g.px1; s.py0 = g.py0; s.py1 = g.py1; s.x0 = g.x0; s.y0 = g.y0; s.u0 = g.u0; s.v0 = g.v0; s.du = g.du; s.dv = g.dv;
+    s.rgba = b->rgba; s.fog = (uint32_t)b->f; s.z = b->z; s.prim = 0; s.serial = serial;
+    if (gsvk_take(d, &s, g.px0, g.py0, g.px1 - 1, g.py1 - 1, serial, 0)) return;
+    draw_sprite(d, a, b);
+    gsvk_after_cpu(d);
+}
+/* lines and points: b is the vertex that gives colour, Z and fog */
+static void gsvk_line_prim(const Draw *d, const Vtx *a, const Vtx *b, int point) {
     int x0 = a->x >> 4, y0 = a->y >> 4, x1 = point ? x0 : b->x >> 4, y1 = point ? y0 : b->y >> 4;
     int dx = abs(x1 - x0), dy = abs(y1 - y0), n = dx > dy ? dx : dy;
     int bx0 = x0 < x1 ? x0 : x1, bx1 = x0 < x1 ? x1 : x0, by0 = y0 < y1 ? y0 : y1, by1 = y0 < y1 ? y1 : y0;
     const TexState *t = &d->tex;
     int tub = t->tw - 1, tvb = t->th - 1;
     if ((t->minu | t->maxu) > tub) tub = t->minu | t->maxu; if ((t->minv | t->maxv) > tvb) tvb = t->minv | t->maxv;
-    if (bx0 < 0) bx0 = 0; if (by0 < 0) by0 = 0;
-    if (!gsvk_fpsm_ok(d)) { vkl_skipped++; gsvk_batch_close(); if (point) draw_point(d, a); else draw_line(d, a, b); return; }
-    int serial = gsvk_buffers_meet(d, bx0, by0, bx1 > 2047 ? 2047 : bx1, by1 > 2047 ? 2047 : by1, d->tme, 0, 0, tub, tvb, 0);
+    if (!gsvk_fpsm_ok(d)) { vk_cpu[2]++; gsvk_cpu_before(); if (point) draw_point(d, a); else draw_line(d, a, b); gsvk_cpu_after(d, bx0, by0, bx1, by1); return; }
+    int cx0 = bx0 < 0 ? 0 : bx0, cy0 = by0 < 0 ? 0 : by0, cx1 = bx1 > 2047 ? 2047 : bx1, cy1 = by1 > 2047 ? 2047 : by1;
+    int serial = cx1 >= cx0 && cy1 >= cy0 && gsvk_buffers_meet(d, cx0, cy0, cx1, cy1, d->tme, 0, 0, tub, tvb, 0);
     vk_serial += serial;
-    GsVkSprite s = { point ? x0 : 0, point ? x0 + 1 : n + 1, point ? y0 : 0, point ? y0 + 1 : 1, point ? a->u : 0, point ? a->v : 0, 0, 0, 0, 0,
-        b->rgba, (uint32_t)b->f, d->fbp, d->fbw, d->fpsm, d->fbmsk, d->scx0, d->scx1, d->scy0, d->scy1,
-        d->tme, (int)t->tbp, (int)t->tbw, (int)t->psm, (int)t->tw, (int)t->th, (int)t->tcc, (int)t->tfx, t->wms, t->wmt, t->minu, t->maxu, t->minv, t->maxv,
-        t->bilinear, t->aem, t->ta0, t->ta1, (int)t->csa, (int)t->cpsm,
-        d->ate, d->atst, d->aref, d->afail, d->abe, d->a, d->b, d->cc, d->d, d->fix, d->pabe, d->fba, d->colclamp, d->fge, d->need_dst, d->zte, d->ztst, d->fogcol,
-        b->z, d->zbp, d->zpsm, d->zmsk, d->zread, d->date, d->datm, d->fb16, point ? 3 : 2 };
-    s.lx0 = x0; s.ly0 = y0; s.lx1 = x1; s.ly1 = y1; s.ln = n; s.serial = serial;
-    if (gsvk_batching() && point && !serial) { gsvk_batch_prim(d, &s, x0, y0, x0, y0); draw_point(d, a); return; }
-    gsvk_batch_close();   /* lines go one at a time */
-    static const uint32_t noclut[256];
-    const uint32_t *gpu = gsvk_draw(&s, d->tme && t->clut ? t->clut : noclut, vm);
+    GsVkSprite s = gsvk_base(d);
+    s.px0 = point ? x0 : 0; s.px1 = point ? x0 + 1 : n + 1; s.py0 = point ? y0 : 0; s.py1 = point ? y0 + 1 : 1;
+    s.x0 = point ? a->u : 0; s.y0 = point ? a->v : 0;
+    s.rgba = b->rgba; s.fog = (uint32_t)b->f; s.z = b->z; s.prim = point ? 3 : 2; s.serial = serial;
+    s.lx0 = x0; s.ly0 = y0; s.lx1 = x1; s.ly1 = y1; s.ln = n;
+    if (gsvk_take(d, &s, bx0, by0, bx1, by1, !point || serial, 2)) return;   /* lines go alone: their invocations are steps */
     if (point) draw_point(d, a); else draw_line(d, a, b);
-    if (!gpu) return;
-    uint64_t bad = 0; long first = -1;
-    for (uint32_t i = 0; i < (1u << 20); i++) if (gpu[i] != vm[i]) { bad++; if (first < 0) first = i; }
-    vkl_n++; if (!bad) vkl_exact++; vkl_words += bad;
-    static int nlog; if (bad && nlog++ < 40)
-        L("GSVKCHECK: VB %llu %s fbp %u psm %02x (%d,%d)-(%d,%d): %llu words differ, first at %lu (cpu %08x gpu %08x)\n", (unsigned long long)cur_vb, point ? "point" : "line",
-          d->fbp, d->fpsm, x0, y0, x1, y1, (unsigned long long)bad, first, vm[first], gpu[first]);
+    gsvk_after_cpu(d);
 }
-static void gsvk_check_triangle(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2) {
+static void gsvk_triangle_prim(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2) {
     float x0 = v0->x / 16.0f, y0 = v0->y / 16.0f, x1 = v1->x / 16.0f, y1 = v1->y / 16.0f, x2 = v2->x / 16.0f, y2 = v2->y / 16.0f;
     float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
     int minx = (int)floorf(fminf(x0, fminf(x1, x2))), maxx = (int)ceilf(fmaxf(x0, fmaxf(x1, x2)));
@@ -1253,40 +1344,18 @@ static void gsvk_check_triangle(const Draw *d, const Vtx *v0, const Vtx *v1, con
                 tua = a; tub = b; tva = c; tvb = e; } } }
     int ft_same = d->tme && t->tbp == d->fbp && t->tbw == d->fbw && t->psm == d->fpsm;   /* same buffer: exact rectangles */
     int ft_meet = ft_same && tua <= maxx && minx <= tub && tva <= maxy && miny <= tvb;
-    if (!gsvk_fpsm_ok(d)) { vkt_skipped++; gsvk_batch_close(); draw_triangle_cpu(d, v0, v1, v2); return; }
+    if (!gsvk_fpsm_ok(d)) { vk_cpu[1]++; gsvk_cpu_before(); draw_triangle_cpu(d, v0, v1, v2); gsvk_cpu_after(d, minx, miny, maxx, maxy); return; }
     int serial = ft_meet || gsvk_buffers_meet(d, minx, miny, maxx, maxy, d->tme, tua, tva, tub, tvb, ft_same);
     vk_serial += serial;
-    GsVkSprite s = { minx, maxx + 1, miny, maxy + 1, 0, 0, 0, 0, 0, 0,
-        0, 0, d->fbp, d->fbw, d->fpsm, d->fbmsk, d->scx0, d->scx1, d->scy0, d->scy1,
-        d->tme, (int)t->tbp, (int)t->tbw, (int)t->psm, (int)t->tw, (int)t->th, (int)t->tcc, (int)t->tfx, t->wms, t->wmt, t->minu, t->maxu, t->minv, t->maxv,
-        t->bilinear, t->aem, t->ta0, t->ta1, (int)t->csa, (int)t->cpsm,
-        d->ate, d->atst, d->aref, d->afail, d->abe, d->a, d->b, d->cc, d->d, d->fix, d->pabe, d->fba, d->colclamp, d->fge, d->need_dst, d->zte, d->ztst, d->fogcol,
-        0, d->zbp, d->zpsm, d->zmsk, d->zread, d->date, d->datm, d->fb16,
-        1, d->iip, d->fst, x0, y0, x1, y1, x2, y2, 1.0f / area, ua[0], ua[1], ua[2], va[0], va[1], va[2], qa[0], qa[1], qa[2],
-        v0->rgba, v1->rgba, v2->rgba, v0->z, v1->z, v2->z, v0->f, v1->f, v2->f };
-    s.serial = serial;
-    if (gsvk_batching() && !serial) { gsvk_batch_prim(d, &s, minx, miny, maxx, maxy); draw_triangle_cpu(d, v0, v1, v2); return; }
-    gsvk_batch_close();
-    static const uint32_t noclut[256];
-    const uint32_t *gpu = gsvk_draw(&s, d->tme && t->clut ? t->clut : noclut, vm);
+    if (serial) { vk_tex = 0; }
+    GsVkSprite s = gsvk_base(d);
+    s.px0 = minx; s.px1 = maxx + 1; s.py0 = miny; s.py1 = maxy + 1; s.prim = 1; s.iip = d->iip; s.fst = d->fst; s.serial = serial;
+    s.tx0 = x0; s.ty0 = y0; s.tx1 = x1; s.ty1 = y1; s.tx2 = x2; s.ty2 = y2; s.tinv = 1.0f / area;
+    s.tu0 = ua[0]; s.tu1 = ua[1]; s.tu2 = ua[2]; s.tv0 = va[0]; s.tv1 = va[1]; s.tv2 = va[2]; s.tq0 = qa[0]; s.tq1 = qa[1]; s.tq2 = qa[2];
+    s.tc0 = v0->rgba; s.tc1 = v1->rgba; s.tc2 = v2->rgba; s.tz0 = v0->z; s.tz1 = v1->z; s.tz2 = v2->z; s.tf0 = v0->f; s.tf1 = v1->f; s.tf2 = v2->f;
+    if (gsvk_take(d, &s, minx, miny, maxx, maxy, serial, 1)) return;
     draw_triangle_cpu(d, v0, v1, v2);
-    if (!gpu) return;
-    uint64_t bad = 0; long first = -1;
-    for (uint32_t i = 0; i < (1u << 20); i++) if (gpu[i] != vm[i]) { bad++; if (first < 0) first = i; }
-    vkt_n++; if (!bad) vkt_exact++; vkt_words += bad;
-    static int nlog; if (bad && nlog++ < 40)
-        L("GSVKCHECK: VB %llu triangle fbp %u psm %02x zpsm %02x zte %d:%d tex %d:%02x fst %d bil %d tfx %d iip %d abe %d fge %d box %d-%d,%d-%d: %llu words differ, first at %lu (cpu %08x gpu %08x)\n",
-          (unsigned long long)cur_vb, d->fbp, d->fpsm, d->zpsm, d->zte, d->ztst, d->tme, d->tme ? t->psm : 0, d->fst, t->bilinear, t->tfx, d->iip, d->abe, d->fge,
-          minx, maxx, miny, maxy, (unsigned long long)bad, first, vm[first], gpu[first]);
-}
-#endif
-#ifdef HAVE_VULKAN
-static int gsvk_checking(void) {
-    if (vkchk_from == -2) { const char *e = getenv("HG_GSVKCHECK"); vkchk_from = -1;
-        if (e) { vkchk_from = atol(e); const char *c = strchr(e, ':'); vkchk_to = c ? atol(c + 1) : vkchk_from;
-                 static int32_t tabs[GSVK_TABLES]; gsvk_tables(tabs);
-                 if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0], tabs)) vkchk_from = -1; } }
-    return vkchk_from >= 0 && (long)cur_vb >= vkchk_from && (long)cur_vb <= vkchk_to;
+    gsvk_after_cpu(d);
 }
 #endif
 static void draw_triangle_cpu(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2) {
@@ -1297,29 +1366,23 @@ static void draw_triangle_cpu(const Draw *d, const Vtx *v0, const Vtx *v1, const
 }
 static void rasterize(const Draw *d, int prim, const Vtx *w) {
 #ifdef HAVE_VULKAN
-    if (vkb_open && !gsvk_checking()) gsvk_batch_close();
+    const int chk = gsvk_checking();
+    if (vkb_open && !vk_live && !chk) gsvk_batch_close();
+    if (chk || vk_live) {
+        switch (prim) {
+        case 0: gsvk_line_prim(d, &w[0], &w[0], 1); break;
+        case 1: case 2: gsvk_line_prim(d, &w[0], &w[1], 0); break;
+        case 3: case 4: case 5: gsvk_triangle_prim(d, &w[0], &w[1], &w[2]); break;
+        case 6: gsvk_sprite_prim(d, &w[0], &w[1]); break;
+        }
+        return;
+    }
 #endif
     switch (prim) {
-    case 0:
-#ifdef HAVE_VULKAN
-        if (gsvk_checking()) { gsvk_check_line(d, &w[0], &w[0], 1); break; }
-#endif
-        draw_point(d, &w[0]); break;
-    case 1: case 2:
-#ifdef HAVE_VULKAN
-        if (gsvk_checking()) { gsvk_check_line(d, &w[0], &w[1], 0); break; }
-#endif
-        draw_line(d, &w[0], &w[1]); break;
-    case 3: case 4: case 5:
-#ifdef HAVE_VULKAN
-        if (gsvk_checking()) { gsvk_check_triangle(d, &w[0], &w[1], &w[2]); break; }
-#endif
-        draw_triangle_cpu(d, &w[0], &w[1], &w[2]); break;
-    case 6:
-#ifdef HAVE_VULKAN
-        if (gsvk_checking()) { gsvk_check_sprite(d, &w[0], &w[1]); break; }
-#endif
-        draw_sprite(d, &w[0], &w[1]); break;
+    case 0: draw_point(d, &w[0]); break;
+    case 1: case 2: draw_line(d, &w[0], &w[1]); break;
+    case 3: case 4: case 5: draw_triangle_cpu(d, &w[0], &w[1], &w[2]); break;
+    case 6: draw_sprite(d, &w[0], &w[1]); break;
     }
 }
 
@@ -1457,7 +1520,7 @@ static void gsw_init(void) {
     const char *e = getenv("HG_GSTHREADS"); int n = e ? atoi(e) : host_ncpus() / 2;
     if (!e && n > 8) n = 8;
     if (n > GS_MAXW) n = GS_MAXW;
-    if (getenv("HG_PIXWATCH") || getenv("HG_SPRLOG") || getenv("HG_SPRSTAT") || getenv("HG_GSVKCHECK")) n = 0;   /* per-pixel debugging: one drawing thread */
+    if (getenv("HG_PIXWATCH") || getenv("HG_SPRLOG") || getenv("HG_SPRSTAT") || getenv("HG_GSVKCHECK") || getenv("HG_GSVK")) n = 0;   /* per-pixel debugging: one drawing thread */
     if (n < 1 || !(gsq = calloc(GSQ, sizeof *gsq))) { L("GS: drawing on the GS thread (HG_GSTHREADS=0)\n"); return; }
     gsw_n = n;
     for (int k = 0; k < n; k++) if (pthread_create(&gsw_thr[k], 0, gsw_main, (void *)(intptr_t)k)) { L("GS: worker %d failed to start\n", k); exit(1); }
@@ -1548,7 +1611,7 @@ static void xfer_put_px(uint32_t v) {
 static void hwreg_write(uint64_t v) {
     if (!xfer.active) return;
 #ifdef HAVE_VULKAN
-    if (vkb_open) gsvk_batch_close();
+    gsvk_xfer_touch();
 #endif
     switch (xfer.psm) {
     case CT32: case Z32: xfer_put_px((uint32_t)v); xfer_put_px((uint32_t)(v >> 32)); break;
@@ -1570,7 +1633,7 @@ static void hwreg_write(uint64_t v) {
 static void xfer_qword(const uint64_t q[2]) {
     if (!xfer.active) return;
 #ifdef HAVE_VULKAN
-    if (vkb_open) gsvk_batch_close();
+    gsvk_xfer_touch();
 #endif
     const int X = xfer.sx + xfer.x, Y = xfer.sy + xfer.y;
     const uint8_t *b = (const uint8_t *)q;
@@ -1623,10 +1686,23 @@ static void trxdir_write(uint64_t v) {
         if (xfer.active && gsw_n) {   /* queued draws must be done with the pages the image goes to */
             uint64_t pg[8] = {0}; mark_pages(pg, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1); gsw_access(pg, 1);
         }
+#ifdef HAVE_VULKAN
+        memset(xfer_pg, 0, sizeof xfer_pg);
+        if (xfer.active) mark_pages(xfer_pg, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1);
+#endif
     } else if (xdir == 2) {        /* local -> local */
         gsw_drain();
 #ifdef HAVE_VULKAN
         if (vkb_open) gsvk_batch_close();
+        uint64_t spg[8] = {0}, dpg[8] = {0};
+        if (vk_live) {   /* the CPU copies: both sides from the GPU first, the destination back up after */
+            const int w_ = BITS(r_trxreg, 0, 12), h_ = BITS(r_trxreg, 32, 12);
+            if (w_ && h_) {
+                mark_pages(spg, BITS(r_bitbltbuf, 0, 14), BITS(r_bitbltbuf, 16, 6), BITS(r_bitbltbuf, 24, 6), 0, 0, 2047, 2047);
+                memcpy(dpg, all_pages, sizeof dpg);   /* coordinates wrap at 2048: be generous */
+                gsvk_live_need(all_pages);
+            }
+        }
 #endif
         uint32_t sbp = BITS(r_bitbltbuf, 0, 14), sbw = BITS(r_bitbltbuf, 16, 6), spsm = BITS(r_bitbltbuf, 24, 6);
         uint32_t dbp = BITS(r_bitbltbuf, 32, 14), dbw = BITS(r_bitbltbuf, 48, 6), dpsm = BITS(r_bitbltbuf, 56, 6);
@@ -1636,6 +1712,9 @@ static void trxdir_write(uint64_t v) {
         for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) tmp[y * w + x] = read_px(sbp, sbw, spsm, (sx + x) & 2047, (sy + y) & 2047);
         for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) write_px(dbp, dbw, dpsm, (dx + x) & 2047, (dy + y) & 2047, tmp[y * w + x]);
         free(tmp);
+#ifdef HAVE_VULKAN
+        { uint64_t wpg[8] = {0}; mark_pages(wpg, dbp, dbw, dpsm, 0, 0, 2047, 2047); gsvk_live_wrote(wpg); (void)spg; (void)dpg; }
+#endif
     }
 }
 
@@ -1855,7 +1934,13 @@ void gif_qword(int path, const uint64_t q[2]) {
     shadow_qword(path, q); push((uint64_t)(path & 3), q);
 }
 int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
-    if (!mtgs) { gsw_drain(); return display_from(gspriv, out, maxw, maxh, pw, ph); }
+    if (!mtgs) {
+        gsw_drain();
+#ifdef HAVE_VULKAN
+        if (vk_live) gsvk_live_need(all_pages);
+#endif
+        return display_from(gspriv, out, maxw, maxh, pw, ph);
+    }
     want_front = 1;
     pthread_mutex_lock(&front_mx);
     int ok = front_ok && front_w <= maxw && front_h <= maxh;
@@ -1872,6 +1957,9 @@ void gs_vblank(uint64_t vb) {
 }
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
     gsw_drain();   /* the display and frame dumps read local memory */
+#ifdef HAVE_VULKAN
+    if (vk_live) gsvk_live_need(all_pages);
+#endif
     gs_nodraw = gs_draw_from < 0 || (uint64_t)gs_draw_from > vb;
     cur_vb = vb;
     { static int init; if (!init) { init = 1; const char *p = getenv("HG_PIXWATCH"); if (p) sscanf(p, "%d,%d,%ld", &watch_x, &watch_y, &watch_vb); } }
@@ -1917,17 +2005,23 @@ void gs_init(uint8_t *priv) {
 void gs_dump_stats(void) {
     gs_sync();
 #ifdef HAVE_VULKAN
-    if (vkchk_from >= 0) L("GSVKCHECK: %llu sprites drawn on the GPU too, %llu identical, %llu differing words in all; %llu sprites not supported yet\n",
-        (unsigned long long)vkchk_n, (unsigned long long)vkchk_exact, (unsigned long long)vkchk_words, (unsigned long long)vkchk_skipped);
     if (vkb_open) gsvk_batch_close();
+    if (vk_live) {
+        gsvk_finish(); uint64_t sub, dis; double gms; gsvk_stats(&sub, &dis, &gms);
+        L("GSVK live: %llu sprites, %llu triangles, %llu lines/points on the GPU (%llu serial; %llu left to the CPU); %llu batches; %llu dispatches in %llu submissions, "
+          "GPU %.1f ms; %llu read-backs (%llu pages), %llu pages uploaded\n", (unsigned long long)vk_n[0], (unsigned long long)vk_n[1], (unsigned long long)vk_n[2],
+          (unsigned long long)vk_serial, (unsigned long long)(vk_cpu[0] + vk_cpu[1] + vk_cpu[2]), (unsigned long long)vkb_nbatch, (unsigned long long)dis,
+          (unsigned long long)sub, gms, (unsigned long long)vk_downloads, (unsigned long long)vk_dl_pages, (unsigned long long)vk_ul_pages);
+    }
+    if (vkchk_from >= 0) {
+        static const char *nm[3] = { "sprites", "triangles", "lines/points" };
+        for (int k = 0; k < 3; k++) L("GSVKCHECK: %llu %s on the GPU; of them %llu checked one at a time: %llu identical, %llu differing words; %llu left to the CPU\n",
+            (unsigned long long)vk_n[k], nm[k], (unsigned long long)vk_alone[k], (unsigned long long)vk_exact[k], (unsigned long long)vk_words[k], (unsigned long long)vk_cpu[k]);
+    }
     if (vkchk_from >= 0 && vk_serial) L("GSVKCHECK: %llu primitives read what they write: drawn on the GPU in the CPU's order, one invocation each (counted below)\n", (unsigned long long)vk_serial);
     if (vkchk_from >= 0 && vkb_nbatch) L("GSVKBATCH: %llu primitives in %llu batches (largest %llu), %llu batches differ (%llu words); GPU %.1f ms in all (%.3f ms per batch)\n",
         (unsigned long long)vkb_nprim, (unsigned long long)vkb_nbatch, (unsigned long long)vkb_maxn, (unsigned long long)vkb_badb, (unsigned long long)vkb_words,
         vkb_ms, vkb_ms / (double)vkb_nbatch);
-    if (vkchk_from >= 0 && (vkl_n || vkl_skipped)) L("GSVKCHECK: %llu lines/points drawn on the GPU too, %llu identical, %llu differing words in all; %llu not supported yet\n",
-        (unsigned long long)vkl_n, (unsigned long long)vkl_exact, (unsigned long long)vkl_words, (unsigned long long)vkl_skipped);
-    if (vkchk_from >= 0) L("GSVKCHECK: %llu triangles drawn on the GPU too, %llu identical, %llu differing words in all; %llu triangles not supported yet\n",
-        (unsigned long long)vkt_n, (unsigned long long)vkt_exact, (unsigned long long)vkt_words, (unsigned long long)vkt_skipped);
 #endif
 #if defined(__x86_64__)
     if (gsw_n) { gsw_wait_seq(atomic_load(&gsq_head));

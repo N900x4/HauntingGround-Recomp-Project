@@ -25,15 +25,12 @@ layout(std430, binding = 2) readonly buffer Clut { uint clut[]; };
     uint clutoff;
 // prim 0: sprite (px0.. are its pixel rectangle), 1: triangle (px0.. its bounding box), 2: line from (lx0,ly0) to
 // (lx1,ly1) in ln steps, 3: point at (lx0,ly0) with texel (x0,y0)
-#ifdef BATCH
-// a batch of primitives drawn in order: each invocation owns one pixel and goes through the list
+// the primitives, in a ring the CPU fills; push constants: a batch's count, origin and first primitive, or (one
+// primitive at a time) its index in n
 struct Prim { PRIM_FIELDS };
 layout(std430, binding = 3) readonly buffer Prims { Prim prims[]; };
-layout(push_constant) uniform PC { int n, bx0, by0; } pc;
+layout(push_constant) uniform PC { int n, bx0, by0, first; } pc;
 Prim p;
-#else
-layout(std140, binding = 3) uniform P { PRIM_FIELDS } p;
-#endif
 layout(std430, binding = 4) readonly buffer Tables { int tab[]; };   // see gsvk_init(): block and column tables
 const int BT8 = 0, CT8 = 32, BT4 = 288, CT4 = 320, BT16 = 832, BT16S = 864, BT16Z = 896, CT16 = 928;
 
@@ -237,14 +234,14 @@ void main() {
         barrier();
         for (int k = 0; k < 4; k++) {
             int j = int(lid) * 4 + k, i = base + j;
-            if (i < pc.n && prims[i].px0 < tx0 + 8 && prims[i].px1 > tx0 && prims[i].py0 < ty0 + 8 && prims[i].py1 > ty0)
+            if (i < pc.n && prims[pc.first + i].px0 < tx0 + 8 && prims[pc.first + i].px1 > tx0 && prims[pc.first + i].py0 < ty0 + 8 && prims[pc.first + i].py1 > ty0)
                 atomicOr(hits[j >> 5], 1u << (j & 31));
         }
         barrier();
         for (int w = 0; w < 8; w++) {
             uint m = hits[w];
             while (m != 0u) {
-                int i = base + w * 32 + findLSB(m); m &= m - 1u;
+                int i = pc.first + base + w * 32 + findLSB(m); m &= m - 1u;
                 if (x < prims[i].px0 || x >= prims[i].px1 || y < prims[i].py0 || y >= prims[i].py1) continue;
                 p = prims[i];
                 draw_at(x, y);
@@ -260,6 +257,7 @@ void line_step(int i) {   // draw_line()
     pixel(p.lx0 + lround_(fx), p.ly0 + lround_(fy), p.z, shade(p.rgba, 0, 0, p.fog));
 }
 void main() {
+    p = prims[pc.n];
     if (p.serial != 0) {   // primitives that read what they write: the CPU's order, rows then columns
         if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u) return;
         if (p.prim == 2) { for (int i = 0; i <= p.ln; i++) line_step(i); return; }

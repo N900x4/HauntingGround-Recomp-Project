@@ -14,6 +14,7 @@
 #include "gsvk.h"
 #include "gen/gs_sprite_spv.h"
 #include "gen/gs_batch_spv.h"
+#include <time.h>
 
 static VkInstance inst; static VkPhysicalDevice phys; static VkDevice dev; static VkQueue queue; static uint32_t qfam;
 static VkDescriptorSetLayout dsl; static VkPipelineLayout pl; static VkPipeline pipe1, pipeb; static VkDescriptorPool dpool; static VkDescriptorSet dset;
@@ -26,7 +27,7 @@ static int state;   /* 0 untried, 1 ready, -1 unavailable */
 static int open_, bound; static VkPipeline cur_pipe; static uint32_t nprim, nclut, upoff;
 static uint32_t bfirst, bn; static int bx0, by0, bx1, by1;   /* the batch being collected */
 static int vfresh = 1;   /* the mirror does not hold the GPU's memory */
-static uint64_t n_submits, n_dispatch; static double gpu_ms_all;
+static uint64_t n_submits, n_dispatch; static double gpu_ms_all, wait_ms_all;
 
 /* mode: 0 host coherent, 1 + cached, 2 device local, 3 device local and host visible (else host coherent) */
 static int mkbuf_(Buf *b, VkDeviceSize n, VkBufferUsageFlags use, int mode) {
@@ -161,7 +162,9 @@ void gsvk_finish(void) {
     vkEndCommandBuffer(cmd); open_ = 0;
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
     vkResetFences(dev, 1, &fence);
+    struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
     if (vkQueueSubmit(queue, 1, &si, fence) || vkWaitForFences(dev, 1, &fence, VK_TRUE, 10000000000ull)) { L("GSVK: submit failed\n"); state = -1; return; }
+    clock_gettime(CLOCK_MONOTONIC, &t1); wait_ms_all += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
     uint64_t ts[2];
     if (!vkGetQueryPoolResults(dev, qpool, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT)) gpu_ms_all += (double)(ts[1] - ts[0]) * tsperiod / 1e6;
     n_submits++; nprim = nclut = 0; upoff = 0;
@@ -216,7 +219,7 @@ void gsvk_download(const uint64_t pages[8], uint32_t *dst) {
     for (uint32_t i = 0; i < nc; i++) memcpy((uint8_t *)dst + c[i].srcOffset, (uint8_t *)vram.p + c[i].srcOffset, c[i].size);
     vfresh = 1;   /* the mirror no longer holds the whole of the GPU's memory */
 }
-void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms) { *submits = n_submits; *dispatches = n_dispatch; *gpu_ms = gpu_ms_all; }
+void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms) { *submits = n_submits; *dispatches = n_dispatch; *gpu_ms = gpu_ms_all; *wait_ms = wait_ms_all; }
 
 /* ------------------------------------------------------------------ checking against the CPU */
 /* the GPU's memory becomes `now`: the mirror takes it, the 4 KB chunks that changed go up */

@@ -30,7 +30,7 @@ void gsvk_break(void);
 void gsvk_upload(uint32_t word, uint32_t nwords, const uint32_t *src);   /* CPU data into local memory */
 void gsvk_download(const uint64_t pages[8], uint32_t *dst);              /* those 8 KB pages to dst (waits) */
 void gsvk_finish(void);                                                    /* submit and wait */
-void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms);
+void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms);   /* wait: wall ms in submit+wait */
 /* checking: the GPU's memory is set to `now`, then primitives are recorded, then the GPU's memory comes back */
 void gsvk_check_begin(const uint32_t *now);
 const uint32_t *gsvk_check_end(double *ms);

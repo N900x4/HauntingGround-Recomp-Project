@@ -1146,6 +1146,7 @@ static void gsvk_tables(int32_t *t) {   /* the shader's BT8, CT8, BT4, CT4, BT16
 static long vkchk_from = -2, vkchk_to; static int vkb_mode;
 static uint64_t vk_n[3], vk_alone[3], vk_exact[3], vk_words[3], vk_cpu[3];   /* sprites, triangles, lines and points */
 static uint64_t vk_serial;   /* primitives drawn by one invocation in the CPU's order (their buffers overlap) */
+static uint64_t vk_selfpix;  /* triangles that texture from their own pixel (batched) */
 static int vkb_open; static uint32_t vkb_key[5]; static uint64_t vkb_w[8], vkb_r[8];
 static uint64_t vkb_nbatch, vkb_nprim, vkb_badb, vkb_words, vkb_maxn, vkb_curn; static double vkb_ms;
 static uint64_t pg_gpu[8], pg_cpu[8], vk_downloads, vk_dl_pages, vk_ul_pages;
@@ -1345,9 +1346,25 @@ static void gsvk_triangle_prim(const Draw *d, const Vtx *v0, const Vtx *v1, cons
     int ft_same = d->tme && t->tbp == d->fbp && t->tbw == d->fbw && t->psm == d->fpsm;   /* same buffer: exact rectangles */
     int ft_meet = ft_same && tua <= maxx && minx <= tub && tva <= maxy && miny <= tvb;
     if (!gsvk_fpsm_ok(d)) { vk_cpu[1]++; gsvk_cpu_before(); draw_triangle_cpu(d, v0, v1, v2); gsvk_cpu_after(d, minx, miny, maxx, maxy); return; }
-    int serial = ft_meet || gsvk_buffers_meet(d, minx, miny, maxx, maxy, d->tme, tua, tva, tub, tvb, ft_same);
-    vk_serial += serial;
-    if (serial) { vk_tex = 0; }
+    /* Texturing from its own frame buffer at its own pixel: same buffer and 32-bit layout, point sampling, and the
+       texture coordinates are the pixel position plus an offset in (0.02, 0.98) texel at every vertex (q the same at
+       all three), inside the texture without wrapping. Interpolated, u - x is a convex combination of the vertices'
+       offsets, so every pixel reads exactly its own word, before writing it: order-independent (the game draws alpha
+       this way, reading it through T8H). Float error in the interpolation is far below the 0.02-texel margin. */
+    int selfpix = 0;
+    if (d->tme && !t->bilinear && t->tbp == d->fbp && t->tbw == d->fbw && (d->fpsm == CT32 || d->fpsm == CT24) &&
+        (t->psm == CT32 || t->psm == CT24 || t->psm == T8H || t->psm == T4HL || t->psm == T4HH) && qa[0] == qa[1] && qa[1] == qa[2] && qa[0] > 0 &&
+        t->wms < 2 && t->wmt < 2 && minx >= 0 && miny >= 0 && maxx < (int)t->tw && maxy < (int)t->th) {
+        const float xs[3] = { x0, x1, x2 }, ys[3] = { y0, y1, y2 };
+        float cu[3], cv[3];
+        for (int i = 0; i < 3; i++) { cu[i] = ua[i] / qa[i] / 16.0f - xs[i]; cv[i] = va[i] / qa[i] / 16.0f - ys[i]; }
+        selfpix = 1;
+        for (int i = 0; i < 3; i++) selfpix &= cu[i] > 0.02f && cu[i] < 0.98f && cv[i] > 0.02f && cv[i] < 0.98f;
+    }
+    int serial = selfpix ? gsvk_buffers_meet(d, minx, miny, maxx, maxy, 0, 0, 0, 0, 0, 1)   /* Z against the frame only */
+                         : ft_meet || gsvk_buffers_meet(d, minx, miny, maxx, maxy, d->tme, tua, tva, tub, tvb, ft_same);
+    vk_serial += serial; vk_selfpix += selfpix && !serial;
+    if (serial || selfpix) { vk_tex = 0; }   /* own-pixel reads: no reads of other pixels for the batch to track */
     GsVkSprite s = gsvk_base(d);
     s.px0 = minx; s.px1 = maxx + 1; s.py0 = miny; s.py1 = maxy + 1; s.prim = 1; s.iip = d->iip; s.fst = d->fst; s.serial = serial;
     s.tx0 = x0; s.ty0 = y0; s.tx1 = x1; s.ty1 = y1; s.tx2 = x2; s.ty2 = y2; s.tinv = 1.0f / area;
@@ -2007,17 +2024,18 @@ void gs_dump_stats(void) {
 #ifdef HAVE_VULKAN
     if (vkb_open) gsvk_batch_close();
     if (vk_live) {
-        gsvk_finish(); uint64_t sub, dis; double gms; gsvk_stats(&sub, &dis, &gms);
+        gsvk_finish(); uint64_t sub, dis; double gms, wms; gsvk_stats(&sub, &dis, &gms, &wms);
         L("GSVK live: %llu sprites, %llu triangles, %llu lines/points on the GPU (%llu serial; %llu left to the CPU); %llu batches; %llu dispatches in %llu submissions, "
-          "GPU %.1f ms; %llu read-backs (%llu pages), %llu pages uploaded\n", (unsigned long long)vk_n[0], (unsigned long long)vk_n[1], (unsigned long long)vk_n[2],
+          "GPU %.1f ms (waited %.1f ms); %llu read-backs (%llu pages), %llu pages uploaded\n", (unsigned long long)vk_n[0], (unsigned long long)vk_n[1], (unsigned long long)vk_n[2],
           (unsigned long long)vk_serial, (unsigned long long)(vk_cpu[0] + vk_cpu[1] + vk_cpu[2]), (unsigned long long)vkb_nbatch, (unsigned long long)dis,
-          (unsigned long long)sub, gms, (unsigned long long)vk_downloads, (unsigned long long)vk_dl_pages, (unsigned long long)vk_ul_pages);
+          (unsigned long long)sub, gms, wms, (unsigned long long)vk_downloads, (unsigned long long)vk_dl_pages, (unsigned long long)vk_ul_pages);
     }
     if (vkchk_from >= 0) {
         static const char *nm[3] = { "sprites", "triangles", "lines/points" };
         for (int k = 0; k < 3; k++) L("GSVKCHECK: %llu %s on the GPU; of them %llu checked one at a time: %llu identical, %llu differing words; %llu left to the CPU\n",
             (unsigned long long)vk_n[k], nm[k], (unsigned long long)vk_alone[k], (unsigned long long)vk_exact[k], (unsigned long long)vk_words[k], (unsigned long long)vk_cpu[k]);
     }
+    if ((vkchk_from >= 0 || vk_live) && vk_selfpix) L("GSVK: %llu triangles read their own pixel only (batched)\n", (unsigned long long)vk_selfpix);
     if (vkchk_from >= 0 && vk_serial) L("GSVKCHECK: %llu primitives read what they write: drawn on the GPU in the CPU's order, one invocation each (counted below)\n", (unsigned long long)vk_serial);
     if (vkchk_from >= 0 && vkb_nbatch) L("GSVKBATCH: %llu primitives in %llu batches (largest %llu), %llu batches differ (%llu words); GPU %.1f ms in all (%.3f ms per batch)\n",
         (unsigned long long)vkb_nprim, (unsigned long long)vkb_nbatch, (unsigned long long)vkb_maxn, (unsigned long long)vkb_badb, (unsigned long long)vkb_words,

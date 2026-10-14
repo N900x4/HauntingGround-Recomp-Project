@@ -1,7 +1,7 @@
 /* GS on the GPU (Vulkan compute), first stage: a sprite rasterizer (vk/gs_sprite.comp) that does per pixel exactly
    what gs.c does, checked draw by draw against the software GS (HG_GSVKCHECK in gs.c). GS local memory lives in a
-   GPU buffer; this stage uploads it before each checked draw and reads it back after, which is slow but makes every
-   draw comparable on its own. */
+   host-cached buffer the GPU reads over the bus: before each checked draw the 4 KB chunks that differ from the
+   CPU's copy are refreshed, after it the CPU compares the whole buffer with its own result. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,12 +18,12 @@ typedef struct { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceSize n; } Buf;
 static Buf vram, xoffb, clutb, parb, tabb;
 static int state;   /* 0 untried, 1 ready, -1 unavailable */
 
-static int mkbuf(Buf *b, VkDeviceSize n, VkBufferUsageFlags use) {
+static int mkbuf_(Buf *b, VkDeviceSize n, VkBufferUsageFlags use, int cached) {
     VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = use, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
     if (vkCreateBuffer(dev, &bi, 0, &b->b)) return 0;
     VkMemoryRequirements mr; vkGetBufferMemoryRequirements(dev, b->b, &mr);
     VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(phys, &mp);
-    const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | (cached ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : 0);
     uint32_t t = UINT32_MAX;
     for (uint32_t i = 0; i < mp.memoryTypeCount; i++) if ((mr.memoryTypeBits >> i & 1) && (mp.memoryTypes[i].propertyFlags & want) == want) { t = i; break; }
     if (t == UINT32_MAX) return 0;
@@ -31,6 +31,7 @@ static int mkbuf(Buf *b, VkDeviceSize n, VkBufferUsageFlags use) {
     if (vkAllocateMemory(dev, &ai, 0, &b->m) || vkBindBufferMemory(dev, b->b, b->m, 0) || vkMapMemory(dev, b->m, 0, VK_WHOLE_SIZE, 0, &b->p)) return 0;
     b->n = n; return 1;
 }
+static int mkbuf(Buf *b, VkDeviceSize n, VkBufferUsageFlags use) { return mkbuf_(b, n, use, 0); }
 
 int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *tables) {
     if (state) return state > 0;
@@ -50,10 +51,14 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *ta
     if (qfam == UINT32_MAX) { L("GSVK: no compute queue\n"); return 0; }
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = qfam, .queueCount = 1, .pQueuePriorities = &prio };
-    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci };
+    VkPhysicalDeviceFeatures have, want = { 0 }; vkGetPhysicalDeviceFeatures(phys, &have);
+    if (!have.shaderFloat64) { L("GSVK: no 64-bit floats in shaders (triangle Z)\n"); return 0; }
+    want.shaderFloat64 = VK_TRUE;
+    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .pEnabledFeatures = &want };
     if (vkCreateDevice(phys, &dci, 0, &dev)) { L("GSVK: no device\n"); return 0; }
     vkGetDeviceQueue(dev, qfam, 0, &queue);
-    if (!mkbuf(&vram, ((1u << 20) + 4) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) || !mkbuf(&xoffb, 66u * 2048 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
+    if (!mkbuf_(&vram, ((1u << 20) + 4) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 1)) { vkDestroyBuffer(dev, vram.b, 0); L("GSVK: no host-cached memory, local memory uncached\n"); }
+    if ((!vram.p && !mkbuf(&vram, ((1u << 20) + 4) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) || !mkbuf(&xoffb, 66u * 2048 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
         !mkbuf(&clutb, 256 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) || !mkbuf(&parb, sizeof(GsVkSprite), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) ||
         !mkbuf(&tabb, GSVK_TABLES * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) { L("GSVK: buffers failed\n"); return 0; }
     memcpy(xoffb.p, xoff32, 33u * 2048 * 4); memcpy((uint32_t *)xoffb.p + 33u * 2048, xoff32z, 33u * 2048 * 4); memcpy(tabb.p, tables, GSVK_TABLES * 4);
@@ -88,10 +93,11 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *ta
     state = 1; return 1;
 }
 
-/* draw one sprite on the GPU, from local memory `before`, into `out` (both 1M words + padding) */
-int gsvk_sprite(const GsVkSprite *s, const uint32_t *clut, const uint32_t *before, uint32_t *out) {
+const uint32_t *gsvk_draw(const GsVkSprite *s, const uint32_t *clut, const uint32_t *now) {
     if (state <= 0) return 0;
-    memcpy(vram.p, before, vram.n); memcpy(clutb.p, clut, 256 * 4); memcpy(parb.p, s, sizeof *s);
+    uint32_t *g = vram.p;
+    for (uint32_t i = 0; i < (1u << 20); i += 1024) if (memcmp(g + i, now + i, 4096)) memcpy(g + i, now + i, 4096);
+    memcpy(clutb.p, clut, 256 * 4); memcpy(parb.p, s, sizeof *s);
     VkCommandBufferBeginInfo cbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
     vkResetCommandBuffer(cmd, 0); vkBeginCommandBuffer(cmd, &cbi);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
@@ -103,6 +109,5 @@ int gsvk_sprite(const GsVkSprite *s, const uint32_t *clut, const uint32_t *befor
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
     vkResetFences(dev, 1, &fence);
     if (vkQueueSubmit(queue, 1, &si, fence) || vkWaitForFences(dev, 1, &fence, VK_TRUE, 5000000000ull)) { L("GSVK: submit failed\n"); return 0; }
-    memcpy(out, vram.p, vram.n);
-    return 1;
+    return g;
 }

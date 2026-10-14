@@ -17,6 +17,9 @@ layout(std140, binding = 3) uniform P {
     int ate, atst, aref, afail, abe, a, b, cc, d, fix, pabe, fba, colclamp, fge, need_dst, zte, ztst;
     uint fogcol;
     uint z, zbp; int zpsm, zmsk, zread, date, datm, fb16;
+    int prim, iip, fst;   // prim 0: sprite (px0.. are its pixel rectangle), 1: triangle (px0.. its bounding box)
+    float tx0, ty0, tx1, ty1, tx2, ty2, tinv, tu0, tu1, tu2, tv0, tv1, tv2, tq0, tq1, tq2;
+    uint tc0, tc1, tc2, tz0, tz1, tz2; int tf0, tf1, tf2;
 } p;
 layout(std430, binding = 4) readonly buffer Tables { int tab[]; };   // see gsvk_init(): block and column tables
 const int BT8 = 0, CT8 = 32, BT4 = 288, CT4 = 320, BT16 = 832, BT16S = 864, BT16Z = 896, CT16 = 928;
@@ -115,13 +118,22 @@ uint shade(uint vcol, int u16, int v16, uint fog) {
     return c;
 }
 int clamp255(int v, int cc) { return cc != 0 ? (v < 0 ? 0 : v > 255 ? 255 : v) : (v & 255); }
-void main() {
-    int x = p.px0 + int(gl_GlobalInvocationID.x), y = p.py0 + int(gl_GlobalInvocationID.y);
-    if (x >= p.px1 || y >= p.py1) return;
-    precise float uu = p.u0 + float((x << 4) - p.x0) * p.du;
-    precise float vv = p.v0 + float((y << 4) - p.y0) * p.dv;
-    uint col = shade(p.rgba, int(uu), int(vv), p.fog);
-    // pixel(), in its order
+// float -> int as x86 cvttss2si does it (gs.c's (int) casts): out of range and NaN give 0x80000000
+int cvt(float f) { return abs(f) < 2147483648.0 ? int(f) : int(0x80000000u); }
+// a / b rounded correctly (GPU division may be off by an ulp or two): step to the neighbour whose exact remainder,
+// from a fused multiply-add, is smaller
+float divx(float a, float b) {
+    precise float q = a / b;
+    if (q == 0.0 || isinf(q) || isnan(q)) return q;
+    for (int i = 0; i < 4; i++) {
+        float qu = uintBitsToFloat(floatBitsToUint(q) + 1u), qd = uintBitsToFloat(floatBitsToUint(q) - 1u);
+        precise float r = abs(fma(-b, q, a)), ru = abs(fma(-b, qu, a)), rd = abs(fma(-b, qd, a));
+        if (ru < r) q = qu; else if (rd < r) q = qd; else break;
+    }
+    return q;
+}
+// pixel() of gs.c, in its order
+void pixel(int x, int y, uint zv, uint col) {
     if (x < p.scx0 || x > p.scx1 || y < p.scy0 || y > p.scy1) return;
     int as_ = int(col >> 24); bool fb_ok = true, z_ok = true, rgb_only = false;
     if (p.ate != 0) {
@@ -138,7 +150,7 @@ void main() {
         if (p.zread != 0) {
             uint zd = read_px(p.zbp, p.fbw, p.zpsm, x, y);
             if (p.zpsm == Z24) zd &= 0xFFFFFFu;
-            if (p.ztst == 2 ? p.z < zd : p.z <= zd) return;
+            if (p.ztst == 2 ? zv < zd : zv <= zd) return;
         }
     } else z_ok = false;
     if (fb_ok) {
@@ -159,5 +171,41 @@ void main() {
         else if (int(p.fpsm) == CT24 || int(p.fpsm) == Z24) { uint a = addr32(p.fbp, p.fbw, x, y, int(p.fpsm) == Z24 ? 33u * 2048u : 0u); vm[a] = (dst & 0xFF000000u) | (((o & ~p.fbmsk) | (dst & p.fbmsk)) & 0xFFFFFFu); }
         else vm[addr32(p.fbp, p.fbw, x, y, int(p.fpsm) == Z32 ? 33u * 2048u : 0u)] = (o & ~p.fbmsk) | (dst & p.fbmsk);
     }
-    if (z_ok && p.zmsk == 0) write_px(p.zbp, p.fbw, p.zpsm, x, y, p.z);
+    if (z_ok && p.zmsk == 0) write_px(p.zbp, p.fbw, p.zpsm, x, y, zv);
+}
+void main() {
+    int x = p.px0 + int(gl_GlobalInvocationID.x), y = p.py0 + int(gl_GlobalInvocationID.y);
+    if (x >= p.px1 || y >= p.py1) return;
+    if (p.prim == 0) {
+        precise float uu = p.u0 + float((x << 4) - p.x0) * p.du;
+        precise float vv = p.v0 + float((y << 4) - p.y0) * p.dv;
+        pixel(x, y, p.z, shade(p.rgba, cvt(uu), cvt(vv), p.fog));
+        return;
+    }
+    // draw_triangle()
+    float px = float(x), py = float(y);
+    precise float w0 = ((p.tx1 - px) * (p.ty2 - py) - (p.tx2 - px) * (p.ty1 - py)) * p.tinv;
+    precise float w1 = ((p.tx2 - px) * (p.ty0 - py) - (p.tx0 - px) * (p.ty2 - py)) * p.tinv;
+    precise float w2 = 1.0 - w0 - w1;
+    if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) return;
+    uint col;
+    if (p.iip != 0) {
+        col = 0u;
+        for (int s = 0; s < 32; s += 8) {
+            precise float c = float((p.tc0 >> s) & 255u) * w0 + float((p.tc1 >> s) & 255u) * w1 + float((p.tc2 >> s) & 255u) * w2;
+            precise float c5 = c + 0.5;
+            int ci = cvt(c5); col |= uint(ci < 0 ? 0 : ci > 255 ? 255 : ci) << s;
+        }
+    } else col = p.tc2;
+    precise double zf = double(p.tz0) * double(w0) + double(p.tz1) * double(w1) + double(p.tz2) * double(w2);
+    uint zv = zf <= 0.0lf ? 0u : zf >= 4294967295.0lf ? 0xFFFFFFFFu : uint(zf);
+    int u16 = 0, v16 = 0;
+    if (p.tme != 0) {
+        precise float q = p.tq0 * w0 + p.tq1 * w1 + p.tq2 * w2;
+        precise float uu = p.tu0 * w0 + p.tu1 * w1 + p.tu2 * w2, vv = p.tv0 * w0 + p.tv1 * w1 + p.tv2 * w2;
+        if (p.fst == 0 && q != 0.0) { uu = divx(uu, q); vv = divx(vv, q); }
+        u16 = cvt(uu); v16 = cvt(vv);
+    }
+    precise float ff = float(p.tf0) * w0 + float(p.tf1) * w1 + float(p.tf2) * w2;
+    pixel(x, y, zv, shade(col, u16, v16, uint(cvt(ff))));
 }

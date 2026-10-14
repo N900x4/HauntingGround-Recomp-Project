@@ -1079,23 +1079,27 @@ static int gs_nodraw; static long gs_draw_from;
 #ifdef HAVE_VULKAN
 #include "gsvk.h"
 static long vkchk_from = -2, vkchk_to; static uint64_t vkchk_n, vkchk_exact, vkchk_words, vkchk_skipped;
-static int gsvk_sprite_supported(const Draw *d, const SprGeo *g) {
-    if (g->px1 <= g->px0 || g->py1 <= g->py0) return 0;
-    switch (d->fpsm) { case CT32: case CT24: case CT16: case CT16S: case Z32: case Z24: case Z16: case Z16S: break; default: return 0; }
-    /* buffers that share memory make the result depend on the order of the pixels */
-    if (d->tme && sprite_tex_overlaps(d, g->px0, g->px1, g->py0, g->py1, g->x0, g->y0, g->u0, g->v0, g->du, g->dv)) return 0;
+/* buffers that share memory make the result depend on the order of the pixels: frame and Z pixels [x0,x1]x[y0,y1],
+   texels [ua,ub]x[va,vb] (tex: whether the texture is read) */
+static int gsvk_buffers_meet(const Draw *d, int x0, int y0, int x1, int y1, int tex, int ua, int va, int ub, int vb, int ft_checked) {
+    uint64_t fp[8] = {0}, zp[8] = {0}, tp[8] = {0};
+    mark_pages(fp, d->fbp, d->fbw, d->fpsm, x0, y0, x1, y1);
+    if (tex) { mark_pages(tp, d->tex.tbp, d->tex.tbw, d->tex.psm, ua, va, ub, vb); if (!ft_checked && pages_meet(fp, tp)) return 1; }
     if (d->zte && d->ztst != 0 && (d->zread || !d->zmsk)) {
-        uint64_t fp[8] = {0}, zp[8] = {0};
-        mark_pages(fp, d->fbp, d->fbw, d->fpsm, g->px0, g->py0, g->px1 - 1, g->py1 - 1);
-        mark_pages(zp, d->zbp, d->fbw, d->zpsm, g->px0, g->py0, g->px1 - 1, g->py1 - 1);
-        if (pages_meet(fp, zp)) return 0;
-        if (d->tme && !d->zmsk) {
-            int ua, ub, va, vb; uint64_t tp[8] = {0};
-            if (sprite_texels(d, g->px0, g->px1, g->py0, g->py1, g->x0, g->y0, g->u0, g->v0, g->du, g->dv, &ua, &ub, &va, &vb)) {
-                mark_pages(tp, d->tex.tbp, d->tex.tbw, d->tex.psm, ua, va, ub, vb); if (pages_meet(zp, tp)) return 0; }
-        }
+        mark_pages(zp, d->zbp, d->fbw, d->zpsm, x0, y0, x1, y1);
+        if (pages_meet(fp, zp) || (tex && !d->zmsk && pages_meet(zp, tp))) return 1;
     }
-    return 1;
+    return 0;
+}
+static int gsvk_fpsm_ok(const Draw *d) {
+    switch (d->fpsm) { case CT32: case CT24: case CT16: case CT16S: case Z32: case Z24: case Z16: case Z16S: return 1; }
+    return 0;
+}
+static int gsvk_sprite_supported(const Draw *d, const SprGeo *g) {
+    if (g->px1 <= g->px0 || g->py1 <= g->py0 || !gsvk_fpsm_ok(d)) return 0;
+    if (d->tme && sprite_tex_overlaps(d, g->px0, g->px1, g->py0, g->py1, g->x0, g->y0, g->u0, g->v0, g->du, g->dv)) return 0;
+    int ua = 0, ub = 0, va = 0, vb = 0, tex = d->tme && sprite_texels(d, g->px0, g->px1, g->py0, g->py1, g->x0, g->y0, g->u0, g->v0, g->du, g->dv, &ua, &ub, &va, &vb);
+    return !gsvk_buffers_meet(d, g->px0, g->py0, g->px1 - 1, g->py1 - 1, tex, ua, va, ub, vb, 1);
 }
 static void gsvk_tables(int32_t *t) {   /* the shader's BT8, CT8, BT4, CT4, BT16, BT16S, BT16Z, CT16 */
     int k = 0;
@@ -1111,18 +1115,17 @@ static void gsvk_tables(int32_t *t) {   /* the shader's BT8, CT8, BT4, CT4, BT16
 static void gsvk_check_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
     SprGeo g; sprite_geo(d, a, b, &g);
     if (!gsvk_sprite_supported(d, &g)) { vkchk_skipped++; draw_sprite(d, a, b); return; }
-    static uint32_t *before, *gpu; if (!before) { before = malloc(sizeof vm); gpu = malloc(sizeof vm); }
-    memcpy(before, vm, sizeof vm);
-    draw_sprite(d, a, b);
     const TexState *t = &d->tex;
     GsVkSprite s = { g.px0, g.px1, g.py0, g.py1, g.x0, g.y0, g.u0, g.v0, g.du, g.dv,
         b->rgba, (uint32_t)b->f, d->fbp, d->fbw, d->fpsm, d->fbmsk, d->scx0, d->scx1, d->scy0, d->scy1,
         d->tme, (int)t->tbp, (int)t->tbw, (int)t->psm, (int)t->tw, (int)t->th, (int)t->tcc, (int)t->tfx, t->wms, t->wmt, t->minu, t->maxu, t->minv, t->maxv,
         t->bilinear, t->aem, t->ta0, t->ta1, (int)t->csa, (int)t->cpsm,
         d->ate, d->atst, d->aref, d->afail, d->abe, d->a, d->b, d->cc, d->d, d->fix, d->pabe, d->fba, d->colclamp, d->fge, d->need_dst, d->zte, d->ztst, d->fogcol,
-        b->z, d->zbp, d->zpsm, d->zmsk, d->zread, d->date, d->datm, d->fb16 };
+        b->z, d->zbp, d->zpsm, d->zmsk, d->zread, d->date, d->datm, d->fb16, 0 };
     static const uint32_t noclut[256];
-    if (!gsvk_sprite(&s, d->tme && t->clut ? t->clut : noclut, before, gpu)) return;
+    const uint32_t *gpu = gsvk_draw(&s, d->tme && t->clut ? t->clut : noclut, vm);
+    draw_sprite(d, a, b);
+    if (!gpu) return;
     uint64_t bad = 0; long first = -1;
     for (uint32_t i = 0; i < (1u << 20); i++) if (gpu[i] != vm[i]) { bad++; if (first < 0) first = i; }
     vkchk_n++; if (!bad) vkchk_exact++; vkchk_words += bad;
@@ -1131,23 +1134,81 @@ static void gsvk_check_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
           (unsigned long long)cur_vb, d->fbp, d->fpsm, d->tme, d->tme ? t->psm : 0, t->bilinear, t->tfx, d->abe, d->a, d->b, d->cc, d->d, d->ate, d->atst, d->fge,
           g.px0, g.px1, g.py0, g.py1, (unsigned long long)bad, first, vm[first], gpu[first]);
 }
+/* the same for triangles: the set-up of draw_triangle() is done here (same float operations), the pixels on the GPU */
+static uint64_t vkt_n, vkt_exact, vkt_words, vkt_skipped;
+static void draw_triangle_cpu(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2);
+static void gsvk_check_triangle(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2) {
+    float x0 = v0->x / 16.0f, y0 = v0->y / 16.0f, x1 = v1->x / 16.0f, y1 = v1->y / 16.0f, x2 = v2->x / 16.0f, y2 = v2->y / 16.0f;
+    float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    int minx = (int)floorf(fminf(x0, fminf(x1, x2))), maxx = (int)ceilf(fmaxf(x0, fmaxf(x1, x2)));
+    int miny = (int)floorf(fminf(y0, fminf(y1, y2))), maxy = (int)ceilf(fmaxf(y0, fmaxf(y1, y2)));
+    if (minx < d->scx0) minx = d->scx0; if (maxx > d->scx1) maxx = d->scx1;
+    if (miny < d->scy0) miny = d->scy0; if (maxy > d->scy1) maxy = d->scy1;
+    const TexState *t = &d->tex;
+    int tub = t->tw - 1, tvb = t->th - 1;   /* every texel the wrap modes can reach */
+    if ((t->minu | t->maxu) > tub) tub = t->minu | t->maxu; if ((t->minv | t->maxv) > tvb) tvb = t->minv | t->maxv;
+    if (area == 0 || minx > maxx || miny > maxy) { draw_triangle_cpu(d, v0, v1, v2); return; }   /* draws nothing */
+    if (!gsvk_fpsm_ok(d) || gsvk_buffers_meet(d, minx, miny, maxx, maxy, d->tme, 0, 0, tub, tvb, 0)) {
+        vkt_skipped++; draw_triangle_cpu(d, v0, v1, v2);
+        static uint64_t why[3]; why[!gsvk_fpsm_ok(d) ? 0 : d->tme && d->tex.tbp == d->fbp ? 1 : 2]++;
+        if (vkt_skipped % 200 == 0) L("GSVK: triangles not supported: frame format %llu, texture is the frame %llu, buffers share pages %llu\n",
+            (unsigned long long)why[0], (unsigned long long)why[1], (unsigned long long)why[2]);
+        return; }
+    float ua[3] = {0}, va[3] = {0}, qa[3] = {1, 1, 1};
+    const Vtx *vs[3] = { v0, v1, v2 };
+    for (int i = 0; i < 3; i++) {
+        if (!d->tme) continue;
+        if (d->fst) { ua[i] = vs[i]->u; va[i] = vs[i]->v; qa[i] = 1; }
+        else { ua[i] = vs[i]->s * d->tex.tw * 16.0f; va[i] = vs[i]->t * d->tex.th * 16.0f; qa[i] = vs[i]->q != 0 ? vs[i]->q : 1.0f; }
+    }
+    GsVkSprite s = { minx, maxx + 1, miny, maxy + 1, 0, 0, 0, 0, 0, 0,
+        0, 0, d->fbp, d->fbw, d->fpsm, d->fbmsk, d->scx0, d->scx1, d->scy0, d->scy1,
+        d->tme, (int)t->tbp, (int)t->tbw, (int)t->psm, (int)t->tw, (int)t->th, (int)t->tcc, (int)t->tfx, t->wms, t->wmt, t->minu, t->maxu, t->minv, t->maxv,
+        t->bilinear, t->aem, t->ta0, t->ta1, (int)t->csa, (int)t->cpsm,
+        d->ate, d->atst, d->aref, d->afail, d->abe, d->a, d->b, d->cc, d->d, d->fix, d->pabe, d->fba, d->colclamp, d->fge, d->need_dst, d->zte, d->ztst, d->fogcol,
+        0, d->zbp, d->zpsm, d->zmsk, d->zread, d->date, d->datm, d->fb16,
+        1, d->iip, d->fst, x0, y0, x1, y1, x2, y2, 1.0f / area, ua[0], ua[1], ua[2], va[0], va[1], va[2], qa[0], qa[1], qa[2],
+        v0->rgba, v1->rgba, v2->rgba, v0->z, v1->z, v2->z, v0->f, v1->f, v2->f };
+    static const uint32_t noclut[256];
+    const uint32_t *gpu = gsvk_draw(&s, d->tme && t->clut ? t->clut : noclut, vm);
+    draw_triangle_cpu(d, v0, v1, v2);
+    if (!gpu) return;
+    uint64_t bad = 0; long first = -1;
+    for (uint32_t i = 0; i < (1u << 20); i++) if (gpu[i] != vm[i]) { bad++; if (first < 0) first = i; }
+    vkt_n++; if (!bad) vkt_exact++; vkt_words += bad;
+    static int nlog; if (bad && nlog++ < 40)
+        L("GSVKCHECK: VB %llu triangle fbp %u psm %02x zpsm %02x zte %d:%d tex %d:%02x fst %d bil %d tfx %d iip %d abe %d fge %d box %d-%d,%d-%d: %llu words differ, first at %lu (cpu %08x gpu %08x)\n",
+          (unsigned long long)cur_vb, d->fbp, d->fpsm, d->zpsm, d->zte, d->ztst, d->tme, d->tme ? t->psm : 0, d->fst, t->bilinear, t->tfx, d->iip, d->abe, d->fge,
+          minx, maxx, miny, maxy, (unsigned long long)bad, first, vm[first], gpu[first]);
+}
 #endif
+#ifdef HAVE_VULKAN
+static int gsvk_checking(void) {
+    if (vkchk_from == -2) { const char *e = getenv("HG_GSVKCHECK"); vkchk_from = -1;
+        if (e) { vkchk_from = atol(e); const char *c = strchr(e, ':'); vkchk_to = c ? atol(c + 1) : vkchk_from;
+                 static int32_t tabs[GSVK_TABLES]; gsvk_tables(tabs);
+                 if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0], tabs)) vkchk_from = -1; } }
+    return vkchk_from >= 0 && (long)cur_vb >= vkchk_from && (long)cur_vb <= vkchk_to;
+}
+#endif
+static void draw_triangle_cpu(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2) {
+#if defined(__x86_64__)
+    if (have_avx2) { draw_triangle_avx2(d, v0, v1, v2); return; }
+#endif
+    draw_triangle(d, v0, v1, v2);
+}
 static void rasterize(const Draw *d, int prim, const Vtx *w) {
     switch (prim) {
     case 0: pixel(d, w[0].x >> 4, w[0].y >> 4, w[0].z, shade(d, w[0].rgba, w[0].u, w[0].v, w[0].f)); break;
     case 1: case 2: draw_line(d, &w[0], &w[1]); break;
     case 3: case 4: case 5:
-#if defined(__x86_64__)
-        if (have_avx2) { draw_triangle_avx2(d, &w[0], &w[1], &w[2]); break; }
+#ifdef HAVE_VULKAN
+        if (gsvk_checking()) { gsvk_check_triangle(d, &w[0], &w[1], &w[2]); break; }
 #endif
-        draw_triangle(d, &w[0], &w[1], &w[2]); break;
+        draw_triangle_cpu(d, &w[0], &w[1], &w[2]); break;
     case 6:
 #ifdef HAVE_VULKAN
-        if (vkchk_from == -2) { const char *e = getenv("HG_GSVKCHECK"); vkchk_from = -1;
-            if (e) { vkchk_from = atol(e); const char *c = strchr(e, ':'); vkchk_to = c ? atol(c + 1) : vkchk_from;
-                     static int32_t tabs[GSVK_TABLES]; gsvk_tables(tabs);
-                     if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0], tabs)) vkchk_from = -1; } }
-        if (vkchk_from >= 0 && (long)cur_vb >= vkchk_from && (long)cur_vb <= vkchk_to) { gsvk_check_sprite(d, &w[0], &w[1]); break; }
+        if (gsvk_checking()) { gsvk_check_sprite(d, &w[0], &w[1]); break; }
 #endif
         draw_sprite(d, &w[0], &w[1]); break;
     }
@@ -1740,6 +1801,8 @@ void gs_dump_stats(void) {
 #ifdef HAVE_VULKAN
     if (vkchk_from >= 0) L("GSVKCHECK: %llu sprites drawn on the GPU too, %llu identical, %llu differing words in all; %llu sprites not supported yet\n",
         (unsigned long long)vkchk_n, (unsigned long long)vkchk_exact, (unsigned long long)vkchk_words, (unsigned long long)vkchk_skipped);
+    if (vkchk_from >= 0) L("GSVKCHECK: %llu triangles drawn on the GPU too, %llu identical, %llu differing words in all; %llu triangles not supported yet\n",
+        (unsigned long long)vkt_n, (unsigned long long)vkt_exact, (unsigned long long)vkt_words, (unsigned long long)vkt_skipped);
 #endif
 #if defined(__x86_64__)
     if (gsw_n) { gsw_wait_seq(atomic_load(&gsq_head));

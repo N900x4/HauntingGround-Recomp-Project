@@ -8,14 +8,27 @@ def connect():
     if os.name == "nt":
         s = socket.create_connection(("127.0.0.1", SLOT)); s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1); return s
     s = socket.socket(socket.AF_UNIX); s.connect(P); return s
+_sock = None   # one connection, reused: a connection per call runs Windows out of local ports in tight loops
+def _recv(s, n):
+    d = b""
+    while len(d) < n:
+        c = s.recv(n - len(d))
+        if not c: raise OSError("PINE connection closed")
+        d += c
+    return d
 def call(payload):
-    s = connect()
-    s.sendall(struct.pack("<I", len(payload) + 4) + payload)
-    hdr = b""
-    while len(hdr) < 4: hdr += s.recv(4 - len(hdr))
-    n = struct.unpack("<I", hdr)[0]; d = b""
-    while len(d) < n - 4: d += s.recv(n - 4 - len(d))
-    s.close()
+    global _sock
+    for attempt in (0, 1):
+        try:
+            if _sock is None: _sock = connect()
+            _sock.sendall(struct.pack("<I", len(payload) + 4) + payload)
+            n = struct.unpack("<I", _recv(_sock, 4))[0]; d = _recv(_sock, n - 4)
+            break
+        except OSError:
+            try: _sock.close()
+            except Exception: pass
+            _sock = None
+            if attempt: raise
     if d[0] != 0: raise SystemExit("PINE fail")
     return d[1:]
 def r32(a): return struct.unpack("<I", call(bytes([2]) + struct.pack("<I", a)))[0]

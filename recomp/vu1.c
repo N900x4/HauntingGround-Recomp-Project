@@ -130,7 +130,13 @@ void vu1_run(uint32_t start) {
         }
     }
     double t0 = host_now();
+    /* HG_VU1CHOP=1 (experiment): VU1 arithmetic rounds toward zero and flushes denormals, as the VU does (and PCSX2 by
+       default); MXCSR is per thread, so only this run is affected */
+    static int chop = -1; if (chop < 0) chop = getenv("HG_VU1CHOP") && atoi(getenv("HG_VU1CHOP"));
+    unsigned mx0 = 0;
+    if (chop) { unsigned m; __asm__ volatile("stmxcsr %0" : "=m"(mx0)); m = mx0 | 0x6000 | 0x8000 | 0x40; __asm__ volatile("ldmxcsr %0" : : "m"(m)); }
     if (check) check_run(start); else vu1_run_inner(start);
+    if (chop) __asm__ volatile("ldmxcsr %0" : : "m"(mx0));
     tprof[0] += host_now() - t0;
 }
 void vu1_dump_stats(void) {

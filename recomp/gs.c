@@ -640,7 +640,7 @@ static void draw_triangle(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx
         float w2 = 1.0f - w0 - w1;
         if (w0 < 0 || w1 < 0 || w2 < 0) {
             /* top-left rule approximation: accept tiny negative due to float error */
-            if (w0 < -1e-6f || w1 < -1e-6f || w2 < -1e-6f) continue;
+            if (w0 < -1e-6f || w1 < -1e-6f || w2 < -1e-6f) { if (x == watch_x && y == watch_y && (long)cur_vb >= watch_vb && w0 > -0.05f && w1 > -0.05f && w2 > -0.05f) L("PIXWATCH-MISS (%d,%d) fbp %u tbp %u z %u: w %.9g %.9g %.9g area %g v (%d,%d) (%d,%d) (%d,%d)\n", x, y, d->fbp, d->tme ? d->tex.tbp : 0, v0->z, w0, w1, w2, area, v0->x, v0->y, v1->x, v1->y, v2->x, v2->y); continue; }
         }
         uint32_t col;
         if (d->iip) {

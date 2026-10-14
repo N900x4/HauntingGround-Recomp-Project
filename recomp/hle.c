@@ -234,7 +234,7 @@ static void fire_vblank(void) {
     run_timers(); deliver_timers(); plan_events();
     {   /* HG_RAMDUMP=dir:vb,vb,... writes EE RAM at those VBlanks (debugging) */
         static const char *rd; static int init; if (!init) { init = 1; rd = getenv("HG_RAMDUMP"); }
-        if (rd) { const char *c = strchr(rd, ':'); if (c) { for (const char *p = c + 1; *p; ) { long v = strtol(p, (char **)&p, 10);
+        if (rd) { const char *c = strrchr(rd, ':');   /* the last colon: Windows paths have a drive letter */ if (c) { for (const char *p = c + 1; *p; ) { long v = strtol(p, (char **)&p, 10);
             if ((uint64_t)v == vblank_count) { char path[512]; snprintf(path, sizeof path, "%.*s/ram_%06ld.bin", (int)(c - rd), rd, v); FILE *f = fopen(path, "wb"); if (f) { fwrite(gptr(0), 1, 32 << 20, f); fclose(f); } }
             while (*p == ',') p++; if (!v && *p && (*p < '0' || *p > '9')) break; } } }
     }

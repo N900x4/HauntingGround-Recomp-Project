@@ -186,6 +186,17 @@ static uint16_t explore(uint64_t vb) {
 }
 void pad_vblank(uint64_t vb) {
     rr_init();
+    {   /* HG_POSLOG=n: log Fiona's stage and position every n VBlanks, and at every stage change (no input of its own) */
+        static long every = -1; static uint32_t last_stg = 0xFFFFFFFF;
+        if (every < 0) every = getenv("HG_POSLOG") ? atol(getenv("HG_POSLOG")) : 0;
+        if (every > 0) {
+            uint32_t obj = 0, stg = 0; float x = 0, y = 0, z = 0; memcpy(&obj, gptr(0x44f818), 4);
+            if (obj) { memcpy(&stg, gptr(obj + 0x30), 4); memcpy(&x, gptr(obj + 0x10), 4); memcpy(&y, gptr(obj + 0x14), 4); memcpy(&z, gptr(obj + 0x18), 4); }
+            if (vb % (uint64_t)every == 0 || stg != last_stg)
+                L("pos: VBlank %llu stage %x pos %.1f %.1f %.1f%s\n", (unsigned long long)vb, stg, x, y, z, stg != last_stg ? " (stage change)" : "");
+            last_stg = stg;
+        }
+    }
     if (npev < 0) pad_script_load();
     uint16_t ex = rr_mode == 2 ? 0 : explore(vb);
     if (rr_mode == 2) {   /* replay: the recorded state, whatever the window or HG_PAD say */

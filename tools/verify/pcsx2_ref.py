@@ -3,7 +3,7 @@ software renderer, the VM's save states and memory card), the main window hidden
 minimized, so it stays off the desktop. Frames come from PCSX2's own screenshot (F8, raw internal resolution),
 which overlays such as RivaTuner do not reach.
   python pcsx2_ref.py start SLOT      boot the disc and load save state SLOT (1 main menu, 2 opening movie, 4 stage 1,
-                                      5 Castle Suite); waits until PINE answers
+                                      5 Castle Suite; 0 = no state, a cold boot); waits until PINE answers
   python pcsx2_ref.py shot OUT.png    one screenshot of the current frame
   python pcsx2_ref.py stop
 Paths: $PCSX2_EXE, $PCSX2_DATA (the folder that holds PCSX2\\), $HG_ISO."""
@@ -28,9 +28,12 @@ def window():
 
 def start(slot):
     stop()
-    state = os.path.join(DATA, "PCSX2", "sstates", "SLUS-21075 (901AAC09).%02d.p2s" % slot)
-    if not os.path.exists(state): raise SystemExit("no save state " + state)
-    p = subprocess.Popen([EXE, "-datapath", DATA, "-nogui", "-statefile", state, "--", ISO])
+    args = [EXE, "-datapath", DATA, "-nogui"]
+    if slot:   # 0: boot the disc from scratch (the game then reads the memory card as on a console)
+        state = os.path.join(DATA, "PCSX2", "sstates", "SLUS-21075 (901AAC09).%02d.p2s" % slot)
+        if not os.path.exists(state): raise SystemExit("no save state " + state)
+        args += ["-statefile", state]
+    p = subprocess.Popen(args + ["--", ISO])
     open(PIDFILE, "w").write(str(p.pid))
     for _ in range(120):   # up to 60 s: the window, then PINE
         time.sleep(0.5)
@@ -39,7 +42,7 @@ def start(slot):
             wincap.u32.ShowWindow(h, SW_SHOWMINNOACTIVE)
             try:
                 if pine.r32(0x44f818) is not None: return h
-            except OSError: pass
+            except (OSError, SystemExit): pass   # not listening yet, or no game loaded yet
     raise SystemExit("PCSX2 did not come up")
 
 def shot(out, timeout=10):

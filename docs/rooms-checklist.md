@@ -53,6 +53,18 @@ Notes abbreviate: **CS** = cutscene (with [D] movie number #nnn), **Hewie** = ne
 
 ---
 
+## Test status
+
+Rooms are ticked once our build has been compared with PCSX2 (picture only) from the same state, with the date and
+result after the entry. Stage numbers (player object `*(0x44f818)` + 0x30) are noted as they are found.
+
+- Castle Suite (`0x21`), 2026-10-15: memory card save 01 loaded in both, Fiona standing after the load, 8 shots:
+  99.8-99.9 % of pixels within 8 levels, mean difference 1.6, no pixel over 32. Remaining differences: a faint
+  edge pattern from the full-screen vignette pass (all under 8 levels), and 3 isolated dark pixels of ours that PCSX2
+  does not have (11 others are in both).
+- Stage `0x10` (reached from the Castle Suite's far door) and stage `0x20` (from `0x10`): seen in playtest 1, not yet
+  compared. Stage `0x20` has drifting dark pixels by a door; open until PCSX2 can be brought there.
+
 ## 1. Rooms by area
 
 Areas follow the names the guides use: Belli Castle, Old Mansion ([K] "Mansion", [D] "Old Mansion", [H] "Old Mansion"; the lab half is the "Laboratory" in [D] HG15.3), Chaos Forest, Water Tower, House of Truth (H.O.T.). Castle is subdivided only for checklist convenience (my grouping, not the sources').
@@ -75,7 +87,7 @@ Areas follow the names the guides use: Belli Castle, Old Mansion ([K] "Mansion",
 
 ### 1.2 Belli Castle - main building (ground floor, service wing, study side) (20)
 
-- [ ] **Castle Bedroom** [D] / **Guest Room** [K] / **Castle Suite** [H] - Ch1 (also Ch2, Secret Room later) - save: **yes** (clock on left) - first CS (#001 Whereabouts Unknown, #002 The Watched), costume closet, fireplace, portrait, TV (distraction), bed (hide; resting in Ch2 -> CS #046 Night Visitor starts Daniella chase), balustrade Hewie item. Ch1: Hewie rescue CS (#016 White Intruder, #017 Hewie!). Becomes the **Secret Room** after clearing the game ([K], [D] HG15.2). In Ending D the bedroom has the armchair scene.
+- [x] **Castle Bedroom** [D] / **Guest Room** [K] / **Castle Suite** [H] (stage `0x21`) - Ch1 (also Ch2, Secret Room later) - save: **yes** (clock on left) - first CS (#001 Whereabouts Unknown, #002 The Watched), costume closet, fireplace, portrait, TV (distraction), bed (hide; resting in Ch2 -> CS #046 Night Visitor starts Daniella chase), balustrade Hewie item. Ch1: Hewie rescue CS (#016 White Intruder, #017 Hewie!). Becomes the **Secret Room** after clearing the game ([K], [D] HG15.2). In Ending D the bedroom has the armchair scene.
 - [ ] **(Staircase from Dining Room to Guest Room)** [K] - the unnamed "next room with stairs, locked door on left, storage jar" in [D] - Ch1 (Ch2 revisit) - save: no - locked door becomes shortcut to Dining Room after ST+RE plate; Antimony Powder jar.
 - [ ] **Curved Colonnade** [D] / **Walkway** [K] / "Curved Corridor" [D] - Ch1 - save: no - blood-covered pillar (minor panic), Debilitas first appears at far end (CS #003 Enter: Debilitas, prompts pursuer); Bisque Doll on floor; crate to push; passage to Plate Key Room; door to Study; Hewie search in corner; later shortcut from Above the Music Room.
 - [ ] **Castle Study** [D][K] - Ch1 - save: no - shade behind door (hide), blackboard on Luminessants/Azoth, lavender; locked lit desk -> Lunar Refractor with Study Key; Debilitas usually enters here at that point.

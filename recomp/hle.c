@@ -207,14 +207,19 @@ static void fire_vblank(void) {
       if (maxvb && (long)vblank_count >= maxvb) stop("reached HG_MAXVB=%ld", maxvb); }
     {   /* HG_SPEEDLOG=n: every n VBlanks, emulated speed (real time = 59.94 VB/s) and host seconds per subsystem.
            VU1 and IOP+SPU2 run on this thread; GS drawing runs on the GS thread when HG_MTGS is on (busy % of wall). */
-        static long every = -1; static double t0, p0[8]; static uint64_t v0;
-        if (every < 0) { every = getenv("HG_SPEEDLOG") ? atol(getenv("HG_SPEEDLOG")) : 0; t0 = host_now(); v0 = vblank_count; memcpy(p0, tprof, sizeof p0); }
+        static long every = -1; static double t0, p0[8], idle0, lt, lidle, worst; static uint64_t v0;
+        if (every < 0) { every = getenv("HG_SPEEDLOG") ? atol(getenv("HG_SPEEDLOG")) : 0; t0 = lt = host_now(); v0 = vblank_count; memcpy(p0, tprof, sizeof p0); idle0 = lidle = host_idle; }
+        if (every > 0) {
+            const double now = host_now(), work = (now - lt) - (host_idle - lidle);   /* this VBlank's host time, pacing sleep left out */
+            if (work > worst) worst = work;
+            lt = now; lidle = host_idle;
+        }
         if (every > 0 && vblank_count - v0 >= (uint64_t)every) {
-            double t = host_now(), dt = t - t0, n = (double)(vblank_count - v0);
-            L("SPEED vb %llu: %.1f VB/s = %.2fx real time; per VB %.2f ms: VU1 %.2f, IOP+SPU2 %.2f, other EE-thread %.2f; GS thread busy %.0f%%\n",
-              (unsigned long long)vblank_count, n / dt, n / dt / 59.94, dt / n * 1e3, (tprof[0] - p0[0]) / n * 1e3, (tprof[2] - p0[2]) / n * 1e3,
-              (dt - (tprof[0] - p0[0]) - (tprof[2] - p0[2])) / n * 1e3, (tprof[1] - p0[1]) / dt * 100);
-            t0 = t; v0 = vblank_count; memcpy(p0, tprof, sizeof p0);
+            double t = host_now(), dt = t - t0, n = (double)(vblank_count - v0), busy = dt - (host_idle - idle0);
+            L("SPEED vb %llu: %.1f VB/s = %.2fx real time; per VB %.2f ms (busy %.2f, worst %.1f): VU1 %.2f, IOP+SPU2 %.2f, other EE-thread %.2f; GS thread busy %.0f%%\n",
+              (unsigned long long)vblank_count, n / dt, n / dt / 59.94, dt / n * 1e3, busy / n * 1e3, worst * 1e3, (tprof[0] - p0[0]) / n * 1e3, (tprof[2] - p0[2]) / n * 1e3,
+              (busy - (tprof[0] - p0[0]) - (tprof[2] - p0[2])) / n * 1e3, (tprof[1] - p0[1]) / dt * 100);
+            t0 = t; v0 = vblank_count; memcpy(p0, tprof, sizeof p0); idle0 = host_idle; worst = 0;
         }
     }
     for (int c = 0; c < 16; c++) if (dma_pending[c] && c != 5) { dma_pending[c] = 0; raise_dmac(c); }
@@ -327,7 +332,7 @@ static void iop_rpc(Bind *b, uint32_t fn, uint32_t sbuf, uint32_t ssize, uint32_
     case 0x80000593: { /* CDVD S_CMD */
         uint32_t v = 1;
         if (fn == 0x01 && recv) {          /* ReadClock: result, then sceCdCLOCK {stat, sec, min, hour, pad, day, month, year} in BCD, JST like the console's RTC */
-            time_t t = time(0) + 9 * 3600; struct tm tm; host_gmtime(t, &tm);
+            time_t t = rr_clock() + 9 * 3600; struct tm tm; host_gmtime(t, &tm);
             #define BCD(x) (uint8_t)((((x) / 10) << 4) | ((x) % 10))
             uint8_t c[8] = { 0, BCD(tm.tm_sec), BCD(tm.tm_min), BCD(tm.tm_hour), 0, BCD(tm.tm_mday), BCD(tm.tm_mon + 1), BCD(tm.tm_year % 100) };
             #undef BCD

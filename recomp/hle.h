@@ -21,6 +21,8 @@ int pad_rpc(uint32_t sid, uint32_t fn, const uint8_t *S, uint32_t ssize, uint32_
 int mc_rpc(uint32_t sid, uint32_t fn, const uint8_t *S, uint32_t ssize, uint32_t recv, uint32_t rsize);
 void pad_vblank(uint64_t vblank);
 void pad_set_input(uint16_t held, const uint8_t analog[4]);
+#include <time.h>
+time_t rr_clock(void);   /* the clock the game reads: host time, or emulated while recording or replaying input */
 /* gs.c / dmac.c: GS, GIF, DMA channels 1-2, VIF1 */
 void gs_init(uint8_t *gspriv);
 void gs_vblank(uint64_t vblank);
@@ -32,6 +34,7 @@ void vu1_dump_stats(void);
 /* host-time accounting per subsystem (seconds): 0 VU1, 1 GS drawing, 2 IOP+SPU2, 3 SPU2 mixing, 4 DMA/VIF */
 extern double tprof[8];
 double host_now(void);
+extern double host_idle;   /* host_sdl.c: time slept pacing the window */
 extern volatile int host_stop_req;   /* set by the Windows timer thread at the -t limit */
 void host_stop_now(void);
 /* iop_kernel.c: emulated IOP running the game's sound modules */

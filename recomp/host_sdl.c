@@ -13,6 +13,7 @@
 #include "hle.h"
 
 int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph);
+double host_idle;   /* seconds slept to pace the window to real time (HG_SPEEDLOG leaves them out) */
 
 #ifdef HAVE_SDL
 #define SDL_MAIN_HANDLED          /* our own main(): no SDL2main, and the console stays */
@@ -73,7 +74,7 @@ void host_vblank(uint64_t vb) {
             Uint64 now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
             if (!t0 || vb < vb0) { t0 = now; vb0 = vb; }
             double due = (double)(vb - vb0) / 59.94, el = (double)(now - t0) / f;
-            if (due > el + 0.002) SDL_Delay((Uint32)((due - el) * 1000));
+            if (due > el + 0.002) { const double s0 = host_now(); SDL_Delay((Uint32)((due - el) * 1000)); host_idle += host_now() - s0; }
             else if (el - due > 0.25) { t0 = now; vb0 = vb; }     /* running slow: do not try to catch up */
         }
     }

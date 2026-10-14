@@ -15,6 +15,8 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <utime.h>
+#include <unistd.h>
 #include "compat.h"
 #include "ee_runtime.h"
 #include "hle.h"
@@ -57,6 +59,104 @@ static void pad_script_load(void) {
 }
 void pad_set_input(uint16_t held, const uint8_t analog[4]) { pad_held = held; if (analog) memcpy(pad_analog, analog, 4); }
 
+/* ================================================================== input recording and replay
+   HG_PADREC=DIR (or "auto": ../recordings/YYYYMMDD-HHMMSS) records a session: DIR/card is a copy of the memory card
+   as it was at the start (file times kept) and DIR/pad.txt the start time and every change of the pad state with
+   its VBlank. HG_PADPLAY=DIR replays it: the card starts again from that copy (DIR/replay_card) and live or scripted
+   input is ignored. Emulated time does not depend on the host, so a replay reaches the same frames as the session,
+   as long as the build has not changed how the game runs. While recording or replaying, the clock the game reads
+   (CDVD RTC, memory card file dates) is the recorded start time plus emulated time: a replay then writes the same
+   dates, and the load screen picks the same newest save. */
+static int rr_mode;                    /* 0 off, 1 recording, 2 replaying */
+static time_t rr_base;
+static FILE *rr_f;
+static char rr_card[1100];             /* card base directory while replaying */
+typedef struct { uint64_t vb; uint16_t held; uint8_t an[4]; } RrEv;
+static RrEv *rr_ev; static size_t rr_n, rr_i;
+static uint16_t rr_held; static uint8_t rr_an[4] = { 0x80, 0x80, 0x80, 0x80 };
+extern uint64_t hle_vblank_count(void);
+time_t rr_clock(void) { return rr_mode ? rr_base + (time_t)((double)hle_vblank_count() / 59.94) : time(0); }
+static void rr_touch(const char *path) { if (rr_mode) { struct utimbuf t = { rr_clock(), rr_clock() }; utime(path, &t); } }
+static void rr_touch_parent(const char *path) {
+    char p[1100]; snprintf(p, sizeof p, "%s", path); char *sl = strrchr(p, '/'); if (sl) { *sl = 0; rr_touch(p); }
+}
+static int copy_tree(const char *from, const char *to) {   /* files and directories; file times kept */
+    struct stat st; if (stat(from, &st)) return -1;
+    if (S_ISDIR(st.st_mode)) {
+        host_mkdir(to);
+        DIR *d = opendir(from); if (!d) return -1;
+        struct dirent *de;
+        while ((de = readdir(d))) {
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+            char a[1100], b[1100]; snprintf(a, sizeof a, "%s/%s", from, de->d_name); snprintf(b, sizeof b, "%s/%s", to, de->d_name);
+            copy_tree(a, b);
+        }
+        closedir(d);
+    } else {
+        FILE *i = fopen(from, "rb"), *o = i ? fopen(to, "wb") : 0;
+        if (!o) { if (i) fclose(i); return -1; }
+        char buf[65536]; size_t n; while ((n = fread(buf, 1, sizeof buf, i))) fwrite(buf, 1, n, o);
+        fclose(i); fclose(o);
+    }
+    struct utimbuf t = { st.st_atime, st.st_mtime }; utime(to, &t);   /* a directory after its contents */
+    return 0;
+}
+static void remove_tree(const char *p) {
+    struct stat st; if (stat(p, &st)) return;
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(p); struct dirent *de;
+        if (d) { while ((de = readdir(d))) { if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+            char a[1100]; snprintf(a, sizeof a, "%s/%s", p, de->d_name); remove_tree(a); } closedir(d); }
+        rmdir(p);
+    } else unlink(p);
+}
+static const char *const rr_envs[] = { "HG_MOVIES", "HG_MOVIES_UNTIL", "HG_EE_MIPS", "HG_TIMING", "HG_VUSTALL", "HG_VUFLAGDELAY", "HG_FPRZ" };
+static void rr_init(void) {
+    static int done; if (done) return; done = 1;
+    const char *rec = getenv("HG_PADREC"), *play = getenv("HG_PADPLAY");
+    char p[1100];
+    if (play) {
+        snprintf(p, sizeof p, "%s/pad.txt", play);
+        FILE *f = fopen(p, "r"); if (!f) stop("replay: cannot open %s", p);
+        char line[512]; size_t cap = 0;
+        while (fgets(line, sizeof line, f)) {
+            unsigned long long vb; unsigned h, a0, a1, a2, a3; long long b; char k[64], v[256];
+            if (sscanf(line, "clock %lld", &b) == 1) rr_base = (time_t)b;
+            else if (sscanf(line, "# env %63[^=]=%255[^\n]", k, v) == 2) {
+                const char *now = getenv(k); if (!now) now = "";
+                if (strcmp(now, !strcmp(v, "(unset)") ? "" : v)) L("replay: WARNING: recorded with %s=%s, now \"%s\": the replay may differ\n", k, v, now);
+            } else if (sscanf(line, "%llu %x %x %x %x %x", &vb, &h, &a0, &a1, &a2, &a3) == 6) {
+                if (rr_n == cap) { cap = cap ? cap * 2 : 1024; rr_ev = realloc(rr_ev, cap * sizeof *rr_ev); }
+                RrEv *e = &rr_ev[rr_n++]; e->vb = vb; e->held = (uint16_t)h; e->an[0] = a0; e->an[1] = a1; e->an[2] = a2; e->an[3] = a3;
+            }
+        }
+        fclose(f);
+        snprintf(rr_card, sizeof rr_card, "%s/replay_card", play); remove_tree(rr_card);
+        snprintf(p, sizeof p, "%s/card", play);
+        if (copy_tree(p, rr_card)) host_mkdir(rr_card);   /* recorded without a card */
+        rr_mode = 2;
+        L("replay: %llu input changes from %s, last at VBlank %llu\n", (unsigned long long)rr_n, play, rr_n ? (unsigned long long)rr_ev[rr_n - 1].vb : 0ull);
+    } else if (rec) {
+        char dir[1024];
+        if (!strcmp(rec, "auto")) {
+            host_mkdir("../recordings");
+            time_t t = time(0); struct tm *tm = localtime(&t); strftime(dir, sizeof dir, "../recordings/%Y%m%d-%H%M%S", tm);
+        } else snprintf(dir, sizeof dir, "%s", rec);
+        host_mkdir(dir);
+        const char *base = getenv("HG_MEMCARD_DIR") ? getenv("HG_MEMCARD_DIR") : "../memcards";
+        snprintf(p, sizeof p, "%s/card", dir);
+        if (copy_tree(base, p)) L("recording: no memory card at %s; recording without a card snapshot\n", base);
+        snprintf(p, sizeof p, "%s/pad.txt", dir);
+        rr_f = fopen(p, "w"); if (!rr_f) stop("recording: cannot write %s", p);
+        rr_base = time(0);
+        fprintf(rr_f, "# Haunting Ground input recording (HG_PADPLAY=DIR replays it). Lines: VBlank, buttons (active-high bits), analog rx ry lx ly; hex\n");
+        fprintf(rr_f, "clock %lld\n", (long long)rr_base);
+        for (size_t i = 0; i < sizeof rr_envs / sizeof rr_envs[0]; i++) fprintf(rr_f, "# env %s=%s\n", rr_envs[i], getenv(rr_envs[i]) ? getenv(rr_envs[i]) : "(unset)");
+        fflush(rr_f);
+        rr_mode = 1; L("recording input to %s\n", dir);
+    }
+}
+
 /* HG_EXPLORE=vb: from that VBlank on, a simple explorer drives Fiona (testing): it holds one direction until her
    position (player object *(0x44f818) + 0x10) stops changing, then turns to the next direction (pseudo-random),
    taps Cross every 2 s to read text, tries Cross then Circle (Search) when blocked, and logs the position every second. */
@@ -85,13 +185,24 @@ static uint16_t explore(uint64_t vb) {
     return h;
 }
 void pad_vblank(uint64_t vb) {
+    rr_init();
     if (npev < 0) pad_script_load();
-    uint16_t ex = explore(vb);
-    if (npev > 0 || ex) {
+    uint16_t ex = rr_mode == 2 ? 0 : explore(vb);
+    if (rr_mode == 2) {   /* replay: the recorded state, whatever the window or HG_PAD say */
+        while (rr_i < rr_n && rr_ev[rr_i].vb <= vb) { rr_held = rr_ev[rr_i].held; memcpy(rr_an, rr_ev[rr_i].an, 4); rr_i++; }
+        pad_held = rr_held; memcpy(pad_analog, rr_an, 4);
+    } else if (npev > 0 || ex) {
         uint16_t h = ex;
         for (int i = 0; i < npev; i++) if ((long)vb >= pev[i].from && (long)vb < pev[i].to) h |= pev[i].bits;
         static uint16_t last; if (h != last) { L("pad: buttons 0x%04x at VBlank %llu\n", h, (unsigned long long)vb); last = h; }
         pad_held = h;
+    }
+    if (rr_mode == 1) {   /* record the state the game is about to read, when it changes */
+        static int first = 1; static uint16_t lh; static uint8_t la[4];
+        if (first || pad_held != lh || memcmp(pad_analog, la, 4)) {
+            first = 0; lh = pad_held; memcpy(la, pad_analog, 4);
+            fprintf(rr_f, "%llu %04x %02x %02x %02x %02x\n", (unsigned long long)vb, pad_held, pad_analog[0], pad_analog[1], pad_analog[2], pad_analog[3]); fflush(rr_f);
+        }
     }
     if (dbc_work) for (int s = 0; s < 16; s++) W32(dbc_work + 4 * s, sock[s].used ? 1 : 0);
     for (int s = 0; s < 16; s++) {
@@ -139,14 +250,15 @@ enum { MC_NOFORMAT = -2, MC_FULL = -3, MC_NOENTRY = -4, MC_DENIED = -5, MC_NOTEM
 #define MC_FREE_KB 7800        /* reported free clusters on a fresh 8 MB card */
 static char mc_root[2][1024];
 static char mc_cwd[2][1024] = { "/", "/" };
-typedef struct { FILE *f; int port; } McFd;
+typedef struct { FILE *f; int port, wrote; char path[1100]; } McFd;
 static McFd mcfd[32];
 static uint64_t mc_calls;
 
 static int mc_present(int port) { return port == 0; }
 static const char *mc_dir(int port) {
+    rr_init();
     if (!mc_root[port][0]) {
-        const char *b = getenv("HG_MEMCARD_DIR") ? getenv("HG_MEMCARD_DIR") : "../memcards";
+        const char *b = rr_mode == 2 ? rr_card : getenv("HG_MEMCARD_DIR") ? getenv("HG_MEMCARD_DIR") : "../memcards";
         snprintf(mc_root[port], sizeof mc_root[port], "%s/port%d", b, port);
         char tmp[1024]; snprintf(tmp, sizeof tmp, "%s", b); host_mkdir(tmp); host_mkdir(mc_root[port]);
     }
@@ -202,7 +314,7 @@ static int mc_getdir(int port, const char *name, uint32_t maxent_u, uint32_t tab
 static int mc_open(int port, const char *name, uint32_t mode) {
     char path[1100]; if (!mc_host(port, name, path, sizeof path)) return MC_NOENTRY;
     struct stat st;
-    if (mode & 0x40) { if (!stat(path, &st)) return MC_NOENTRY; return host_mkdir(path) ? MC_NOENTRY : 0; }   /* sceMcMkdir */
+    if (mode & 0x40) { if (!stat(path, &st)) return MC_NOENTRY; if (host_mkdir(path)) return MC_NOENTRY; rr_touch(path); return 0; }   /* sceMcMkdir */
     int fd = 0; while (fd < 32 && mcfd[fd].f) fd++;
     if (fd == 32) return MC_UPLIMIT;
     int exists = !stat(path, &st);
@@ -210,7 +322,7 @@ static int mc_open(int port, const char *name, uint32_t mode) {
     if (!exists && !(mode & 0x200)) return MC_NOENTRY;
     const char *fm = (mode & 3) == 1 ? "rb" : exists ? "r+b" : "w+b";
     FILE *f = fopen(path, fm); if (!f) return MC_NOENTRY;
-    mcfd[fd].f = f; mcfd[fd].port = port;
+    mcfd[fd].f = f; mcfd[fd].port = port; mcfd[fd].wrote = 0; snprintf(mcfd[fd].path, sizeof mcfd[fd].path, "%s", path);
     return fd;
 }
 
@@ -233,14 +345,14 @@ int mc_rpc(uint32_t sid, uint32_t fn, const uint8_t *S, uint32_t ssize, uint32_t
         if (par) { W32(par, mc_present(port & 1) ? 2 : 0); W32(par + 4, mc_present(port & 1) ? MC_FREE_KB : 0); W32(par + 0x90, mc_present(port & 1)); }
         break;
     case 0x02: r = mc_present(bport & 1) ? mc_open(bport & 1, bname, bflags) : MC_NOCARD; break;   /* Open / Mkdir */
-    case 0x03: if (F && F->f) { fclose(F->f); F->f = 0; } else r = MC_DENIED; break;                /* Close */
+    case 0x03: if (F && F->f) { fclose(F->f); F->f = 0; if (F->wrote) { rr_touch(F->path); rr_touch_parent(F->path); } } else r = MC_DENIED; break;   /* Close */
     case 0x04:                                                     /* Seek(fd, offset, origin) */
         if (F && F->f) { fseek(F->f, (int32_t)off, org == 1 ? SEEK_CUR : org == 2 ? SEEK_END : SEEK_SET); r = (int32_t)ftell(F->f); } else r = MC_DENIED; break;
     case 0x05:                                                     /* Read(fd, buf, size): data straight to EE, no unaligned head/tail */
         if (par) { W32(par, 0); W32(par + 4, 0); }
         if (F && F->f && size < 0x2000000) r = (int32_t)fread(gptr(buf), 1, size, F->f); else r = MC_DENIED; break;
     case 0x06:                                                     /* Write(fd): head bytes in data[], rest at buffer */
-        if (F && F->f) { size_t w = 0; if (org) w += fwrite(S + 0x20, 1, org, F->f); if (size && buf) w += fwrite(gptr(buf), 1, size, F->f); r = (int32_t)w; }
+        if (F && F->f) { size_t w = 0; if (org) w += fwrite(S + 0x20, 1, org, F->f); if (size && buf) w += fwrite(gptr(buf), 1, size, F->f); r = (int32_t)w; F->wrote = 1; }
         else r = MC_DENIED; break;
     case 0x0a: if (F && F->f) fflush(F->f); break;                 /* Flush */
     case 0x0c: {                                                   /* ChDir */

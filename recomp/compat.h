@@ -30,6 +30,8 @@ void host_start_timers(void (*prof)(void), void (*alarm)(void));
 void host_backtrace(FILE *f);
 /* HG_HOSTPROF=1 host-PC sampler (Windows; use perf on Linux): register the calling thread, write hostprof.txt */
 void host_prof_thread(const char *name);
+/* the calling thread a step above normal priority (the EE and GS threads set the pace; Windows only) */
+void host_thread_boost(void);
 void host_prof_dump(void);
 #ifdef _WIN32
 void host_backtrace_main(FILE *f);   /* from another thread: suspends the main thread (for good) and walks its stack */

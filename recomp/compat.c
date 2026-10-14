@@ -85,6 +85,7 @@ static void hp_register(HANDLE h, const char *name) {
     LONG k = InterlockedIncrement(&hp_n) - 1; if (k >= HP_THREADS) return;
     snprintf(hp[k].name, sizeof hp[k].name, "%s", name); hp[k].h = h;
 }
+void host_thread_boost(void) { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL); }
 void host_prof_thread(const char *name) {
     HANDLE h; DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &h, 0, FALSE, DUPLICATE_SAME_ACCESS);
     hp_register(h, name);
@@ -225,6 +226,7 @@ void host_start_timers(void (*prof)(void), void (*alarm)(void)) {
     struct itimerval ia = {{0, 16667}, {0, 16667}}; setitimer(ITIMER_REAL, &ia, 0);
 }
 void host_prof_thread(const char *name) { (void)name; }
+void host_thread_boost(void) {}
 void host_prof_dump(void) {}
 void host_backtrace(FILE *f) { void *bt[64]; int n = backtrace(bt, 64); fflush(f); backtrace_symbols_fd(bt, n, fileno(f)); }
 #endif

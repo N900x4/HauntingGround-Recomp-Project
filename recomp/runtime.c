@@ -239,6 +239,7 @@ int main(int argc, char **argv) {
     fclose(f);
     t_start = now();
     host_start_timers(on_prof, on_alarm);
+    host_thread_boost();   /* the EE thread */
     hle_init();
     extern void overrides_init(void); overrides_init();
     if (getenv("HG_PRESS")) { char *p = getenv("HG_PRESS"); while (*p && npress < 16) { press_at[npress++] = strtol(p, &p, 10); while (*p == ',') p++; }

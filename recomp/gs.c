@@ -1548,7 +1548,7 @@ static uint32_t front[1024 * 1024]; static int front_w, front_h, front_ok; stati
 static int want_front;
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv);
 static void *gs_main(void *arg) {
-    (void)arg; host_prof_thread("gs");
+    (void)arg; host_prof_thread("gs"); host_thread_boost();
     for (;;) {
         uint64_t t = atomic_load_explicit(&r_tail, memory_order_relaxed), h = atomic_load_explicit(&r_head, memory_order_acquire);
         if (t == h) {

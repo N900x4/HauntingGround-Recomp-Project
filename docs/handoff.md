@@ -20,6 +20,31 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### Session 2026-10-14, input recording, playtest speed, room checklist
+
+- **Input recording:**
+  - `HG_PADREC=DIR` (or `auto`: `../recordings/YYYYMMDD-HHMMSS`) writes `DIR/card` (the memory card as it was at the
+    start, file times kept) and `DIR/pad.txt` (start time and every pad-state change with its VBlank).
+  - `HG_PADPLAY=DIR` replays it from a fresh copy of that card (`DIR/replay_card`), ignoring live and scripted input.
+  - While recording or replaying, the game's clock (CDVD RTC, memory card file dates) is the start time plus emulated
+    time. The load screen picks the newest save by date, so this matters for logic, not only for display.
+  - `play.bat` records every session; `replay.bat DIR` replays one in a window. For a headless replay at full speed,
+    from the UCRT64 shell: `HG_PADPLAY=DIR HG_WINDOW=0 ./hgboot.exe -q`.
+  - Checked: a LOAD GAME → Castle Suite session recorded in a window (paced) and replayed headless gave 311 of 311
+    identical frames.
+  - A replay holds only while the build runs the game the same way; any change to emulated timing invalidates older
+    recordings.
+- **Playtest speed:**
+  - The real setup (window, paced) holds 59.94 VB/s in stage 1 with 11.4 ms of work per VBlank. The worst single
+    VBlanks take 22–24 ms and are absorbed by the pacing.
+  - `HG_SPEEDLOG` now leaves the pacing sleep out (busy, worst).
+  - The EE and GS threads run one step above normal priority on Windows.
+  - Earlier dips to 55 VB/s happened while another heavy process (a research agent) shared the 8 logical CPUs.
+- **Room checklist:** `docs/rooms-checklist.md`, 131 rooms from three GameFAQs walkthroughs and the Fandom wiki,
+  cross-checked. It covers clocks (save points), cutscenes, effects and stalker areas per room. Unverified: TCRF
+  reportedly calls `ST_00D` an unused stage, yet our explorer reached a stage numbered 0x0D from `ST_013`. Check
+  this when mapping stage numbers to rooms.
+
 ### Session 2026-10-14, PCSX2 reference on Windows
 
 - The user's own PCSX2 2.8.1 install runs a separate, unattended instance: `-datapath D:\ps2-work\tools\pcsx2-data`

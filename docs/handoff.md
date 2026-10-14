@@ -20,6 +20,21 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### Session 2026-10-14, PCSX2 reference on Windows
+
+- The user's own PCSX2 2.8.1 install runs a separate, unattended instance: `-datapath D:\ps2-work\tools\pcsx2-data`
+  (data in its `PCSX2\` subfolder: the VM's settings with PINE on slot 28011, the software renderer, copies of the
+  BIOS, the VM's memory card and save states 1–5). The user's own `Documents\PCSX2` has their personal Haunting Ground
+  states in the same slot numbers and must not be touched.
+- `tools/verify/pcsx2_ref.py start SLOT | shot OUT.png | stop`: boots the ISO from a save state with the main window
+  hidden (`-nogui`) and the game window minimized. Shots are PCSX2's own F8 screenshots at raw internal resolution
+  (640x448, `ScreenshotSize = 2`). Window captures would include the user's RivaTuner overlay, so they are not used.
+  Fully windowless running is not possible: PCSX2 always creates a game window.
+- `pine.py` uses TCP 127.0.0.1:28011 on Windows (`PINE_SLOT`); `wincap.py` finds windows, captures them and posts
+  keys; `pcsx2_teleport_cmp.py` works on both systems.
+- Check: our stage 1 start frame against PCSX2's state 4 matches 99.8% within 8 levels (the VM gave 99.7%). A
+  teleport run over 10 explorer positions took 39 s; the later positions differ by camera history, as before.
+
 ### Session 2026-10-14, GS workers: full speed
 
 - `HG_GSTHREADS=n` (default: half the CPUs, at most 8; 0 turns them off): the GS thread parses and sets up draws, and
@@ -134,21 +149,15 @@ Since 2026-10-13 the project lives on the user's Windows 11 PC (Ryzen 7 9800X3D,
 - Build: MSYS2 UCRT64 at `C:\msys64` (gcc 16, make, SDL2, pkgconf). Run make and `hgboot.exe` from the UCRT64 shell,
   or from another shell with `MSYSTEM=UCRT64 /c/msys64/usr/bin/bash.exe -lc '...'`.
 - BIOS: `D:\PS2 Games\bios\ps2-0220a-20060905.bin` (US v2.20, plus `.mec` and `.nvm`).
-- PCSX2: the user's Windows install, data in `C:\Users\USER\Documents\PCSX2`. The VM's save states, memory card and
-  settings are in `D:\ps2-work\HauntingGround-Recomp-transfer\pcsx2\`; not yet copied into the Windows install.
-- Verification scripts: `tools/verify/` (see below). Paths are repo-relative now; `pine.py` (Unix socket) and
-  `pcsx2_teleport_cmp.py` (X11 `import`) are still Linux-only.
+- PCSX2: the user's Windows install (2.8.1). Their own data is `C:\Users\USER\Documents\PCSX2`: hands off. Our
+  reference instance uses `D:\ps2-work\tools\pcsx2-data` through `tools/verify/pcsx2_ref.py` (see the session above).
+- Verification scripts: `tools/verify/` (see below). Paths are repo-relative, and the PCSX2 tools work on Windows.
 
 ## Waiting on the user
 
 - A decision on whether to parallelize the GS rasterizer next (see the Windows session above) or to do something else
   first.
-- PCSX2 on Windows is not set up for the comparison tools yet. It needs:
-  - the VM's save states copied into `Documents\PCSX2\sstates`;
-  - PINE turned on (it uses TCP on Windows);
-  - Windows ports of `pine.py` and of the window capture in `pcsx2_teleport_cmp.py`.
-
-  The user still wants me to self-test against PCSX2, for graphics only.
+- The user's playtest (controls, live sound, saving from our build).
 
 ## Next steps, in order
 

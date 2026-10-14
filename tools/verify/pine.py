@@ -1,10 +1,19 @@
 # Minimal PCSX2 PINE client. Usage: python3 pine.py r32 ADDR [n] | rf ADDR n | w32 ADDR VAL | status | save N | load N
+# PINE slot: $PINE_SLOT, default 28011 (PCSX2's default). Windows: TCP 127.0.0.1:slot; Linux: the Unix socket
+# $XDG_RUNTIME_DIR/pcsx2.sock (pcsx2.sock.SLOT for other slots).
 import socket, struct, sys, os
-P = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "pcsx2.sock")
+SLOT = int(os.environ.get("PINE_SLOT", "28011"))
+P = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "pcsx2.sock" + ("" if SLOT == 28011 else ".%d" % SLOT))
+def connect():
+    if os.name == "nt":
+        s = socket.create_connection(("127.0.0.1", SLOT)); s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1); return s
+    s = socket.socket(socket.AF_UNIX); s.connect(P); return s
 def call(payload):
-    s = socket.socket(socket.AF_UNIX); s.connect(P)
+    s = connect()
     s.sendall(struct.pack("<I", len(payload) + 4) + payload)
-    hdr = s.recv(4); n = struct.unpack("<I", hdr)[0]; d = b""
+    hdr = b""
+    while len(hdr) < 4: hdr += s.recv(4 - len(hdr))
+    n = struct.unpack("<I", hdr)[0]; d = b""
     while len(d) < n - 4: d += s.recv(n - 4 - len(d))
     s.close()
     if d[0] != 0: raise SystemExit("PINE fail")
@@ -31,7 +40,7 @@ def dump(path, base=0, size=32 << 20, batch=40000):
     for a in range(base, base + size, 8 * batch):
         n = min(batch, (base + size - a) // 8)
         req = b"".join(bytes([3]) + struct.pack("<I", a + 8 * i) for i in range(n))
-        s = socket.socket(socket.AF_UNIX); s.connect(P)
+        s = connect()
         s.sendall(struct.pack("<I", len(req) + 4) + req)
         hdr = b""
         while len(hdr) < 4: hdr += s.recv(4 - len(hdr))

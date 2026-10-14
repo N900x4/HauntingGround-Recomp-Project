@@ -205,6 +205,8 @@ static void fire_vblank(void) {
     if (!timing_wall) { if (!vb_init) { vb_init = 1; vb_deadline = ee_next_vb; } if (ee_cycles < vb_deadline) ee_cycles = vb_deadline; vb_deadline += ee_vb_period; }
     { static long maxvb = -1; if (maxvb < 0) maxvb = getenv("HG_MAXVB") ? atol(getenv("HG_MAXVB")) : 0;
       if (maxvb && (long)vblank_count >= maxvb) stop("reached HG_MAXVB=%ld", maxvb); }
+    { static long crash = -1; if (crash < 0) crash = getenv("HG_CRASHTEST") ? atol(getenv("HG_CRASHTEST")) : 0;   /* tests the crash report */
+      if (crash && (long)vblank_count == crash) { volatile int *p = 0; *p = 1; } }
     {   /* HG_SPEEDLOG=n: every n VBlanks, emulated speed (real time = 59.94 VB/s) and host seconds per subsystem.
            VU1 and IOP+SPU2 run on this thread; GS drawing runs on the GS thread when HG_MTGS is on (busy % of wall). */
         static long every = -1; static double t0, p0[8], idle0, lt, lidle, worst; static uint64_t v0;

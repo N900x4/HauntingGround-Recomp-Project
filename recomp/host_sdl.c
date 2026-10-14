@@ -53,6 +53,7 @@ static void open_pad(int idx) {
 static int host_init(void) {
     if (!host_window_wanted()) return 0;
     SDL_SetMainReady();
+    SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");   /* a sharp window on scaled displays, not one Windows stretches */
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) { L("host: SDL_Init failed: %s (running headless)\n", SDL_GetError()); return 0; }
     int scale = getenv("HG_SCALE") ? atoi(getenv("HG_SCALE")) : 2; if (scale < 1) scale = 1;
     win = SDL_CreateWindow("Haunting Ground Recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640 * scale, 448 * scale, SDL_WINDOW_RESIZABLE);
@@ -63,6 +64,45 @@ static int host_init(void) {
     for (int i = 0; i < SDL_NumJoysticks(); i++) open_pad(i);
     L("host: SDL window open (%s renderer, %d joystick(s))\n", ren ? "ok" : "no", SDL_NumJoysticks());
     return 1;
+}
+static SDL_AudioDeviceID adev; static int audio_state;   /* 0 = not tried, 1 = open, -1 = unavailable */
+
+/* F3 (or HG_OVERLAY=1): performance readout over the picture, updated every second: emulated speed (100 % = 59.94
+   VBlanks a second), host work per VBlank (pacing sleep left out) and the worst VBlank, and the audio queue. Drawn
+   into the frame with a 3x5 pixel font at twice its size. */
+static const struct { char c; uint8_t r[5]; } glyphs[] = {
+    {'0',{7,5,5,5,7}},{'1',{2,6,2,2,7}},{'2',{7,1,7,4,7}},{'3',{7,1,7,1,7}},{'4',{5,5,7,1,1}},{'5',{7,4,7,1,7}},
+    {'6',{7,4,7,5,7}},{'7',{7,1,1,1,1}},{'8',{7,5,7,5,7}},{'9',{7,5,7,1,7}},{'.',{0,0,0,0,2}},{'%',{5,1,2,4,5}},
+    {'A',{2,5,7,5,5}},{'D',{6,5,5,5,6}},{'E',{7,4,6,4,7}},{'I',{7,2,2,2,7}},{'K',{5,5,6,5,5}},{'M',{5,7,7,5,5}},
+    {'O',{7,5,5,5,7}},{'P',{6,5,6,4,4}},{'R',{6,5,6,5,5}},{'S',{7,4,7,1,7}},{'U',{5,5,5,5,7}},{'W',{5,5,7,7,5}},
+    {'X',{5,5,2,5,5}},
+};
+static void ov_text(uint32_t *fb, int w, int h, int x, int y, const char *s) {
+    for (; *s; s++, x += 8) {
+        const uint8_t *g = 0;
+        for (size_t i = 0; i < sizeof glyphs / sizeof glyphs[0]; i++) if (glyphs[i].c == *s) g = glyphs[i].r;
+        if (!g) continue;
+        for (int r = 0; r < 10; r++) for (int c = 0; c < 6; c++)
+            if ((g[r / 2] >> (2 - c / 2)) & 1 && x + c < w && y + r < h) fb[(y + r) * w + x + c] = 0x00FFFFFF;
+    }
+}
+static int overlay = -1;
+static void ov_draw(uint32_t *fb, int w, int h) {
+    static double t0, idle0, worst, last, last_idle; static uint64_t n; static char line[3][40];
+    const double now = host_now();
+    if (last) { const double work = (now - last) - (host_idle - last_idle); if (work > worst) worst = work; }
+    last = now; last_idle = host_idle; n++;
+    if (!t0) { t0 = now; idle0 = host_idle; }
+    if (now - t0 >= 1.0) {
+        const double busy = (now - t0) - (host_idle - idle0);
+        snprintf(line[0], sizeof line[0], "SPEED %.0f%%", n / (now - t0) / 59.94 * 100);
+        snprintf(line[1], sizeof line[1], "WORK %.1f MS MAX %.1f", busy / n * 1000, worst * 1000);
+        snprintf(line[2], sizeof line[2], "AUDIO %.0f MS", adev ? SDL_GetQueuedAudioSize(adev) / 192.0 : 0.0);
+        t0 = now; idle0 = host_idle; n = 0; worst = 0;
+    }
+    if (!overlay) return;
+    for (int y = 4; y < 46 && y < h; y++) for (int x = 4; x < 180 && x < w; x++) fb[y * w + x] = (fb[y * w + x] >> 2) & 0x003F3F3F;   /* dim box */
+    for (int i = 0; i < 3; i++) ov_text(fb, w, h, 8, 8 + 12 * i, line[i]);
 }
 static uint8_t axis8(Sint16 v) { int a = (v + 32768) >> 8; return a < 0 ? 0 : a > 255 ? 255 : a; }
 void host_vblank(uint64_t vb) {
@@ -81,6 +121,7 @@ void host_vblank(uint64_t vb) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) stop("window closed");
+        if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F3 && !e.key.repeat) overlay = !overlay;
         if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
             int fs = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP; SDL_SetWindowFullscreen(win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
         }
@@ -113,11 +154,12 @@ void host_vblank(uint64_t vb) {
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XBGR8888, SDL_TEXTUREACCESS_STREAMING, w, h); tex_w = w; tex_h = h;
         SDL_RenderSetLogicalSize(ren, 640, 448);    /* 4:3 output; the PS2 picture is stretched to the TV like the console did */
     }
+    if (overlay < 0) overlay = getenv("HG_OVERLAY") && atoi(getenv("HG_OVERLAY"));
+    ov_draw(frame, w, h);
     SDL_UpdateTexture(tex, 0, frame, w * 4);
     SDL_RenderClear(ren); SDL_RenderCopy(ren, tex, 0, 0); SDL_RenderPresent(ren);
     (void)vb;
 }
-static SDL_AudioDeviceID adev; static int audio_state;   /* 0 = not tried, 1 = open, -1 = unavailable */
 void host_audio_push(const int16_t *s, int frames) {
     if (!audio_state) {
         const char *a = getenv("HG_AUDIO");

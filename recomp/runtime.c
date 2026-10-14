@@ -223,6 +223,7 @@ static int trace_hook(Ctx *c) {
 }
 int main(int argc, char **argv) {
     logf_ = stdout;
+    host_crash_init();
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-t") && i + 1 < argc) time_limit = atof(argv[++i]);
         else if (!strcmp(argv[i], "-q")) bg_verbose = 0;

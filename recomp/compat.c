@@ -182,6 +182,39 @@ static void walk(FILE *f, CONTEXT *c) {
     fflush(f);
 }
 void host_backtrace(FILE *f) { CONTEXT c; RtlCaptureContext(&c); walk(f, &c); }
+
+/* Crash reports (Windows): an unhandled exception writes ../crashes/YYYYMMDD-HHMMSS.dmp (a minidump for WinDbg) and
+   logs the exception, the guest function and VBlank, Fiona's stage and position, and the host stack with guest
+   function names (more useful than the dump: the generated code has no PDB symbols). HG_CRASHTEST=vb crashes on
+   purpose at that VBlank, to test this. */
+#include <dbghelp.h>
+extern uint32_t rec_cur;
+extern uint64_t hle_vblank_count(void);
+static LONG WINAPI crash_filter(EXCEPTION_POINTERS *ep) {
+    static volatile LONG once; if (InterlockedExchange(&once, 1)) return EXCEPTION_CONTINUE_SEARCH;
+    char name[128]; time_t t = time(0); struct tm *tm = localtime(&t);
+    _mkdir("../crashes"); strftime(name, sizeof name, "../crashes/%Y%m%d-%H%M%S.dmp", tm);
+    typedef BOOL (WINAPI *Mdwd)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_EXCEPTION_INFORMATION, PMINIDUMP_USER_STREAM_INFORMATION, PMINIDUMP_CALLBACK_INFORMATION);
+    HMODULE dbg = LoadLibraryA("dbghelp.dll"); Mdwd dump = dbg ? (Mdwd)(void *)GetProcAddress(dbg, "MiniDumpWriteDump") : 0;
+    int dumped = 0;
+    HANDLE f = CreateFileA(name, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+    if (dump && f != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION mei = { GetCurrentThreadId(), ep, FALSE };
+        dumped = dump(GetCurrentProcess(), GetCurrentProcessId(), f, MiniDumpWithDataSegs | MiniDumpWithThreadInfo, &mei, 0, 0);
+    }
+    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    uint32_t obj = 0, stg = 0; float pos[3] = {0};
+    if (ee_ram) { memcpy(&obj, ee_ram + 0x44f818, 4); if (obj && obj < 0x2000000 - 0x40) { memcpy(&stg, ee_ram + obj + 0x30, 4); memcpy(pos, ee_ram + obj + 0x10, 12); } }
+    fprintf(stdout, "\n==== CRASH: exception 0x%08lx at exe+0x%llx; guest function 0x%x, VBlank %llu, stage %x, Fiona at %.1f %.1f %.1f; minidump %s\n",
+            (unsigned long)ep->ExceptionRecord->ExceptionCode, (unsigned long long)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - (uintptr_t)GetModuleHandleW(0)),
+            rec_cur, (unsigned long long)hle_vblank_count(), stg, pos[0], pos[1], pos[2], dumped ? name : "(not written)");
+    fprintf(stdout, "host backtrace at the fault:\n");
+    CONTEXT c = *ep->ContextRecord; walk(stdout, &c);
+    fflush(stdout);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+void host_crash_init(void) { SetUnhandledExceptionFilter(crash_filter); }
+
 void host_backtrace_main(FILE *f) {
     _lock_file(f); SuspendThread(main_thread); _unlock_file(f);   /* not stopped inside the log stream's lock */
     CONTEXT c; memset(&c, 0, sizeof c); c.ContextFlags = CONTEXT_FULL;
@@ -227,6 +260,7 @@ void host_start_timers(void (*prof)(void), void (*alarm)(void)) {
 }
 void host_prof_thread(const char *name) { (void)name; }
 void host_thread_boost(void) {}
+void host_crash_init(void) {}
 void host_prof_dump(void) {}
 void host_backtrace(FILE *f) { void *bt[64]; int n = backtrace(bt, 64); fflush(f); backtrace_symbols_fd(bt, n, fileno(f)); }
 #endif

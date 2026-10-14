@@ -42,8 +42,9 @@ static void vu1_start(uint32_t pc) {
     if (vu1_exec) vu1_run(pc);
 }
 
-/* UNPACK: vn 0..3 = S/V2/V3/V4, vl 0..3 = 32/16/8/5-bit; m = masked; usn = unsigned; flg = add TOPS */
-static void do_unpack(void) {
+/* UNPACK: vn 0..3 = S/V2/V3/V4, vl 0..3 = 32/16/8/5-bit; m = masked; usn = unsigned; flg = add TOPS.
+   unpack_ref() handles every case; do_unpack() below takes a fast path for the common one. */
+static void unpack_ref(void) {
     uint32_t c = vif.cmd, op = (c >> 24) & 0x7F, imm = c & 0xFFFF;
     int vn = (op >> 2) & 3, vl = op & 3, masked = (op >> 4) & 1, num = (c >> 16) & 0xFF; if (!num) num = 256;
     int usn = (imm >> 14) & 1, flg = (imm >> 15) & 1;
@@ -88,7 +89,64 @@ static void do_unpack(void) {
         addr++;
         if (++cycle == wl) { cycle = 0; if (cl > wl) addr += cl - wl; }
     }
+}
+/* Every UNPACK except fill mode (WL > CL) and V4-5, which unpack_ref() keeps: with WL <= CL every vector takes data,
+   so per field only the mask, ROW (STMOD offset/difference), COL and keep cases remain, as in unpack_ref(). The data
+   is decoded per format outside the field logic, and the common unmasked STMOD 0 case writes the fields directly. */
+static int unpack_fast(void) {
+    uint32_t c = vif.cmd, op = (c >> 24) & 0x7F, imm = c & 0xFFFF;
+    int vn = (op >> 2) & 3, vl = op & 3, masked = (op >> 4) & 1, num = (c >> 16) & 0xFF; if (!num) num = 256;
+    int cl = vif.cl ? vif.cl : 1, wl = vif.wl ? vif.wl : 1;
+    if (vl == 3 || wl > cl) return 0;
+    int usn = (imm >> 14) & 1, flg = (imm >> 15) & 1;
+    uint32_t addr = (imm & 0x3FF) + (flg ? vif.tops : 0);
+    const int ncomp = vn + 1, plain = !masked && !vif.mode;
+    const uint32_t *w32 = vif.buf; const uint16_t *w16 = (const uint16_t *)vif.buf; const uint8_t *w8 = (const uint8_t *)vif.buf;
+    int cycle = 0;
+    for (int v = 0; v < num; v++) {
+        uint32_t d[4];
+        for (int k = 0; k < ncomp; k++)
+            d[k] = vl == 0 ? *w32++ : vl == 1 ? (usn ? (uint32_t)*w16++ : (uint32_t)(int32_t)(int16_t)*w16++) : (usn ? (uint32_t)*w8++ : (uint32_t)(int32_t)(int8_t)*w8++);
+        if (vn == 0) d[1] = d[2] = d[3] = d[0];
+        uint32_t *m = (uint32_t *)(vu1_mem + ((addr & 0x3FF) << 4));
+        if (plain) { if (vn == 0) { m[0] = m[1] = m[2] = m[3] = d[0]; } else for (int k = 0; k < ncomp; k++) m[k] = d[k]; }
+        else {
+            const int crow = cycle < 3 ? cycle : 3;
+            for (int k = 0; k < 4; k++) {
+                int sel = masked ? (vif.mask >> (crow * 8 + k * 2)) & 3 : 0;
+                if (sel == 0 && !(vn == 0 || k < ncomp)) sel = 3;
+                switch (sel) {
+                case 0: { uint32_t x = d[k];
+                    if (vif.mode == 1) x += vif.row[k]; else if (vif.mode == 2) { vif.row[k] += x; x = vif.row[k]; }
+                    m[k] = x; break; }
+                case 1: m[k] = vif.row[k]; break;
+                case 2: m[k] = vif.col[crow]; break;
+                default: break;
+                }
+            }
+        }
+        addr++;
+        if (++cycle == wl) { cycle = 0; addr += cl - wl; }
+    }
+    return 1;
+}
+static void do_unpack(void) {
+    static int check = -1; if (check < 0) check = getenv("HG_UNPACKCHECK") && atoi(getenv("HG_UNPACKCHECK"));
     n_unpack++;
+    if (!check) { if (!unpack_fast()) unpack_ref(); return; }
+    /* HG_UNPACKCHECK=1: the fast path must leave VU memory exactly as the reference does */
+    static uint8_t before[16384], ref[16384]; static uint64_t checked, bad;
+    memcpy(before, vu1_mem, sizeof before);
+    uint32_t row[4]; memcpy(row, vif.row, 16);
+    unpack_ref(); memcpy(ref, vu1_mem, sizeof ref);
+    uint32_t row_ref[4]; memcpy(row_ref, vif.row, 16);
+    memcpy(vu1_mem, before, sizeof before); memcpy(vif.row, row, 16);
+    if (unpack_fast()) {
+        checked++;
+        if ((memcmp(ref, vu1_mem, sizeof ref) || memcmp(row_ref, vif.row, 16)) && bad++ < 20) L("UNPACKCHECK: mismatch for UNPACK 0x%08x\n", vif.cmd);
+        if (checked % 100000 == 0) L("UNPACKCHECK: %llu fast unpacks checked, %llu mismatches\n", (unsigned long long)checked, (unsigned long long)bad);
+    }
+    memcpy(vu1_mem, ref, sizeof ref); memcpy(vif.row, row_ref, 16);   /* go on with the reference result */
 }
 static void payload_done(void) {
     switch (vif.kind) {
@@ -142,13 +200,42 @@ static void vif_word(uint32_t w) {
     }
 }
 
+/* a run of VIF1 words: command payloads (UNPACK data, MPG code, STROW/STCOL/STMASK) are taken a run at a time,
+   with the same effect as vif_word() for each word */
+static void vif_words_run(const uint32_t *w, uint32_t n) {
+    while (n) {
+        if (vif.left && vif.kind == 1 && vif.nq == 0 && n >= 4 && vif.left >= 4) {   /* DIRECT: whole qwords to GIF path 2 */
+            uint32_t k = (vif.left < n ? vif.left : n) & ~3u;
+            for (uint32_t i = 0; i < k; i += 4) {
+                const uint64_t q[2] = { w[i] | (uint64_t)w[i + 1] << 32, w[i + 2] | (uint64_t)w[i + 3] << 32 };
+                gif_qword(2, q); n_direct_qw++;
+            }
+            vif.left -= k; vif_words += k; w += k; n -= k;
+            if (!vif.left) payload_done();
+        } else if (vif.left && vif.kind != 1) {
+            uint32_t k = vif.left < n ? vif.left : n;
+            if (vif.kind == 3) { for (uint32_t i = 0; i < k; i++) { memcpy(vu1_code + (vif.addr & 0x3FFC), &w[i], 4); vif.addr += 4; } vu1_code_gen += k; }
+            else { uint32_t room = vif.nbuf < 1100 ? 1100 - vif.nbuf : 0, c = k < room ? k : room;
+                   memcpy(vif.buf + vif.nbuf, w, c * 4); vif.nbuf += c; }
+            vif.left -= k; vif_words += k; w += k; n -= k;
+            if (!vif.left) payload_done();
+        } else { vif_word(*w++); n--; }
+    }
+}
 /* ------------------------------------------------------------------ DMA */
 static void feed(int ch, uint32_t madr, uint32_t qwc) {
     n_dma_qw[ch] += qwc;
-    for (uint32_t i = 0; i < qwc; i++) {
-        const uint8_t *p = dma_src(madr + 16 * i);
-        if (ch == 2) { uint64_t q[2]; memcpy(q, p, 16); gif_qword(3, q); }
-        else { uint32_t w[4]; memcpy(w, p, 16); for (int k = 0; k < 4; k++) vif_word(w[k]); }
+    if (ch == 2) {
+        for (uint32_t i = 0; i < qwc; i++) { uint64_t q[2]; memcpy(q, dma_src(madr + 16 * i), 16); gif_qword(3, q); }
+        return;
+    }
+    for (uint32_t i = 0; i < qwc; ) {   /* contiguous stretches: the scratchpad wraps at 16 KB */
+        const uint32_t a = madr + 16 * i;
+        uint32_t run = qwc - i;
+        if (a & 0x80000000u) { const uint32_t left = (0x4000 - (a & 0x3FF0)) >> 4; if (run > left) run = left; }
+        uint32_t w[4 * 256]; if (run > 256) run = 256;
+        memcpy(w, dma_src(a), run * 16);
+        vif_words_run(w, run * 4); i += run;
     }
 }
 static uint32_t R32h(uint8_t *hw, uint32_t off) { uint32_t v; memcpy(&v, hw + off, 4); return v; }

@@ -224,12 +224,32 @@ void draw_at(int x, int y) {
     pixel(x, y, zv, shade(col, u16, v16, uint(cvt(ff))));
 }
 #ifdef BATCH
+// The workgroup's 8x8 tile first marks, 256 primitives at a time, those whose rectangle meets it (one bit each, so
+// the order stays), then every invocation draws the marked ones at its pixel.
+shared uint hits[8];
 void main() {
+    uint lid = gl_LocalInvocationIndex;
     int x = pc.bx0 + int(gl_GlobalInvocationID.x), y = pc.by0 + int(gl_GlobalInvocationID.y);
-    for (int i = 0; i < pc.n; i++) {
-        if (x < prims[i].px0 || x >= prims[i].px1 || y < prims[i].py0 || y >= prims[i].py1) continue;
-        p = prims[i];
-        draw_at(x, y);
+    int tx0 = pc.bx0 + int(gl_WorkGroupID.x) * 8, ty0 = pc.by0 + int(gl_WorkGroupID.y) * 8;
+    for (int base = 0; base < pc.n; base += 256) {
+        if (lid < 8u) hits[lid] = 0u;
+        barrier();
+        for (int k = 0; k < 4; k++) {
+            int j = int(lid) * 4 + k, i = base + j;
+            if (i < pc.n && prims[i].px0 < tx0 + 8 && prims[i].px1 > tx0 && prims[i].py0 < ty0 + 8 && prims[i].py1 > ty0)
+                atomicOr(hits[j >> 5], 1u << (j & 31));
+        }
+        barrier();
+        for (int w = 0; w < 8; w++) {
+            uint m = hits[w];
+            while (m != 0u) {
+                int i = base + w * 32 + findLSB(m); m &= m - 1u;
+                if (x < prims[i].px0 || x >= prims[i].px1 || y < prims[i].py0 || y >= prims[i].py1) continue;
+                p = prims[i];
+                draw_at(x, y);
+            }
+        }
+        barrier();
     }
 }
 #else

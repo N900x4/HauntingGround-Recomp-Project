@@ -126,11 +126,27 @@ void host_audio_push(const int16_t *s, int frames) {
         SDL_AudioSpec want = { 0 }, got; want.freq = 48000; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 1024;
         adev = SDL_OpenAudioDevice(0, 0, &want, &got, 0);
         if (!adev) { L("host: no audio device: %s\n", SDL_GetError()); audio_state = -1; return; }
-        SDL_PauseAudioDevice(adev, 0); audio_state = 1; L("host: audio open (48 kHz stereo)\n");
+        audio_state = 1; L("host: audio open (48 kHz stereo)\n");   /* playback starts once the queue is primed */
     }
     if (audio_state < 0) return;
-    if (SDL_GetQueuedAudioSize(adev) > 48000 * 4 / 6) return;      /* more than ~160 ms queued: drop to keep latency low */
+    /* The device takes about 21 ms per period and the game delivers about 17 ms per VBlank, so the queue needs a
+       cushion: playback starts (and restarts after an underrun) only once 100 ms are queued, which also absorbs a
+       slow second (55 VBlanks: ~80 ms short); beyond 250 ms, chunks are dropped. An underrun plays silence and a
+       dropped chunk skips sound, both audible as ticks. Statistics are logged every 10 s. */
+    enum { AQ_START = 48000 * 4 / 10, AQ_MAX = 48000 * 4 / 4 };
+    static int playing; static uint64_t underruns, drops; static Uint32 qmin = 0xFFFFFFFF, qmax; static double tlog;
+    const Uint32 q = SDL_GetQueuedAudioSize(adev);
+    if (playing) { if (q < qmin) qmin = q; if (q > qmax) qmax = q; }
+    if (playing && q == 0) { underruns++; SDL_PauseAudioDevice(adev, 1); playing = 0; }   /* refill before going on */
+    if (host_now() - tlog > 10) {
+        if (tlog) L("host audio: queue %.0f-%.0f ms, %llu underruns, %llu dropped chunks\n", qmin == 0xFFFFFFFF ? 0 : qmin / 192.0, qmax / 192.0, (unsigned long long)underruns, (unsigned long long)drops);
+        tlog = host_now(); qmin = 0xFFFFFFFF; qmax = 0;
+    }
+    if (q > AQ_MAX) { drops++; return; }
+    static int mute = -1; if (mute < 0) mute = getenv("HG_AUDIO_MUTE") && atoi(getenv("HG_AUDIO_MUTE"));
+    if (mute) { static int16_t z[4096 * 2]; if (frames <= 4096) s = z; }   /* testing: the real device's timing, no sound */
     SDL_QueueAudio(adev, s, (Uint32)frames * 4);
+    if (!playing && q + (Uint32)frames * 4 >= AQ_START) { SDL_PauseAudioDevice(adev, 0); playing = 1; }
 }
 #else
 void host_audio_push(const int16_t *s, int frames) { (void)s; (void)frames; }

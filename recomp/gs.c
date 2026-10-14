@@ -1080,13 +1080,33 @@ static int gs_nodraw; static long gs_draw_from;
 #include "gsvk.h"
 static long vkchk_from = -2, vkchk_to; static uint64_t vkchk_n, vkchk_exact, vkchk_words, vkchk_skipped;
 static int gsvk_sprite_supported(const Draw *d, const SprGeo *g) {
-    if (d->fb16 || d->date || (d->fpsm != CT32 && d->fpsm != CT24 && d->fpsm != Z32 && d->fpsm != Z24)) return 0;
-    if (d->zte && d->ztst != 0 && (d->zread || !d->zmsk)) return 0;
-    if (d->tme) {
-        switch (d->tex.psm) { case CT32: case CT24: case T8H: case T4HL: case T4HH: case Z32: case Z24: break; default: return 0; }
-        if (sprite_tex_overlaps(d, g->px0, g->px1, g->py0, g->py1, g->x0, g->y0, g->u0, g->v0, g->du, g->dv)) return 0;   /* order-dependent */
+    if (g->px1 <= g->px0 || g->py1 <= g->py0) return 0;
+    switch (d->fpsm) { case CT32: case CT24: case CT16: case CT16S: case Z32: case Z24: case Z16: case Z16S: break; default: return 0; }
+    /* buffers that share memory make the result depend on the order of the pixels */
+    if (d->tme && sprite_tex_overlaps(d, g->px0, g->px1, g->py0, g->py1, g->x0, g->y0, g->u0, g->v0, g->du, g->dv)) return 0;
+    if (d->zte && d->ztst != 0 && (d->zread || !d->zmsk)) {
+        uint64_t fp[8] = {0}, zp[8] = {0};
+        mark_pages(fp, d->fbp, d->fbw, d->fpsm, g->px0, g->py0, g->px1 - 1, g->py1 - 1);
+        mark_pages(zp, d->zbp, d->fbw, d->zpsm, g->px0, g->py0, g->px1 - 1, g->py1 - 1);
+        if (pages_meet(fp, zp)) return 0;
+        if (d->tme && !d->zmsk) {
+            int ua, ub, va, vb; uint64_t tp[8] = {0};
+            if (sprite_texels(d, g->px0, g->px1, g->py0, g->py1, g->x0, g->y0, g->u0, g->v0, g->du, g->dv, &ua, &ub, &va, &vb)) {
+                mark_pages(tp, d->tex.tbp, d->tex.tbw, d->tex.psm, ua, va, ub, vb); if (pages_meet(zp, tp)) return 0; }
+        }
     }
-    return g->px1 > g->px0 && g->py1 > g->py0;
+    return 1;
+}
+static void gsvk_tables(int32_t *t) {   /* the shader's BT8, CT8, BT4, CT4, BT16, BT16S, BT16Z, CT16 */
+    int k = 0;
+    for (int i = 0; i < 32; i++) t[k++] = blockTable8[i / 8][i % 8];
+    for (int i = 0; i < 256; i++) t[k++] = columnTable8[i / 16][i % 16];
+    for (int i = 0; i < 32; i++) t[k++] = blockTable4[i / 4][i % 4];
+    for (int i = 0; i < 512; i++) t[k++] = columnTable4[i / 32][i % 32];
+    for (int i = 0; i < 32; i++) t[k++] = blockTable16[i / 4][i % 4];
+    for (int i = 0; i < 32; i++) t[k++] = blockTable16S[i / 4][i % 4];
+    for (int i = 0; i < 32; i++) t[k++] = blockTable16Z[i / 4][i % 4];
+    for (int i = 0; i < 128; i++) t[k++] = columnTable16[i / 16][i % 16];
 }
 static void gsvk_check_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
     SprGeo g; sprite_geo(d, a, b, &g);
@@ -1099,7 +1119,8 @@ static void gsvk_check_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
         b->rgba, (uint32_t)b->f, d->fbp, d->fbw, d->fpsm, d->fbmsk, d->scx0, d->scx1, d->scy0, d->scy1,
         d->tme, (int)t->tbp, (int)t->tbw, (int)t->psm, (int)t->tw, (int)t->th, (int)t->tcc, (int)t->tfx, t->wms, t->wmt, t->minu, t->maxu, t->minv, t->maxv,
         t->bilinear, t->aem, t->ta0, t->ta1, (int)t->csa, (int)t->cpsm,
-        d->ate, d->atst, d->aref, d->afail, d->abe, d->a, d->b, d->cc, d->d, d->fix, d->pabe, d->fba, d->colclamp, d->fge, d->need_dst, d->zte, d->ztst, d->fogcol };
+        d->ate, d->atst, d->aref, d->afail, d->abe, d->a, d->b, d->cc, d->d, d->fix, d->pabe, d->fba, d->colclamp, d->fge, d->need_dst, d->zte, d->ztst, d->fogcol,
+        b->z, d->zbp, d->zpsm, d->zmsk, d->zread, d->date, d->datm, d->fb16 };
     static const uint32_t noclut[256];
     if (!gsvk_sprite(&s, d->tme && t->clut ? t->clut : noclut, before, gpu)) return;
     uint64_t bad = 0; long first = -1;
@@ -1124,7 +1145,8 @@ static void rasterize(const Draw *d, int prim, const Vtx *w) {
 #ifdef HAVE_VULKAN
         if (vkchk_from == -2) { const char *e = getenv("HG_GSVKCHECK"); vkchk_from = -1;
             if (e) { vkchk_from = atol(e); const char *c = strchr(e, ':'); vkchk_to = c ? atol(c + 1) : vkchk_from;
-                     if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0])) vkchk_from = -1; } }
+                     static int32_t tabs[GSVK_TABLES]; gsvk_tables(tabs);
+                     if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0], tabs)) vkchk_from = -1; } }
         if (vkchk_from >= 0 && (long)cur_vb >= vkchk_from && (long)cur_vb <= vkchk_to) { gsvk_check_sprite(d, &w[0], &w[1]); break; }
 #endif
         draw_sprite(d, &w[0], &w[1]); break;

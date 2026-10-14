@@ -10,7 +10,10 @@ typedef struct {
     int32_t tme, tbp, tbw, tpsm, tw, th, tcc, tfx, wms, wmt, minu, maxu, minv, maxv, bilinear, aem, ta0, ta1, csa, cpsm;
     int32_t ate, atst, aref, afail, abe, a, b, cc, d, fix, pabe, fba, colclamp, fge, need_dst, zte, ztst;
     uint32_t fogcol;
+    uint32_t z, zbp; int32_t zpsm, zmsk, zread, date, datm, fb16;
 } GsVkSprite;
-int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z);   /* 0: no Vulkan */
+/* tables: the 8-, 4- and 16-bit block and column tables, laid out as the shader's BT8 ... CT16 offsets */
+#define GSVK_TABLES 1056
+int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *tables);   /* 0: no Vulkan */
 int gsvk_sprite(const GsVkSprite *s, const uint32_t *clut, const uint32_t *before, uint32_t *out);
 #endif

@@ -15,7 +15,7 @@ static VkInstance inst; static VkPhysicalDevice phys; static VkDevice dev; stati
 static VkDescriptorSetLayout dsl; static VkPipelineLayout pl; static VkPipeline pipe; static VkDescriptorPool dpool; static VkDescriptorSet dset;
 static VkCommandPool cpool; static VkCommandBuffer cmd; static VkFence fence;
 typedef struct { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceSize n; } Buf;
-static Buf vram, xoffb, clutb, parb;
+static Buf vram, xoffb, clutb, parb, tabb;
 static int state;   /* 0 untried, 1 ready, -1 unavailable */
 
 static int mkbuf(Buf *b, VkDeviceSize n, VkBufferUsageFlags use) {
@@ -32,7 +32,7 @@ static int mkbuf(Buf *b, VkDeviceSize n, VkBufferUsageFlags use) {
     b->n = n; return 1;
 }
 
-int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z) {
+int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *tables) {
     if (state) return state > 0;
     state = -1;
     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "hgboot", .apiVersion = VK_API_VERSION_1_1 };
@@ -54,12 +54,13 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z) {
     if (vkCreateDevice(phys, &dci, 0, &dev)) { L("GSVK: no device\n"); return 0; }
     vkGetDeviceQueue(dev, qfam, 0, &queue);
     if (!mkbuf(&vram, ((1u << 20) + 4) * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) || !mkbuf(&xoffb, 66u * 2048 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
-        !mkbuf(&clutb, 256 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) || !mkbuf(&parb, sizeof(GsVkSprite), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) { L("GSVK: buffers failed\n"); return 0; }
-    memcpy(xoffb.p, xoff32, 33u * 2048 * 4); memcpy((uint32_t *)xoffb.p + 33u * 2048, xoff32z, 33u * 2048 * 4);
-    VkDescriptorSetLayoutBinding bd[4];
-    for (int i = 0; i < 4; i++) bd[i] = (VkDescriptorSetLayoutBinding){ .binding = (uint32_t)i, .descriptorType = i == 3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        !mkbuf(&clutb, 256 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) || !mkbuf(&parb, sizeof(GsVkSprite), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) ||
+        !mkbuf(&tabb, GSVK_TABLES * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) { L("GSVK: buffers failed\n"); return 0; }
+    memcpy(xoffb.p, xoff32, 33u * 2048 * 4); memcpy((uint32_t *)xoffb.p + 33u * 2048, xoff32z, 33u * 2048 * 4); memcpy(tabb.p, tables, GSVK_TABLES * 4);
+    VkDescriptorSetLayoutBinding bd[5];
+    for (int i = 0; i < 5; i++) bd[i] = (VkDescriptorSetLayoutBinding){ .binding = (uint32_t)i, .descriptorType = i == 3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                                                          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT };
-    VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 4, .pBindings = bd };
+    VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 5, .pBindings = bd };
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl };
     VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof gs_sprite_spv, .pCode = gs_sprite_spv };
     VkShaderModule sm;
@@ -67,16 +68,16 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z) {
     VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = pl,
         .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" } };
     if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, 0, &pipe)) { L("GSVK: pipeline failed\n"); return 0; }
-    VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 }, { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 } };
+    VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 }, { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 } };
     VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = ps };
     VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = 1, .pSetLayouts = &dsl };
     if (vkCreateDescriptorPool(dev, &dpi, 0, &dpool)) return 0;
     dai.descriptorPool = dpool; if (vkAllocateDescriptorSets(dev, &dai, &dset)) return 0;
-    VkDescriptorBufferInfo bi[4] = { { vram.b, 0, VK_WHOLE_SIZE }, { xoffb.b, 0, VK_WHOLE_SIZE }, { clutb.b, 0, VK_WHOLE_SIZE }, { parb.b, 0, VK_WHOLE_SIZE } };
-    VkWriteDescriptorSet wr[4];
-    for (int i = 0; i < 4; i++) wr[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = dset, .dstBinding = (uint32_t)i, .descriptorCount = 1,
+    VkDescriptorBufferInfo bi[5] = { { vram.b, 0, VK_WHOLE_SIZE }, { xoffb.b, 0, VK_WHOLE_SIZE }, { clutb.b, 0, VK_WHOLE_SIZE }, { parb.b, 0, VK_WHOLE_SIZE }, { tabb.b, 0, VK_WHOLE_SIZE } };
+    VkWriteDescriptorSet wr[5];
+    for (int i = 0; i < 5; i++) wr[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = dset, .dstBinding = (uint32_t)i, .descriptorCount = 1,
                                                                .descriptorType = bd[i].descriptorType, .pBufferInfo = &bi[i] };
-    vkUpdateDescriptorSets(dev, 4, wr, 0, 0);
+    vkUpdateDescriptorSets(dev, 5, wr, 0, 0);
     VkCommandPoolCreateInfo cpci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qfam };
     VkCommandBufferAllocateInfo cbai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
     VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };

@@ -2,8 +2,9 @@
 // GS sprite rasterizer on the GPU: one invocation per pixel of the sprite's rectangle, doing exactly what gs.c's
 // draw_sprite() -> shade() -> pixel() do for the same pixel (integer math as written there; the float texture
 // coordinates use `precise` so that no multiply-add is fused, matching the C code compiled with -ffp-contract=off).
-// Scope (gsvk_sprite_supported() in gs.c): 32-bit frame buffers (CT32/CT24 and Z32/Z24 layouts), no destination
-// alpha test, no Z read or write, textures in the 32-bit layouts (CT32, CT24, T8H/T4HL/T4HH with CLUT, Z32/Z24).
+// Local memory is one array of 32-bit words; 16-bit pixels are written with atomics, as two neighbours share a word.
+// Not covered (gsvk_sprite_supported() in gs.c): sprites whose texture, frame or Z buffer overlap in memory, since
+// their result depends on the order of the pixels.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(std430, binding = 0) buffer Vram { uint vm[]; };
 layout(std430, binding = 1) readonly buffer Xoff { uint xoff[]; };   // [0, 32*2048): xoff32, [33*2048, ...): xoff32z
@@ -15,13 +16,57 @@ layout(std140, binding = 3) uniform P {
     int tme, tbp, tbw, tpsm, tw, th, tcc, tfx, wms, wmt, minu, maxu, minv, maxv, bilinear, aem, ta0, ta1, csa, cpsm;
     int ate, atst, aref, afail, abe, a, b, cc, d, fix, pabe, fba, colclamp, fge, need_dst, zte, ztst;
     uint fogcol;
+    uint z, zbp; int zpsm, zmsk, zread, date, datm, fb16;
 } p;
+layout(std430, binding = 4) readonly buffer Tables { int tab[]; };   // see gsvk_init(): block and column tables
+const int BT8 = 0, CT8 = 32, BT4 = 288, CT4 = 320, BT16 = 832, BT16S = 864, BT16Z = 896, CT16 = 928;
 
-const int CT32 = 0x00, CT24 = 0x01, T8H = 0x1b, T4HL = 0x24, T4HH = 0x2c, Z32 = 0x30, Z24 = 0x31;
+const int CT32 = 0x00, CT24 = 0x01, CT16x = 0x02, CT16S = 0x0a, T8 = 0x13, T4 = 0x14, T8H = 0x1b, T4HL = 0x24, T4HH = 0x2c,
+          Z32 = 0x30, Z24 = 0x31, Z16 = 0x32, Z16S = 0x3a;
 
 uint addr32(uint bp, uint bw, int x, int y, uint table) {
     return (bp * 64u + uint(y >> 5) * bw * 2048u + xoff[table + uint(y & 31) * 2048u + uint(x & 2047)]) & 0xFFFFFu;
 }
+uint addr16(uint bp, uint bw, int x, int y, int bt) {   // halfword index
+    uint page = uint((x >> 6) + (y >> 6) * int(bw));
+    return ((bp + page * 32u + uint(tab[bt + ((y >> 3) & 7) * 4 + ((x >> 4) & 3)])) * 128u + uint(tab[CT16 + (y & 7) * 16 + (x & 15)])) & 0x1FFFFFu;
+}
+uint addr8(uint bp, uint bw, int x, int y) {            // byte index
+    uint page = uint((x >> 7) + (y >> 6) * int((bw + 1u) >> 1));
+    return ((bp + page * 32u + uint(tab[BT8 + ((y >> 4) & 3) * 8 + ((x >> 4) & 7)])) * 256u + uint(tab[CT8 + (y & 15) * 16 + (x & 15)])) & 0x3FFFFFu;
+}
+uint addr4(uint bp, uint bw, int x, int y) {            // nibble index
+    uint page = uint((x >> 7) + (y >> 7) * int((bw + 1u) >> 1));
+    return ((bp + page * 32u + uint(tab[BT4 + ((y >> 4) & 7) * 4 + ((x >> 5) & 3)])) * 512u + uint(tab[CT4 + (y & 15) * 32 + (x & 31)])) & 0x7FFFFFu;
+}
+uint rd16(uint h) { return (vm[h >> 1] >> ((h & 1u) * 16u)) & 0xFFFFu; }
+void wr16(uint h, uint v) { uint sh = (h & 1u) * 16u; atomicAnd(vm[h >> 1], ~(0xFFFFu << sh)); atomicOr(vm[h >> 1], (v & 0xFFFFu) << sh); }
+int bt16of(int psm) { return psm == CT16S ? BT16S : (psm == Z16 || psm == Z16S) ? BT16Z : BT16; }
+// read_px()/write_px() of gs.c for the formats used here
+uint read_px(uint bp, uint bw, int psm, int x, int y) {
+    if (psm == CT32 || psm == CT24) return vm[addr32(bp, bw, x, y, 0u)];
+    if (psm == Z32 || psm == Z24) return vm[addr32(bp, bw, x, y, 33u * 2048u)];
+    if (psm == CT16x || psm == CT16S || psm == Z16 || psm == Z16S) return rd16(addr16(bp, bw, x, y, bt16of(psm)));
+    if (psm == T8) { uint a = addr8(bp, bw, x, y); return (vm[a >> 2] >> ((a & 3u) * 8u)) & 255u; }
+    if (psm == T4) { uint a = addr4(bp, bw, x, y); return (vm[a >> 3] >> ((a & 7u) * 4u)) & 15u; }
+    if (psm == T8H) return vm[addr32(bp, bw, x, y, 0u)] >> 24;
+    if (psm == T4HL) return (vm[addr32(bp, bw, x, y, 0u)] >> 24) & 15u;
+    if (psm == T4HH) return vm[addr32(bp, bw, x, y, 0u)] >> 28;
+    return vm[addr32(bp, bw, x, y, 0u)];
+}
+void write_px(uint bp, uint bw, int psm, int x, int y, uint v) {   // frame and Z formats
+    if (psm == CT32) vm[addr32(bp, bw, x, y, 0u)] = v;
+    else if (psm == CT24) { uint a = addr32(bp, bw, x, y, 0u); vm[a] = (vm[a] & 0xFF000000u) | (v & 0xFFFFFFu); }
+    else if (psm == Z32) vm[addr32(bp, bw, x, y, 33u * 2048u)] = v;
+    else if (psm == Z24) { uint a = addr32(bp, bw, x, y, 33u * 2048u); vm[a] = (vm[a] & 0xFF000000u) | (v & 0xFFFFFFu); }
+    else wr16(addr16(bp, bw, x, y, bt16of(psm)), v);
+}
+uint c16to32(uint c, int aem, uint ta0, uint ta1) {
+    uint r = (c & 31u) << 3, g = ((c >> 5) & 31u) << 3, b = ((c >> 10) & 31u) << 3;
+    uint a = (c & 0x8000u) != 0u ? ta1 : (aem != 0 && (c & 0x7FFFu) == 0u) ? 0u : ta0;
+    return r | g << 8 | b << 16 | a << 24;
+}
+uint c32to16(uint c) { return ((c >> 3) & 31u) | (((c >> 11) & 31u) << 5) | (((c >> 19) & 31u) << 10) | ((c >> 16) & 0x8000u); }
 int wrapc(int v, int size, int mode, int mn, int mx) {
     if (mode == 0) return v & (size - 1);
     if (mode == 1) return v < 0 ? 0 : v >= size ? size - 1 : v;
@@ -30,15 +75,13 @@ int wrapc(int v, int size, int mode, int mn, int mx) {
 }
 uint texel(int u, int v) {
     u = wrapc(u, p.tw, p.wms, p.minu, p.maxu); v = wrapc(v, p.th, p.wmt, p.minv, p.maxv);
-    const uint TZ = 33u * 2048u;
-    if (p.tpsm == CT32) return vm[addr32(uint(p.tbp), uint(p.tbw), u, v, 0u)];
-    if (p.tpsm == CT24) { uint c = vm[addr32(uint(p.tbp), uint(p.tbw), u, v, 0u)] & 0xFFFFFFu; return c | (uint((p.aem != 0 && c == 0u) ? 0 : p.ta0) << 24); }
-    if (p.tpsm == Z32) return vm[addr32(uint(p.tbp), uint(p.tbw), u, v, TZ)];
-    if (p.tpsm == Z24) { uint c = vm[addr32(uint(p.tbp), uint(p.tbw), u, v, TZ)] & 0xFFFFFFu; return c | (uint((p.aem != 0 && c == 0u) ? 0 : p.ta0) << 24); }
-    uint w = vm[addr32(uint(p.tbp), uint(p.tbw), u, v, 0u)];
-    if (p.tpsm == T8H) return clut[w >> 24];
-    uint idx = p.tpsm == T4HL ? (w >> 24) & 15u : w >> 28;
-    return clut[(uint((p.cpsm == 0 ? (p.csa & 15) : p.csa) * 16) + idx) & 255u];
+    uint bp = uint(p.tbp), bw = uint(p.tbw); int psm = p.tpsm;
+    if (psm == CT32 || psm == Z32) return read_px(bp, bw, psm, u, v);
+    if (psm == CT24 || psm == Z24) { uint c = read_px(bp, bw, psm == CT24 ? CT32 : Z32, u, v) & 0xFFFFFFu; return c | (uint((p.aem != 0 && c == 0u) ? 0 : p.ta0) << 24); }
+    if (psm == CT16x || psm == CT16S || psm == Z16 || psm == Z16S) return c16to32(read_px(bp, bw, psm, u, v), p.aem, uint(p.ta0), uint(p.ta1));
+    if (psm == T8 || psm == T8H) return clut[read_px(bp, bw, psm, u, v) & 255u];
+    if (psm == T4 || psm == T4HL || psm == T4HH) return clut[(uint((p.cpsm == CT32 ? (p.csa & 15) : p.csa) * 16) + read_px(bp, bw, psm, u, v)) & 255u];
+    return read_px(bp, bw, CT32, u, v);
 }
 uint sample_(int u16, int v16) {
     if (p.bilinear == 0) return texel(u16 >> 4, v16 >> 4);
@@ -78,32 +121,43 @@ void main() {
     precise float uu = p.u0 + float((x << 4) - p.x0) * p.du;
     precise float vv = p.v0 + float((y << 4) - p.y0) * p.dv;
     uint col = shade(p.rgba, int(uu), int(vv), p.fog);
-    // pixel()
+    // pixel(), in its order
     if (x < p.scx0 || x > p.scx1 || y < p.scy0 || y > p.scy1) return;
-    int as_ = int(col >> 24); bool fb_ok = true, rgb_only = false;
+    int as_ = int(col >> 24); bool fb_ok = true, z_ok = true, rgb_only = false;
     if (p.ate != 0) {
         bool pass;
         if (p.atst == 0) pass = false; else if (p.atst == 1) pass = true; else if (p.atst == 2) pass = as_ < p.aref; else if (p.atst == 3) pass = as_ <= p.aref;
         else if (p.atst == 4) pass = as_ == p.aref; else if (p.atst == 5) pass = as_ >= p.aref; else if (p.atst == 6) pass = as_ > p.aref; else pass = as_ != p.aref;
-        if (!pass) { if (p.afail == 0) return; if (p.afail == 2) fb_ok = false; if (p.afail == 3) rgb_only = true; }
+        if (!pass) { if (p.afail == 0) return; if (p.afail == 1) z_ok = false; else if (p.afail == 2) fb_ok = false; else { z_ok = false; rgb_only = true; } }
     }
-    uint fa = addr32(p.fbp, p.fbw, x, y, (p.fpsm == Z32 || p.fpsm == Z24) ? 33u * 2048u : 0u);
-    uint dst = p.need_dst != 0 ? vm[fa] : 0u;
-    if (p.zte != 0 && p.ztst == 0) return;
-    if (!fb_ok) return;
-    uint o = col;
-    if (p.abe != 0 && !(p.pabe != 0 && (as_ & 0x80) == 0)) {
-        int ad = int(dst >> 24), cf = p.cc == 0 ? as_ : p.cc == 1 ? ad : p.fix;
-        o = 0u;
-        for (int s = 0; s < 24; s += 8) {
-            int cs = int((col >> s) & 255u), cd = int((dst >> s) & 255u);
-            int A = p.a == 0 ? cs : p.a == 1 ? cd : 0, B = p.b == 0 ? cs : p.b == 1 ? cd : 0, D = p.d == 0 ? cs : p.d == 1 ? cd : 0;
-            o |= uint(clamp255(((A - B) * cf >> 7) + D, p.colclamp)) << s;
+    uint dst = 0u, dst32 = 0u;
+    if (p.need_dst != 0) { dst = read_px(p.fbp, p.fbw, int(p.fpsm), x, y); dst32 = p.fb16 != 0 ? c16to32(dst, 0, 0u, 0x80u) : dst; }
+    if (p.date != 0) { int bit = p.fb16 != 0 ? int((dst >> 15) & 1u) : int((dst >> 31) & 1u); if (bit != p.datm) return; }
+    if (p.zte != 0) {
+        if (p.ztst == 0) return;
+        if (p.zread != 0) {
+            uint zd = read_px(p.zbp, p.fbw, p.zpsm, x, y);
+            if (p.zpsm == Z24) zd &= 0xFFFFFFu;
+            if (p.ztst == 2 ? p.z < zd : p.z <= zd) return;
         }
-        o |= col & 0xFF000000u;
+    } else z_ok = false;
+    if (fb_ok) {
+        uint o = col;
+        if (p.abe != 0 && !(p.pabe != 0 && (as_ & 0x80) == 0)) {
+            int ad = int(dst32 >> 24), cf = p.cc == 0 ? as_ : p.cc == 1 ? ad : p.fix;
+            o = 0u;
+            for (int s = 0; s < 24; s += 8) {
+                int cs = int((col >> s) & 255u), cd = int((dst32 >> s) & 255u);
+                int A = p.a == 0 ? cs : p.a == 1 ? cd : 0, B = p.b == 0 ? cs : p.b == 1 ? cd : 0, D = p.d == 0 ? cs : p.d == 1 ? cd : 0;
+                o |= uint(clamp255(((A - B) * cf >> 7) + D, p.colclamp)) << s;
+            }
+            o |= col & 0xFF000000u;
+        }
+        if (p.fba != 0) o |= 0x80000000u;
+        if (rgb_only) o = (o & 0xFFFFFFu) | (dst32 & 0xFF000000u);
+        if (p.fb16 != 0) { uint o16 = c32to16(o); o16 = (o16 & ~p.fbmsk) | (dst & p.fbmsk & 0xFFFFu); write_px(p.fbp, p.fbw, int(p.fpsm), x, y, o16); }
+        else if (int(p.fpsm) == CT24 || int(p.fpsm) == Z24) { uint a = addr32(p.fbp, p.fbw, x, y, int(p.fpsm) == Z24 ? 33u * 2048u : 0u); vm[a] = (dst & 0xFF000000u) | (((o & ~p.fbmsk) | (dst & p.fbmsk)) & 0xFFFFFFu); }
+        else vm[addr32(p.fbp, p.fbw, x, y, int(p.fpsm) == Z32 ? 33u * 2048u : 0u)] = (o & ~p.fbmsk) | (dst & p.fbmsk);
     }
-    if (p.fba != 0) o |= 0x80000000u;
-    if (rgb_only) o = (o & 0xFFFFFFu) | (dst & 0xFF000000u);
-    if (p.fpsm == CT24 || p.fpsm == Z24) vm[fa] = (dst & 0xFF000000u) | (((o & ~p.fbmsk) | (dst & p.fbmsk)) & 0xFFFFFFu);
-    else vm[fa] = (o & ~p.fbmsk) | (dst & p.fbmsk);
+    if (z_ok && p.zmsk == 0) write_px(p.zbp, p.fbw, p.zpsm, x, y, p.z);
 }

@@ -43,7 +43,9 @@ obj/gs.o: gs.c ee_runtime.h hle.h compat.h gsvk.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) $(VK_CFLAGS) -O2 -ffp-contract=off -c $< -o $@
 gen/gs_sprite_spv.h: vk/gs_sprite.comp
 	glslangValidator -V --target-env vulkan1.1 --vn gs_sprite_spv -o $@ $<
-obj/gsvk.o: gsvk.c gsvk.h gen/gs_sprite_spv.h ee_runtime.h hle.h
+gen/gs_batch_spv.h: vk/gs_sprite.comp
+	glslangValidator -V --target-env vulkan1.1 -DBATCH --vn gs_batch_spv -o $@ $<
+obj/gsvk.o: gsvk.c gsvk.h gen/gs_sprite_spv.h gen/gs_batch_spv.h ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/dmac.o: dmac.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@

@@ -9,18 +9,30 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(std430, binding = 0) buffer Vram { uint vm[]; };
 layout(std430, binding = 1) readonly buffer Xoff { uint xoff[]; };   // [0, 32*2048): xoff32, [33*2048, ...): xoff32z
 layout(std430, binding = 2) readonly buffer Clut { uint clut[]; };
-layout(std140, binding = 3) uniform P {
-    int px0, px1, py0, py1, x0, y0; float u0, v0, du, dv;
-    uint rgba, fog, fbp, fbw, fpsm, fbmsk;
-    int scx0, scx1, scy0, scy1;
-    int tme, tbp, tbw, tpsm, tw, th, tcc, tfx, wms, wmt, minu, maxu, minv, maxv, bilinear, aem, ta0, ta1, csa, cpsm;
-    int ate, atst, aref, afail, abe, a, b, cc, d, fix, pabe, fba, colclamp, fge, need_dst, zte, ztst;
-    uint fogcol;
-    uint z, zbp; int zpsm, zmsk, zread, date, datm, fb16;
-    int prim, iip, fst;   // prim 0: sprite (px0.. are its pixel rectangle), 1: triangle (px0.. its bounding box)
-    float tx0, ty0, tx1, ty1, tx2, ty2, tinv, tu0, tu1, tu2, tv0, tv1, tv2, tq0, tq1, tq2;
-    uint tc0, tc1, tc2, tz0, tz1, tz2; int tf0, tf1, tf2;
-} p;
+#define PRIM_FIELDS \
+    int px0, px1, py0, py1, x0, y0; float u0, v0, du, dv; \
+    uint rgba, fog, fbp, fbw, fpsm, fbmsk; \
+    int scx0, scx1, scy0, scy1; \
+    int tme, tbp, tbw, tpsm, tw, th, tcc, tfx, wms, wmt, minu, maxu, minv, maxv, bilinear, aem, ta0, ta1, csa, cpsm; \
+    int ate, atst, aref, afail, abe, a, b, cc, d, fix, pabe, fba, colclamp, fge, need_dst, zte, ztst; \
+    uint fogcol; \
+    uint z, zbp; int zpsm, zmsk, zread, date, datm, fb16; \
+    int prim, iip, fst; \
+    float tx0, ty0, tx1, ty1, tx2, ty2, tinv, tu0, tu1, tu2, tv0, tv1, tv2, tq0, tq1, tq2; \
+    uint tc0, tc1, tc2, tz0, tz1, tz2; int tf0, tf1, tf2; \
+    int lx0, ly0, lx1, ly1, ln; \
+    uint clutoff;
+// prim 0: sprite (px0.. are its pixel rectangle), 1: triangle (px0.. its bounding box), 2: line from (lx0,ly0) to
+// (lx1,ly1) in ln steps, 3: point at (lx0,ly0) with texel (x0,y0)
+#ifdef BATCH
+// a batch of primitives drawn in order: each invocation owns one pixel and goes through the list
+struct Prim { PRIM_FIELDS };
+layout(std430, binding = 3) readonly buffer Prims { Prim prims[]; };
+layout(push_constant) uniform PC { int n, bx0, by0; } pc;
+Prim p;
+#else
+layout(std140, binding = 3) uniform P { PRIM_FIELDS } p;
+#endif
 layout(std430, binding = 4) readonly buffer Tables { int tab[]; };   // see gsvk_init(): block and column tables
 const int BT8 = 0, CT8 = 32, BT4 = 288, CT4 = 320, BT16 = 832, BT16S = 864, BT16Z = 896, CT16 = 928;
 
@@ -82,8 +94,8 @@ uint texel(int u, int v) {
     if (psm == CT32 || psm == Z32) return read_px(bp, bw, psm, u, v);
     if (psm == CT24 || psm == Z24) { uint c = read_px(bp, bw, psm == CT24 ? CT32 : Z32, u, v) & 0xFFFFFFu; return c | (uint((p.aem != 0 && c == 0u) ? 0 : p.ta0) << 24); }
     if (psm == CT16x || psm == CT16S || psm == Z16 || psm == Z16S) return c16to32(read_px(bp, bw, psm, u, v), p.aem, uint(p.ta0), uint(p.ta1));
-    if (psm == T8 || psm == T8H) return clut[read_px(bp, bw, psm, u, v) & 255u];
-    if (psm == T4 || psm == T4HL || psm == T4HH) return clut[(uint((p.cpsm == CT32 ? (p.csa & 15) : p.csa) * 16) + read_px(bp, bw, psm, u, v)) & 255u];
+    if (psm == T8 || psm == T8H) return clut[p.clutoff + (read_px(bp, bw, psm, u, v) & 255u)];
+    if (psm == T4 || psm == T4HL || psm == T4HH) return clut[p.clutoff + ((uint((p.cpsm == CT32 ? (p.csa & 15) : p.csa) * 16) + read_px(bp, bw, psm, u, v)) & 255u)];
     return read_px(bp, bw, CT32, u, v);
 }
 uint sample_(int u16, int v16) {
@@ -132,6 +144,8 @@ float divx(float a, float b) {
     }
     return q;
 }
+// lroundf(): to nearest, halves away from zero (v - trunc(v) is exact)
+int lround_(float v) { float r = trunc(v); precise float f = v - r; if (abs(f) >= 0.5) r += sign(v); return cvt(r); }
 // pixel() of gs.c, in its order
 void pixel(int x, int y, uint zv, uint col) {
     if (x < p.scx0 || x > p.scx1 || y < p.scy0 || y > p.scy1) return;
@@ -173,9 +187,9 @@ void pixel(int x, int y, uint zv, uint col) {
     }
     if (z_ok && p.zmsk == 0) write_px(p.zbp, p.fbw, p.zpsm, x, y, zv);
 }
-void main() {
-    int x = p.px0 + int(gl_GlobalInvocationID.x), y = p.py0 + int(gl_GlobalInvocationID.y);
-    if (x >= p.px1 || y >= p.py1) return;
+// one pixel of a sprite, triangle or point, at (x, y) inside its rectangle
+void draw_at(int x, int y) {
+    if (p.prim == 3) { pixel(x, y, p.z, shade(p.rgba, p.x0, p.y0, p.fog)); return; }
     if (p.prim == 0) {
         precise float uu = p.u0 + float((x << 4) - p.x0) * p.du;
         precise float vv = p.v0 + float((y << 4) - p.y0) * p.dv;
@@ -209,3 +223,25 @@ void main() {
     precise float ff = float(p.tf0) * w0 + float(p.tf1) * w1 + float(p.tf2) * w2;
     pixel(x, y, zv, shade(col, u16, v16, uint(cvt(ff))));
 }
+#ifdef BATCH
+void main() {
+    int x = pc.bx0 + int(gl_GlobalInvocationID.x), y = pc.by0 + int(gl_GlobalInvocationID.y);
+    for (int i = 0; i < pc.n; i++) {
+        if (x < prims[i].px0 || x >= prims[i].px1 || y < prims[i].py0 || y >= prims[i].py1) continue;
+        p = prims[i];
+        draw_at(x, y);
+    }
+}
+#else
+void main() {
+    int x = p.px0 + int(gl_GlobalInvocationID.x), y = p.py0 + int(gl_GlobalInvocationID.y);
+    if (x >= p.px1 || y >= p.py1) return;
+    if (p.prim == 2) {   // draw_line(): x is the step
+        float t = p.ln != 0 ? divx(float(x), float(p.ln)) : 0.0;
+        precise float fx = float(p.lx1 - p.lx0) * t, fy = float(p.ly1 - p.ly0) * t;
+        pixel(p.lx0 + lround_(fx), p.ly0 + lround_(fy), p.z, shade(p.rgba, 0, 0, p.fog));
+        return;
+    }
+    draw_at(x, y);
+}
+#endif

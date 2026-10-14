@@ -1,0 +1,109 @@
+#version 450
+// GS sprite rasterizer on the GPU: one invocation per pixel of the sprite's rectangle, doing exactly what gs.c's
+// draw_sprite() -> shade() -> pixel() do for the same pixel (integer math as written there; the float texture
+// coordinates use `precise` so that no multiply-add is fused, matching the C code compiled with -ffp-contract=off).
+// Scope (gsvk_sprite_supported() in gs.c): 32-bit frame buffers (CT32/CT24 and Z32/Z24 layouts), no destination
+// alpha test, no Z read or write, textures in the 32-bit layouts (CT32, CT24, T8H/T4HL/T4HH with CLUT, Z32/Z24).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, binding = 0) buffer Vram { uint vm[]; };
+layout(std430, binding = 1) readonly buffer Xoff { uint xoff[]; };   // [0, 32*2048): xoff32, [33*2048, ...): xoff32z
+layout(std430, binding = 2) readonly buffer Clut { uint clut[]; };
+layout(std140, binding = 3) uniform P {
+    int px0, px1, py0, py1, x0, y0; float u0, v0, du, dv;
+    uint rgba, fog, fbp, fbw, fpsm, fbmsk;
+    int scx0, scx1, scy0, scy1;
+    int tme, tbp, tbw, tpsm, tw, th, tcc, tfx, wms, wmt, minu, maxu, minv, maxv, bilinear, aem, ta0, ta1, csa, cpsm;
+    int ate, atst, aref, afail, abe, a, b, cc, d, fix, pabe, fba, colclamp, fge, need_dst, zte, ztst;
+    uint fogcol;
+} p;
+
+const int CT32 = 0x00, CT24 = 0x01, T8H = 0x1b, T4HL = 0x24, T4HH = 0x2c, Z32 = 0x30, Z24 = 0x31;
+
+uint addr32(uint bp, uint bw, int x, int y, uint table) {
+    return (bp * 64u + uint(y >> 5) * bw * 2048u + xoff[table + uint(y & 31) * 2048u + uint(x & 2047)]) & 0xFFFFFu;
+}
+int wrapc(int v, int size, int mode, int mn, int mx) {
+    if (mode == 0) return v & (size - 1);
+    if (mode == 1) return v < 0 ? 0 : v >= size ? size - 1 : v;
+    if (mode == 2) return v < mn ? mn : v > mx ? mx : v;
+    return (v & mn) | mx;
+}
+uint texel(int u, int v) {
+    u = wrapc(u, p.tw, p.wms, p.minu, p.maxu); v = wrapc(v, p.th, p.wmt, p.minv, p.maxv);
+    const uint TZ = 33u * 2048u;
+    if (p.tpsm == CT32) return vm[addr32(uint(p.tbp), uint(p.tbw), u, v, 0u)];
+    if (p.tpsm == CT24) { uint c = vm[addr32(uint(p.tbp), uint(p.tbw), u, v, 0u)] & 0xFFFFFFu; return c | (uint((p.aem != 0 && c == 0u) ? 0 : p.ta0) << 24); }
+    if (p.tpsm == Z32) return vm[addr32(uint(p.tbp), uint(p.tbw), u, v, TZ)];
+    if (p.tpsm == Z24) { uint c = vm[addr32(uint(p.tbp), uint(p.tbw), u, v, TZ)] & 0xFFFFFFu; return c | (uint((p.aem != 0 && c == 0u) ? 0 : p.ta0) << 24); }
+    uint w = vm[addr32(uint(p.tbp), uint(p.tbw), u, v, 0u)];
+    if (p.tpsm == T8H) return clut[w >> 24];
+    uint idx = p.tpsm == T4HL ? (w >> 24) & 15u : w >> 28;
+    return clut[(uint((p.cpsm == 0 ? (p.csa & 15) : p.csa) * 16) + idx) & 255u];
+}
+uint sample_(int u16, int v16) {
+    if (p.bilinear == 0) return texel(u16 >> 4, v16 >> 4);
+    int u = u16 - 8, v = v16 - 8, fu = u & 15, fv = v & 15; u >>= 4; v >>= 4;
+    if (fu == 0 && fv == 0) return texel(u, v);
+    uint c00 = texel(u, v), c10 = fu != 0 ? texel(u + 1, v) : 0u, c01 = fv != 0 ? texel(u, v + 1) : 0u, c11 = (fu != 0 && fv != 0) ? texel(u + 1, v + 1) : 0u;
+    uint w00 = uint((16 - fu) * (16 - fv)), w10 = uint(fu * (16 - fv)), w01 = uint((16 - fu) * fv), w11 = uint(fu * fv);
+    uint rb = ((c00 & 0xFF00FFu) * w00 + (c10 & 0xFF00FFu) * w10 + (c01 & 0xFF00FFu) * w01 + (c11 & 0xFF00FFu) * w11) >> 8;
+    uint ag = (((c00 >> 8) & 0xFF00FFu) * w00 + ((c10 >> 8) & 0xFF00FFu) * w10 + ((c01 >> 8) & 0xFF00FFu) * w01 + ((c11 >> 8) & 0xFF00FFu) * w11) >> 8;
+    return (rb & 0xFF00FFu) | ((ag & 0xFF00FFu) << 8);
+}
+uint shade(uint vcol, int u16, int v16, uint fog) {
+    uint c = vcol;
+    if (p.tme != 0) {
+        uint t = sample_(u16, v16); int ta = int(t >> 24), fa = int(vcol >> 24); uint o = 0u;
+        for (int s = 0; s < 24; s += 8) {
+            int ct = int((t >> s) & 255u), cf = int((vcol >> s) & 255u), v;
+            if (p.tfx == 0) v = ct * cf >> 7; else if (p.tfx == 1) v = ct; else v = (ct * cf >> 7) + fa;
+            o |= uint(v > 255 ? 255 : v) << s;
+        }
+        int a;
+        if (p.tfx == 0) a = p.tcc != 0 ? ta * fa >> 7 : fa; else if (p.tfx == 1) a = p.tcc != 0 ? ta : fa;
+        else if (p.tfx == 2) a = p.tcc != 0 ? ta + fa : fa; else a = p.tcc != 0 ? ta : fa;
+        c = o | (uint(a > 255 ? 255 : a) << 24);
+    }
+    if (p.fge != 0) {
+        uint o = c & 0xFF000000u;
+        for (int s = 0; s < 24; s += 8) o |= ((((c >> s) & 255u) * fog + ((p.fogcol >> s) & 255u) * (255u - fog)) >> 8) << s;
+        c = o;
+    }
+    return c;
+}
+int clamp255(int v, int cc) { return cc != 0 ? (v < 0 ? 0 : v > 255 ? 255 : v) : (v & 255); }
+void main() {
+    int x = p.px0 + int(gl_GlobalInvocationID.x), y = p.py0 + int(gl_GlobalInvocationID.y);
+    if (x >= p.px1 || y >= p.py1) return;
+    precise float uu = p.u0 + float((x << 4) - p.x0) * p.du;
+    precise float vv = p.v0 + float((y << 4) - p.y0) * p.dv;
+    uint col = shade(p.rgba, int(uu), int(vv), p.fog);
+    // pixel()
+    if (x < p.scx0 || x > p.scx1 || y < p.scy0 || y > p.scy1) return;
+    int as_ = int(col >> 24); bool fb_ok = true, rgb_only = false;
+    if (p.ate != 0) {
+        bool pass;
+        if (p.atst == 0) pass = false; else if (p.atst == 1) pass = true; else if (p.atst == 2) pass = as_ < p.aref; else if (p.atst == 3) pass = as_ <= p.aref;
+        else if (p.atst == 4) pass = as_ == p.aref; else if (p.atst == 5) pass = as_ >= p.aref; else if (p.atst == 6) pass = as_ > p.aref; else pass = as_ != p.aref;
+        if (!pass) { if (p.afail == 0) return; if (p.afail == 2) fb_ok = false; if (p.afail == 3) rgb_only = true; }
+    }
+    uint fa = addr32(p.fbp, p.fbw, x, y, (p.fpsm == Z32 || p.fpsm == Z24) ? 33u * 2048u : 0u);
+    uint dst = p.need_dst != 0 ? vm[fa] : 0u;
+    if (p.zte != 0 && p.ztst == 0) return;
+    if (!fb_ok) return;
+    uint o = col;
+    if (p.abe != 0 && !(p.pabe != 0 && (as_ & 0x80) == 0)) {
+        int ad = int(dst >> 24), cf = p.cc == 0 ? as_ : p.cc == 1 ? ad : p.fix;
+        o = 0u;
+        for (int s = 0; s < 24; s += 8) {
+            int cs = int((col >> s) & 255u), cd = int((dst >> s) & 255u);
+            int A = p.a == 0 ? cs : p.a == 1 ? cd : 0, B = p.b == 0 ? cs : p.b == 1 ? cd : 0, D = p.d == 0 ? cs : p.d == 1 ? cd : 0;
+            o |= uint(clamp255(((A - B) * cf >> 7) + D, p.colclamp)) << s;
+        }
+        o |= col & 0xFF000000u;
+    }
+    if (p.fba != 0) o |= 0x80000000u;
+    if (rgb_only) o = (o & 0xFFFFFFu) | (dst & 0xFF000000u);
+    if (p.fpsm == CT24 || p.fpsm == Z24) vm[fa] = (dst & 0xFF000000u) | (((o & ~p.fbmsk) | (dst & p.fbmsk)) & 0xFFFFFFu);
+    else vm[fa] = (o & ~p.fbmsk) | (dst & p.fbmsk);
+}

@@ -1073,6 +1073,44 @@ static void draw_line(const Draw *d, const Vtx *a, const Vtx *b) {
 }
 /* HG_GSDRAW=0 skips rasterizing (sound/logic runs; emulated time is unaffected); HG_GSDRAW=N starts drawing at VBlank N */
 static int gs_nodraw; static long gs_draw_from;
+
+/* HG_GSVKCHECK=FROM[:TO]: every sprite the GPU rasterizer supports, drawn in those VBlanks, is also drawn on the GPU
+   (gsvk.c) from the same local memory, and the two results are compared word for word. Drawing is serial then. */
+#ifdef HAVE_VULKAN
+#include "gsvk.h"
+static long vkchk_from = -2, vkchk_to; static uint64_t vkchk_n, vkchk_exact, vkchk_words, vkchk_skipped;
+static int gsvk_sprite_supported(const Draw *d, const SprGeo *g) {
+    if (d->fb16 || d->date || (d->fpsm != CT32 && d->fpsm != CT24 && d->fpsm != Z32 && d->fpsm != Z24)) return 0;
+    if (d->zte && d->ztst != 0 && (d->zread || !d->zmsk)) return 0;
+    if (d->tme) {
+        switch (d->tex.psm) { case CT32: case CT24: case T8H: case T4HL: case T4HH: case Z32: case Z24: break; default: return 0; }
+        if (sprite_tex_overlaps(d, g->px0, g->px1, g->py0, g->py1, g->x0, g->y0, g->u0, g->v0, g->du, g->dv)) return 0;   /* order-dependent */
+    }
+    return g->px1 > g->px0 && g->py1 > g->py0;
+}
+static void gsvk_check_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
+    SprGeo g; sprite_geo(d, a, b, &g);
+    if (!gsvk_sprite_supported(d, &g)) { vkchk_skipped++; draw_sprite(d, a, b); return; }
+    static uint32_t *before, *gpu; if (!before) { before = malloc(sizeof vm); gpu = malloc(sizeof vm); }
+    memcpy(before, vm, sizeof vm);
+    draw_sprite(d, a, b);
+    const TexState *t = &d->tex;
+    GsVkSprite s = { g.px0, g.px1, g.py0, g.py1, g.x0, g.y0, g.u0, g.v0, g.du, g.dv,
+        b->rgba, (uint32_t)b->f, d->fbp, d->fbw, d->fpsm, d->fbmsk, d->scx0, d->scx1, d->scy0, d->scy1,
+        d->tme, (int)t->tbp, (int)t->tbw, (int)t->psm, (int)t->tw, (int)t->th, (int)t->tcc, (int)t->tfx, t->wms, t->wmt, t->minu, t->maxu, t->minv, t->maxv,
+        t->bilinear, t->aem, t->ta0, t->ta1, (int)t->csa, (int)t->cpsm,
+        d->ate, d->atst, d->aref, d->afail, d->abe, d->a, d->b, d->cc, d->d, d->fix, d->pabe, d->fba, d->colclamp, d->fge, d->need_dst, d->zte, d->ztst, d->fogcol };
+    static const uint32_t noclut[256];
+    if (!gsvk_sprite(&s, d->tme && t->clut ? t->clut : noclut, before, gpu)) return;
+    uint64_t bad = 0; long first = -1;
+    for (uint32_t i = 0; i < (1u << 20); i++) if (gpu[i] != vm[i]) { bad++; if (first < 0) first = i; }
+    vkchk_n++; if (!bad) vkchk_exact++; vkchk_words += bad;
+    static int nlog; if (bad && nlog++ < 40)
+        L("GSVKCHECK: VB %llu sprite fbp %u psm %02x tex %d:%02x bil %d tfx %d abe %d(%d%d%d%d) ate %d:%d fge %d rect %d-%d,%d-%d: %llu words differ, first at %lu (cpu %08x gpu %08x)\n",
+          (unsigned long long)cur_vb, d->fbp, d->fpsm, d->tme, d->tme ? t->psm : 0, t->bilinear, t->tfx, d->abe, d->a, d->b, d->cc, d->d, d->ate, d->atst, d->fge,
+          g.px0, g.px1, g.py0, g.py1, (unsigned long long)bad, first, vm[first], gpu[first]);
+}
+#endif
 static void rasterize(const Draw *d, int prim, const Vtx *w) {
     switch (prim) {
     case 0: pixel(d, w[0].x >> 4, w[0].y >> 4, w[0].z, shade(d, w[0].rgba, w[0].u, w[0].v, w[0].f)); break;
@@ -1082,7 +1120,14 @@ static void rasterize(const Draw *d, int prim, const Vtx *w) {
         if (have_avx2) { draw_triangle_avx2(d, &w[0], &w[1], &w[2]); break; }
 #endif
         draw_triangle(d, &w[0], &w[1], &w[2]); break;
-    case 6: draw_sprite(d, &w[0], &w[1]); break;
+    case 6:
+#ifdef HAVE_VULKAN
+        if (vkchk_from == -2) { const char *e = getenv("HG_GSVKCHECK"); vkchk_from = -1;
+            if (e) { vkchk_from = atol(e); const char *c = strchr(e, ':'); vkchk_to = c ? atol(c + 1) : vkchk_from;
+                     if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0])) vkchk_from = -1; } }
+        if (vkchk_from >= 0 && (long)cur_vb >= vkchk_from && (long)cur_vb <= vkchk_to) { gsvk_check_sprite(d, &w[0], &w[1]); break; }
+#endif
+        draw_sprite(d, &w[0], &w[1]); break;
     }
 }
 
@@ -1220,7 +1265,7 @@ static void gsw_init(void) {
     const char *e = getenv("HG_GSTHREADS"); int n = e ? atoi(e) : host_ncpus() / 2;
     if (!e && n > 8) n = 8;
     if (n > GS_MAXW) n = GS_MAXW;
-    if (getenv("HG_PIXWATCH") || getenv("HG_SPRLOG") || getenv("HG_SPRSTAT")) n = 0;   /* per-pixel debugging: one drawing thread */
+    if (getenv("HG_PIXWATCH") || getenv("HG_SPRLOG") || getenv("HG_SPRSTAT") || getenv("HG_GSVKCHECK")) n = 0;   /* per-pixel debugging: one drawing thread */
     if (n < 1 || !(gsq = calloc(GSQ, sizeof *gsq))) { L("GS: drawing on the GS thread (HG_GSTHREADS=0)\n"); return; }
     gsw_n = n;
     for (int k = 0; k < n; k++) if (pthread_create(&gsw_thr[k], 0, gsw_main, (void *)(intptr_t)k)) { L("GS: worker %d failed to start\n", k); exit(1); }
@@ -1670,6 +1715,10 @@ void gs_init(uint8_t *priv) {
 }
 void gs_dump_stats(void) {
     gs_sync();
+#ifdef HAVE_VULKAN
+    if (vkchk_from >= 0) L("GSVKCHECK: %llu sprites drawn on the GPU too, %llu identical, %llu differing words in all; %llu sprites not supported yet\n",
+        (unsigned long long)vkchk_n, (unsigned long long)vkchk_exact, (unsigned long long)vkchk_words, (unsigned long long)vkchk_skipped);
+#endif
 #if defined(__x86_64__)
     if (gsw_n) { gsw_wait_seq(atomic_load(&gsq_head));
         L("GS workers: %d threads, %llu draws queued, %llu drawn serially (texture or Z on their own frame buffer), %llu waits for the workers; "

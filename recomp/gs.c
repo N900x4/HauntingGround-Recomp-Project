@@ -1127,6 +1127,7 @@ static void gsvk_tables(int32_t *t) {   /* the shader's BT8, CT8, BT4, CT4, BT16
    changes, and before anything else writes local memory (transfers, primitives left to the CPU). */
 static int vkb_mode = -1, vkb_open; static uint32_t vkb_key[5]; static uint64_t vkb_w[8], vkb_r[8];
 static uint64_t vkb_nbatch, vkb_nprim, vkb_badb, vkb_words, vkb_maxn, vkb_curn; static double vkb_ms;
+static uint64_t vk_serial;   /* primitives drawn by one invocation in the CPU's order (their buffers overlap) */
 static int gsvk_batching(void) { if (vkb_mode < 0) vkb_mode = getenv("HG_GSVKBATCH") && atoi(getenv("HG_GSVKBATCH")) > 0; return vkb_mode; }
 static void gsvk_batch_close(void) {
     if (!vkb_open) return;
@@ -1160,7 +1161,11 @@ static void gsvk_batch_prim(const Draw *d, const GsVkSprite *s, int x0, int y0, 
 }
 static void gsvk_check_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
     SprGeo g; sprite_geo(d, a, b, &g);
-    if (!gsvk_sprite_supported(d, &g)) { vkchk_skipped++; gsvk_batch_close(); draw_sprite(d, a, b); return; }
+    int serial = 0;
+    if (!gsvk_sprite_supported(d, &g)) {
+        if (g.px1 <= g.px0 || g.py1 <= g.py0 || !gsvk_fpsm_ok(d)) { vkchk_skipped++; gsvk_batch_close(); draw_sprite(d, a, b); return; }
+        serial = 1; vk_serial++;
+    }
     const TexState *t = &d->tex;
     GsVkSprite s = { g.px0, g.px1, g.py0, g.py1, g.x0, g.y0, g.u0, g.v0, g.du, g.dv,
         b->rgba, (uint32_t)b->f, d->fbp, d->fbw, d->fpsm, d->fbmsk, d->scx0, d->scx1, d->scy0, d->scy1,
@@ -1168,7 +1173,9 @@ static void gsvk_check_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
         t->bilinear, t->aem, t->ta0, t->ta1, (int)t->csa, (int)t->cpsm,
         d->ate, d->atst, d->aref, d->afail, d->abe, d->a, d->b, d->cc, d->d, d->fix, d->pabe, d->fba, d->colclamp, d->fge, d->need_dst, d->zte, d->ztst, d->fogcol,
         b->z, d->zbp, d->zpsm, d->zmsk, d->zread, d->date, d->datm, d->fb16, 0 };
-    if (gsvk_batching()) { gsvk_batch_prim(d, &s, g.px0, g.py0, g.px1 - 1, g.py1 - 1); draw_sprite(d, a, b); return; }
+    s.serial = serial;
+    if (gsvk_batching() && !serial) { gsvk_batch_prim(d, &s, g.px0, g.py0, g.px1 - 1, g.py1 - 1); draw_sprite(d, a, b); return; }
+    gsvk_batch_close();
     static const uint32_t noclut[256];
     const uint32_t *gpu = gsvk_draw(&s, d->tme && t->clut ? t->clut : noclut, vm);
     draw_sprite(d, a, b);
@@ -1194,19 +1201,18 @@ static void gsvk_check_line(const Draw *d, const Vtx *a, const Vtx *b, int point
     int tub = t->tw - 1, tvb = t->th - 1;
     if ((t->minu | t->maxu) > tub) tub = t->minu | t->maxu; if ((t->minv | t->maxv) > tvb) tvb = t->minv | t->maxv;
     if (bx0 < 0) bx0 = 0; if (by0 < 0) by0 = 0;
-    if (!gsvk_fpsm_ok(d) || gsvk_buffers_meet(d, bx0, by0, bx1 > 2047 ? 2047 : bx1, by1 > 2047 ? 2047 : by1, d->tme, 0, 0, tub, tvb, 0)) {
-        vkl_skipped++; gsvk_batch_close(); if (point) draw_point(d, a); else draw_line(d, a, b); return; }
+    if (!gsvk_fpsm_ok(d)) { vkl_skipped++; gsvk_batch_close(); if (point) draw_point(d, a); else draw_line(d, a, b); return; }
+    int serial = gsvk_buffers_meet(d, bx0, by0, bx1 > 2047 ? 2047 : bx1, by1 > 2047 ? 2047 : by1, d->tme, 0, 0, tub, tvb, 0);
+    vk_serial += serial;
     GsVkSprite s = { point ? x0 : 0, point ? x0 + 1 : n + 1, point ? y0 : 0, point ? y0 + 1 : 1, point ? a->u : 0, point ? a->v : 0, 0, 0, 0, 0,
         b->rgba, (uint32_t)b->f, d->fbp, d->fbw, d->fpsm, d->fbmsk, d->scx0, d->scx1, d->scy0, d->scy1,
         d->tme, (int)t->tbp, (int)t->tbw, (int)t->psm, (int)t->tw, (int)t->th, (int)t->tcc, (int)t->tfx, t->wms, t->wmt, t->minu, t->maxu, t->minv, t->maxv,
         t->bilinear, t->aem, t->ta0, t->ta1, (int)t->csa, (int)t->cpsm,
         d->ate, d->atst, d->aref, d->afail, d->abe, d->a, d->b, d->cc, d->d, d->fix, d->pabe, d->fba, d->colclamp, d->fge, d->need_dst, d->zte, d->ztst, d->fogcol,
         b->z, d->zbp, d->zpsm, d->zmsk, d->zread, d->date, d->datm, d->fb16, point ? 3 : 2 };
-    s.lx0 = x0; s.ly0 = y0; s.lx1 = x1; s.ly1 = y1; s.ln = n;
-    if (gsvk_batching()) {
-        if (point) { gsvk_batch_prim(d, &s, x0, y0, x0, y0); draw_point(d, a); return; }
-        gsvk_batch_close();   /* lines go one at a time */
-    }
+    s.lx0 = x0; s.ly0 = y0; s.lx1 = x1; s.ly1 = y1; s.ln = n; s.serial = serial;
+    if (gsvk_batching() && point && !serial) { gsvk_batch_prim(d, &s, x0, y0, x0, y0); draw_point(d, a); return; }
+    gsvk_batch_close();   /* lines go one at a time */
     static const uint32_t noclut[256];
     const uint32_t *gpu = gsvk_draw(&s, d->tme && t->clut ? t->clut : noclut, vm);
     if (point) draw_point(d, a); else draw_line(d, a, b);
@@ -1247,12 +1253,9 @@ static void gsvk_check_triangle(const Draw *d, const Vtx *v0, const Vtx *v1, con
                 tua = a; tub = b; tva = c; tvb = e; } } }
     int ft_same = d->tme && t->tbp == d->fbp && t->tbw == d->fbw && t->psm == d->fpsm;   /* same buffer: exact rectangles */
     int ft_meet = ft_same && tua <= maxx && minx <= tub && tva <= maxy && miny <= tvb;
-    if (!gsvk_fpsm_ok(d) || ft_meet || gsvk_buffers_meet(d, minx, miny, maxx, maxy, d->tme, tua, tva, tub, tvb, ft_same)) {
-        vkt_skipped++; gsvk_batch_close(); draw_triangle_cpu(d, v0, v1, v2);
-        static uint64_t why[3]; why[!gsvk_fpsm_ok(d) ? 0 : d->tme && d->tex.tbp == d->fbp ? 1 : 2]++;
-        if (vkt_skipped % 200 == 0) L("GSVK: triangles not supported: frame format %llu, texture is the frame %llu, buffers share pages %llu\n",
-            (unsigned long long)why[0], (unsigned long long)why[1], (unsigned long long)why[2]);
-        return; }
+    if (!gsvk_fpsm_ok(d)) { vkt_skipped++; gsvk_batch_close(); draw_triangle_cpu(d, v0, v1, v2); return; }
+    int serial = ft_meet || gsvk_buffers_meet(d, minx, miny, maxx, maxy, d->tme, tua, tva, tub, tvb, ft_same);
+    vk_serial += serial;
     GsVkSprite s = { minx, maxx + 1, miny, maxy + 1, 0, 0, 0, 0, 0, 0,
         0, 0, d->fbp, d->fbw, d->fpsm, d->fbmsk, d->scx0, d->scx1, d->scy0, d->scy1,
         d->tme, (int)t->tbp, (int)t->tbw, (int)t->psm, (int)t->tw, (int)t->th, (int)t->tcc, (int)t->tfx, t->wms, t->wmt, t->minu, t->maxu, t->minv, t->maxv,
@@ -1261,7 +1264,9 @@ static void gsvk_check_triangle(const Draw *d, const Vtx *v0, const Vtx *v1, con
         0, d->zbp, d->zpsm, d->zmsk, d->zread, d->date, d->datm, d->fb16,
         1, d->iip, d->fst, x0, y0, x1, y1, x2, y2, 1.0f / area, ua[0], ua[1], ua[2], va[0], va[1], va[2], qa[0], qa[1], qa[2],
         v0->rgba, v1->rgba, v2->rgba, v0->z, v1->z, v2->z, v0->f, v1->f, v2->f };
-    if (gsvk_batching()) { gsvk_batch_prim(d, &s, minx, miny, maxx, maxy); draw_triangle_cpu(d, v0, v1, v2); return; }
+    s.serial = serial;
+    if (gsvk_batching() && !serial) { gsvk_batch_prim(d, &s, minx, miny, maxx, maxy); draw_triangle_cpu(d, v0, v1, v2); return; }
+    gsvk_batch_close();
     static const uint32_t noclut[256];
     const uint32_t *gpu = gsvk_draw(&s, d->tme && t->clut ? t->clut : noclut, vm);
     draw_triangle_cpu(d, v0, v1, v2);
@@ -1915,6 +1920,7 @@ void gs_dump_stats(void) {
     if (vkchk_from >= 0) L("GSVKCHECK: %llu sprites drawn on the GPU too, %llu identical, %llu differing words in all; %llu sprites not supported yet\n",
         (unsigned long long)vkchk_n, (unsigned long long)vkchk_exact, (unsigned long long)vkchk_words, (unsigned long long)vkchk_skipped);
     if (vkb_open) gsvk_batch_close();
+    if (vkchk_from >= 0 && vk_serial) L("GSVKCHECK: %llu primitives read what they write: drawn on the GPU in the CPU's order, one invocation each (counted below)\n", (unsigned long long)vk_serial);
     if (vkchk_from >= 0 && vkb_nbatch) L("GSVKBATCH: %llu primitives in %llu batches (largest %llu), %llu batches differ (%llu words); GPU %.1f ms in all (%.3f ms per batch)\n",
         (unsigned long long)vkb_nprim, (unsigned long long)vkb_nbatch, (unsigned long long)vkb_maxn, (unsigned long long)vkb_badb, (unsigned long long)vkb_words,
         vkb_ms, vkb_ms / (double)vkb_nbatch);

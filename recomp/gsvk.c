@@ -204,7 +204,8 @@ const uint32_t *gsvk_draw(const GsVkSprite *s, const uint32_t *clut, const uint3
     rec_begin();
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &dset, 0, 0);
-    vkCmdDispatch(cmd, (uint32_t)(s->px1 - s->px0 + 7) / 8, (uint32_t)(s->py1 - s->py0 + 7) / 8, 1);
+    if (s->serial) vkCmdDispatch(cmd, 1, 1, 1);
+    else vkCmdDispatch(cmd, (uint32_t)(s->px1 - s->px0 + 7) / 8, (uint32_t)(s->py1 - s->py0 + 7) / 8, 1);
     if (!submit_wait(0)) return 0;
     return g;
 }

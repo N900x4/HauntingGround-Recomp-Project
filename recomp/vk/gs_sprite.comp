@@ -21,6 +21,7 @@ layout(std430, binding = 2) readonly buffer Clut { uint clut[]; };
     float tx0, ty0, tx1, ty1, tx2, ty2, tinv, tu0, tu1, tu2, tv0, tv1, tv2, tq0, tq1, tq2; \
     uint tc0, tc1, tc2, tz0, tz1, tz2; int tf0, tf1, tf2; \
     int lx0, ly0, lx1, ly1, ln; \
+    int serial; \
     uint clutoff;
 // prim 0: sprite (px0.. are its pixel rectangle), 1: triangle (px0.. its bounding box), 2: line from (lx0,ly0) to
 // (lx1,ly1) in ln steps, 3: point at (lx0,ly0) with texel (x0,y0)
@@ -253,15 +254,21 @@ void main() {
     }
 }
 #else
+void line_step(int i) {   // draw_line()
+    float t = p.ln != 0 ? divx(float(i), float(p.ln)) : 0.0;
+    precise float fx = float(p.lx1 - p.lx0) * t, fy = float(p.ly1 - p.ly0) * t;
+    pixel(p.lx0 + lround_(fx), p.ly0 + lround_(fy), p.z, shade(p.rgba, 0, 0, p.fog));
+}
 void main() {
-    int x = p.px0 + int(gl_GlobalInvocationID.x), y = p.py0 + int(gl_GlobalInvocationID.y);
-    if (x >= p.px1 || y >= p.py1) return;
-    if (p.prim == 2) {   // draw_line(): x is the step
-        float t = p.ln != 0 ? divx(float(x), float(p.ln)) : 0.0;
-        precise float fx = float(p.lx1 - p.lx0) * t, fy = float(p.ly1 - p.ly0) * t;
-        pixel(p.lx0 + lround_(fx), p.ly0 + lround_(fy), p.z, shade(p.rgba, 0, 0, p.fog));
+    if (p.serial != 0) {   // primitives that read what they write: the CPU's order, rows then columns
+        if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u) return;
+        if (p.prim == 2) { for (int i = 0; i <= p.ln; i++) line_step(i); return; }
+        for (int y = p.py0; y < p.py1; y++) for (int x = p.px0; x < p.px1; x++) draw_at(x, y);
         return;
     }
+    int x = p.px0 + int(gl_GlobalInvocationID.x), y = p.py0 + int(gl_GlobalInvocationID.y);
+    if (x >= p.px1 || y >= p.py1) return;
+    if (p.prim == 2) { line_step(x); return; }   // x is the step
     draw_at(x, y);
 }
 #endif

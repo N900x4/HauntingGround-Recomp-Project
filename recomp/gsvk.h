@@ -15,6 +15,7 @@ typedef struct {
     float tx0, ty0, tx1, ty1, tx2, ty2, tinv, tu0, tu1, tu2, tv0, tv1, tv2, tq0, tq1, tq2;
     uint32_t tc0, tc1, tc2, tz0, tz1, tz2; int32_t tf0, tf1, tf2;
     int32_t lx0, ly0, lx1, ly1, ln;   /* 2 line, 3 point (texel in x0, y0) */
+    int32_t serial;                   /* 1: one invocation draws every pixel in the CPU's order (buffers overlap) */
     uint32_t clutoff;                 /* set by gsvk_batch_add() */
 } GsVkSprite;
 /* tables: the 8-, 4- and 16-bit block and column tables, laid out as the shader's BT8 ... CT16 offsets */

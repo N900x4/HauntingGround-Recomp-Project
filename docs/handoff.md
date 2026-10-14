@@ -1,4 +1,4 @@
-# Handoff: where the project stands (2026-10-13)
+# Handoff: where the project stands (2026-10-15)
 
 Read this first when resuming. It gives the state, the rules and the next steps. Details are in the other docs.
 
@@ -19,6 +19,26 @@ Castle Suite. The GS thread is the limit.
 | Reverb | Unverified: the game sets the depth to 0 at stage init, and no reached room changes it | `exploration-notes.md` |
 
 Last commit before this doc: `bf60152`.
+
+### Night 2026-10-15 (unattended): roadmap Phases 4 and 5
+
+- **Phase 4, VIF1 unpack fast path (`341113c`).** `unpack_fast()` in `dmac.c` covers every unpack except
+  `vl == 3` and `wl > cl`; DIRECT, MPG, UNPACK and STROW payloads go over in bulk. `HG_UNPACKCHECK=1` compares it
+  with the old generic routine: 76.7M unpacks, 0 mismatches. Frames identical (`hashA`, Castle Suite 742/742).
+  EE thread in stage 1: 11.20 → 9.8 ms per VBlank (−12.3 %, `tools/verify/abba.py`, drift 0.04 ms).
+- **Phase 4, not done:** VU1 programs compiled as a whole with timing worked out at build time, and VU1 on its own
+  thread. The VU1 code is now about 64 % of the EE thread, so this is the next CPU win; it needs a static timing
+  analysis of the microprograms first.
+- **Phase 5, GPU renderer: a bit-exact Vulkan compute GS, and a live mode** (`docs/gpu-renderer.md`).
+  - Every primitive type and format is drawn on the GPU exactly as `gs.c` draws it, checked word for word over the
+    4 MB local memory (`HG_GSVKCHECK`): 742,414 primitives in menus, stage 1, Castle Suite and `ST_020`, 0 differ.
+  - `HG_GSVK=1` draws the game with the GPU only. Frames to VB 4000: 702/702 identical to `hashA`. Per VBlank:
+    stage 1 9.47 ms against 10.3–10.5 with the software GS, Castle Suite 8.42 against 8.63; the GS thread is now
+    15–29 % busy, and the EE thread is the limit. `play.bat` takes `set HG_GSVK=1` (untried in a window).
+  - Packages installed with the user's approval: MSYS2 `mingw-w64-ucrt-x86_64-vulkan-devel` and `...-glslang`.
+  - Do not combine `HG_HOSTPROF=1` with `HG_GSVK`/`HG_GSVKCHECK`: such a run hung during boot.
+- **Not done: upscaling.** The plan (super-sampled frame buffers next to the exact native memory) is in
+  `docs/gpu-renderer.md`.
 
 ### Night 2026-10-14/15 (unattended): playtest 1 findings, Castle Suite, frame timing, crash reports
 
@@ -214,11 +234,20 @@ Since 2026-10-13 the project lives on the user's Windows 11 PC (Ryzen 7 9800X3D,
 
 ## Waiting on the user
 
-- A decision on whether to parallelize the GS rasterizer next (see the Windows session above) or to do something else
-  first.
+- The door specks in `ST_020` need PCSX2 in that room: the user saves a state there (about 2 minutes), allows us to
+  use their own PCSX2 states, or formats a folder memory card in PCSX2's GUI so our save can be copied in.
+- A playtest with `set HG_GSVK=1` (GPU renderer) and without, to confirm the window path and pacing.
 - The user's playtest (controls, live sound, saving from our build).
 
 ## Next steps, in order
+
+GPU and speed (the roadmap's Phases 4 to 6; details in `docs/gpu-renderer.md`):
+
+- GPU renderer: present from video memory instead of reading each frame back, double-buffer the command buffer,
+  then super-sampled frame buffers for 4K.
+- VU1: whole-program compilation with build-time timing, then its own thread (the EE thread limit).
+
+Accuracy and play (from before):
 
 1. **PCSX2 reference comparison.** Boot the same disc in PCSX2 with the BIOS, then capture frames and audio at the
    same points (title, first room, `ST_013`). Questions to answer:

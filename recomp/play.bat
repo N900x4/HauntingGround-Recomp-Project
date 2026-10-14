@@ -7,6 +7,7 @@ rem Options are environment variables, set before starting, e.g.:
 rem   set HG_SCALE=3                     window scale (default 2)
 rem   set HG_WAV=D:\ps2-work\session.wav  record the game's sound
 rem   set HG_MOVIES=skip                 skip the movies
+rem   set HG_GSVK=1                      draw with the GPU (Vulkan; new, same picture as the software renderer)
 cd /d "%~dp0"
 set "PATH=%~dp0;C:\msys64\ucrt64\bin;%PATH%"
 if not defined HG_PADPLAY if not defined HG_PADREC set HG_PADREC=auto

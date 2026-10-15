@@ -386,3 +386,9 @@ The user answered the questions in section 4 as follows; these decisions bind th
 - **Release:** the user wants a **public 0.1 build soon after the batch**. A release-readiness step (legal shape of
   the distribution, saving verified, known-issues list, README/licence, crash reports, requirements) goes between
   the batch and textures; its questions are open (see the conversation of 2026-10-15).
+- **0.1 release decisions (user, 2026-10-15):** distribution as a **ready-made executable** (accessibility first;
+  the user accepts that it contains the recompiled game code; game data still never shipped: players supply their
+  own disc image); hosting on **GitHub** (the user creates the repository and pushes, or says so explicitly; nothing
+  is pushed before that); **Reddit posts** to recruit playtesters (drafted for the user, who posts them); scope =
+  the current batch + saving verified + a known-issues list. The repository itself still never contains game-derived
+  data (generated C, ISO contents); the executable is a release asset only.

@@ -1144,6 +1144,24 @@ static void gsvk_tables(int32_t *t) {   /* the shader's BT8, CT8, BT4, CT4, BT16
    display) and tracks 8 KB pages: written by the GPU since the CPU last read them back (pg_gpu), or written by the
    CPU since they last went up (pg_cpu). A page is never in both. */
 static long vkchk_from = -2, vkchk_to; static int vkb_mode;
+/* HG_GSVK_SCALE=N (2, 4 or 8; with HG_GSVK=1): upscaling, first stage. Besides the exact local memory (copy 0) the
+   GPU keeps N*N more copies; copy 1 + i + j*N is drawn with every primitive moved by (-dx_i, -dy_j), so its pixel
+   (x, y) shows the scene at (x + dx_i, y + dy_j): dx_i = ((2i + 1) * 8 / N - 8) / 16 pixel, a whole number of the
+   GS's 1/16 units. Interleaved, the copies make an N times larger picture (HG_FRAMES_HR=dir dumps it). Uploads go to
+   every copy, everything the CPU reads comes from copy 0, which stays exact. Hazard analysis is done on copy 0's
+   geometry only: the other copies are for the picture. */
+static int vk_scale = 1, vk_ncopy = 1;
+/* Pages drawn by the GPU since the CPU last wrote them (render targets). In copy k a render target's pixel t holds
+   the scene at t + offset, so a primitive that textures from one reads, in copy k, at its coordinates minus the
+   offset (in texels: the effect passes copy and filter at the same or a simple scale). Without this the full-screen
+   effects mix a different set of neighbours in every copy, which shows as banding. */
+static uint64_t pg_rt[8];
+static int gsvk_tex_is_rt(const Draw *d) {
+    if (!d->tme || vk_ncopy < 2) return 0;
+    uint64_t tp[8] = {0}; mark_pages(tp, d->tex.tbp, d->tex.tbw, d->tex.psm, 0, 0, (int)d->tex.tw - 1, (int)d->tex.th - 1);
+    return pages_meet(tp, pg_rt);
+}
+static int vk_off(int i) { return (2 * i + 1) * 8 / vk_scale - 8; }   /* offset of sub-pixel column/row i, 1/16 pixel */
 static uint64_t vk_n[3], vk_alone[3], vk_exact[3], vk_words[3], vk_cpu[3];   /* sprites, triangles, lines and points */
 static uint64_t vk_serial;   /* primitives drawn by one invocation in the CPU's order (their buffers overlap) */
 static uint64_t vk_selfpix;  /* triangles that texture from their own pixel (batched) */
@@ -1159,11 +1177,13 @@ static void gsvk_setup(void) {
     const char *e = getenv("HG_GSVKCHECK"), *lv = getenv("HG_GSVK");
     vk_live = lv && atoi(lv) > 0;
     vkb_mode = getenv("HG_GSVKBATCH") && atoi(getenv("HG_GSVKBATCH")) > 0;
+    if (vk_live && getenv("HG_GSVK_SCALE")) { int n = atoi(getenv("HG_GSVK_SCALE")); if (n == 2 || n == 4 || n == 8) { vk_scale = n; vk_ncopy = 1 + n * n; } }
     if (e) { vkchk_from = atol(e); const char *c = strchr(e, ':'); vkchk_to = c ? atol(c + 1) : vkchk_from;
              if (vk_live) { L("GSVK: HG_GSVKCHECK given: checking, not live\n"); vk_live = 0; } }
     if (vkchk_from < 0 && !vk_live) return;
     static int32_t tabs[GSVK_TABLES]; gsvk_tables(tabs);
-    if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0], tabs)) { vkchk_from = -1; vk_live = 0; return; }
+    if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0], tabs, vk_ncopy)) { vkchk_from = -1; vk_live = 0; return; }
+    if (vk_ncopy > 1) L("GSVK: upscaling x%d: %d copies of local memory\n", vk_scale, vk_ncopy);
     if (vk_live) { memcpy(pg_cpu, all_pages, sizeof pg_cpu); vkb_mode = 1; L("GSVK: live, the GPU draws everything\n"); }
 }
 static int gsvk_checking(void) { gsvk_setup(); return vkchk_from >= 0 && (long)cur_vb >= vkchk_from && (long)cur_vb <= vkchk_to; }
@@ -1209,7 +1229,7 @@ static void gsvk_live_need(const uint64_t pages[8]) {
     gsvk_batch_close(); gsvk_download(m, vm); vk_downloads++;
     for (int i = 0; i < 8; i++) { pg_gpu[i] &= ~m[i]; vk_dl_pages += (uint64_t)__builtin_popcountll(m[i]); }
 }
-static void gsvk_live_wrote(const uint64_t pages[8]) { if (vk_live) for (int i = 0; i < 8; i++) pg_cpu[i] |= pages[i]; }
+static void gsvk_live_wrote(const uint64_t pages[8]) { if (vk_live) for (int i = 0; i < 8; i++) { pg_cpu[i] |= pages[i]; pg_rt[i] &= ~pages[i]; } }
 /* image data is about to be written into local memory (pages xfer_pg, set when the transfer starts) */
 static uint64_t xfer_pg[8];
 static void gsvk_xfer_touch(void) {
@@ -1247,16 +1267,22 @@ static int gsvk_take(const Draw *d, const GsVkSprite *s, int x0, int y0, int x1,
             vkb_open = 1; vkb_curn = 0; memcpy(vkb_key, key, sizeof key); memset(vkb_w, 0, sizeof vkb_w); memset(vkb_r, 0, sizeof vkb_r);
         }
         gsvk_prim(s, cl, 0);
-        for (int i = 0; i < 8; i++) { vkb_w[i] |= w[i]; vkb_r[i] |= r[i]; if (vk_live) pg_gpu[i] |= w[i]; }
+        for (int i = 0; i < 8; i++) { vkb_w[i] |= w[i]; vkb_r[i] |= r[i]; if (vk_live) { pg_gpu[i] |= w[i]; pg_rt[i] |= w[i]; } }
         vkb_nprim++; vkb_curn++; vk_n[kind]++;
         return vk_live;
     }
     gsvk_batch_close();
     vk_n[kind]++;
-    if (vk_live) { gsvk_prim(s, cl, 1); for (int i = 0; i < 8; i++) pg_gpu[i] |= w[i]; return 1; }
+    if (vk_live) { gsvk_prim(s, cl, 1); for (int i = 0; i < 8; i++) { pg_gpu[i] |= w[i]; pg_rt[i] |= w[i]; } return 1; }
     gsvk_check_begin(vm); gsvk_prim(s, cl, 1); vk_alone[kind]++;
     vk_pending = kind; vk_box[0] = x0; vk_box[1] = x1; vk_box[2] = y0; vk_box[3] = y1;
     return 0;
+}
+/* a sub-pixel copy of the primitive just taken: right after it, in the same batch (or alone, as it was) */
+static void gsvk_copy_prim(const Draw *d, const GsVkSprite *s, int alone) {
+    static const uint32_t noclut[256];
+    gsvk_prim(s, d->tme && d->tex.clut ? d->tex.clut : noclut, alone);
+    vkb_nprim++;
 }
 static void gsvk_after_cpu(const Draw *d) {
     if (vk_pending < 0) return;
@@ -1291,7 +1317,21 @@ static void gsvk_sprite_prim(const Draw *d, const Vtx *a, const Vtx *b) {
     GsVkSprite s = gsvk_base(d);
     s.px0 = g.px0; s.px1 = g.px1; s.py0 = g.py0; s.py1 = g.py1; s.x0 = g.x0; s.y0 = g.y0; s.u0 = g.u0; s.v0 = g.v0; s.du = g.du; s.dv = g.dv;
     s.rgba = b->rgba; s.fog = (uint32_t)b->f; s.z = b->z; s.prim = 0; s.serial = serial;
-    if (gsvk_take(d, &s, g.px0, g.py0, g.px1 - 1, g.py1 - 1, serial, 0)) return;
+    if (gsvk_take(d, &s, g.px0, g.py0, g.px1 - 1, g.py1 - 1, serial, 0)) {
+        const int rt = gsvk_tex_is_rt(d);
+        for (int k = 1; k < vk_ncopy; k++) {   /* the sub-pixel copies */
+            Vtx a2 = *a, b2 = *b; const int ox = vk_off((k - 1) % vk_scale), oy = vk_off((k - 1) / vk_scale);
+            a2.x -= ox; b2.x -= ox; a2.y -= oy; b2.y -= oy;
+            SprGeo g2; sprite_geo(d, &a2, &b2, &g2);
+            if (g2.px1 <= g2.px0 || g2.py1 <= g2.py0) continue;
+            GsVkSprite s2 = s;
+            s2.px0 = g2.px0; s2.px1 = g2.px1; s2.py0 = g2.py0; s2.py1 = g2.py1; s2.x0 = g2.x0; s2.y0 = g2.y0; s2.u0 = g2.u0; s2.v0 = g2.v0; s2.du = g2.du; s2.dv = g2.dv;
+            if (rt) { s2.u0 -= ox; s2.v0 -= oy; }
+            s2.mbase = (uint32_t)k << 20;
+            gsvk_copy_prim(d, &s2, serial);
+        }
+        return;
+    }
     draw_sprite(d, a, b);
     gsvk_after_cpu(d);
 }
@@ -1312,7 +1352,18 @@ static void gsvk_line_prim(const Draw *d, const Vtx *a, const Vtx *b, int point)
     s.x0 = point ? a->u : 0; s.y0 = point ? a->v : 0;
     s.rgba = b->rgba; s.fog = (uint32_t)b->f; s.z = b->z; s.prim = point ? 3 : 2; s.serial = serial;
     s.lx0 = x0; s.ly0 = y0; s.lx1 = x1; s.ly1 = y1; s.ln = n;
-    if (gsvk_take(d, &s, bx0, by0, bx1, by1, !point || serial, 2)) return;   /* lines go alone: their invocations are steps */
+    if (gsvk_take(d, &s, bx0, by0, bx1, by1, !point || serial, 2)) {   /* lines go alone: their invocations are steps */
+        for (int k = 1; k < vk_ncopy; k++) {
+            const int ox = vk_off((k - 1) % vk_scale), oy = vk_off((k - 1) / vk_scale);
+            GsVkSprite s2 = s;
+            s2.lx0 = (a->x - ox) >> 4; s2.ly0 = (a->y - oy) >> 4; s2.lx1 = point ? s2.lx0 : (b->x - ox) >> 4; s2.ly1 = point ? s2.ly0 : (b->y - oy) >> 4;
+            const int n2 = abs(s2.lx1 - s2.lx0) > abs(s2.ly1 - s2.ly0) ? abs(s2.lx1 - s2.lx0) : abs(s2.ly1 - s2.ly0);
+            s2.ln = n2; s2.px0 = point ? s2.lx0 : 0; s2.px1 = point ? s2.lx0 + 1 : n2 + 1; s2.py0 = point ? s2.ly0 : 0; s2.py1 = point ? s2.ly0 + 1 : 1;
+            s2.mbase = (uint32_t)k << 20;
+            gsvk_copy_prim(d, &s2, !point || serial);
+        }
+        return;
+    }
     if (point) draw_point(d, a); else draw_line(d, a, b);
     gsvk_after_cpu(d);
 }
@@ -1370,7 +1421,26 @@ static void gsvk_triangle_prim(const Draw *d, const Vtx *v0, const Vtx *v1, cons
     s.tx0 = x0; s.ty0 = y0; s.tx1 = x1; s.ty1 = y1; s.tx2 = x2; s.ty2 = y2; s.tinv = 1.0f / area;
     s.tu0 = ua[0]; s.tu1 = ua[1]; s.tu2 = ua[2]; s.tv0 = va[0]; s.tv1 = va[1]; s.tv2 = va[2]; s.tq0 = qa[0]; s.tq1 = qa[1]; s.tq2 = qa[2];
     s.tc0 = v0->rgba; s.tc1 = v1->rgba; s.tc2 = v2->rgba; s.tz0 = v0->z; s.tz1 = v1->z; s.tz2 = v2->z; s.tf0 = v0->f; s.tf1 = v1->f; s.tf2 = v2->f;
-    if (gsvk_take(d, &s, minx, miny, maxx, maxy, serial, 1)) return;
+    if (gsvk_take(d, &s, minx, miny, maxx, maxy, serial, 1)) {
+        const int rt = gsvk_tex_is_rt(d);
+        for (int k = 1; k < vk_ncopy; k++) {
+            const float ox = vk_off((k - 1) % vk_scale) / 16.0f, oy = vk_off((k - 1) / vk_scale) / 16.0f;
+            GsVkSprite s2 = s;
+            s2.tx0 = x0 - ox; s2.tx1 = x1 - ox; s2.tx2 = x2 - ox; s2.ty0 = y0 - oy; s2.ty1 = y1 - oy; s2.ty2 = y2 - oy;
+            int nx0 = (int)floorf(fminf(s2.tx0, fminf(s2.tx1, s2.tx2))), nx1 = (int)ceilf(fmaxf(s2.tx0, fmaxf(s2.tx1, s2.tx2)));
+            int ny0 = (int)floorf(fminf(s2.ty0, fminf(s2.ty1, s2.ty2))), ny1 = (int)ceilf(fmaxf(s2.ty0, fmaxf(s2.ty1, s2.ty2)));
+            if (nx0 < d->scx0) nx0 = d->scx0; if (nx1 > d->scx1) nx1 = d->scx1;
+            if (ny0 < d->scy0) ny0 = d->scy0; if (ny1 > d->scy1) ny1 = d->scy1;
+            if (nx0 > nx1 || ny0 > ny1) continue;
+            s2.px0 = nx0; s2.px1 = nx1 + 1; s2.py0 = ny0; s2.py1 = ny1 + 1; s2.mbase = (uint32_t)k << 20;
+            if (rt) {   /* texture coordinates are 1/16 texel, times q */
+                s2.tu0 -= ox * 16 * s2.tq0; s2.tu1 -= ox * 16 * s2.tq1; s2.tu2 -= ox * 16 * s2.tq2;
+                s2.tv0 -= oy * 16 * s2.tq0; s2.tv1 -= oy * 16 * s2.tq1; s2.tv2 -= oy * 16 * s2.tq2;
+            }
+            gsvk_copy_prim(d, &s2, serial);
+        }
+        return;
+    }
     draw_triangle_cpu(d, v0, v1, v2);
     gsvk_after_cpu(d);
 }
@@ -1857,7 +1927,38 @@ static int display_from(const uint8_t *priv, uint32_t *out, int maxw, int maxh, 
     }
     *pw = w; *ph = h; return 1;
 }
+#ifdef HAVE_VULKAN
+static int display_from(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph);
+/* HG_FRAMES_HR=dir with HG_GSVK_SCALE: the upscaled picture, interleaved from the sub-pixel copies */
+static void dump_frame_hr(uint64_t vb, const uint8_t *priv) {
+    const char *dir = getenv("HG_FRAMES_HR"); if (!dir || vk_ncopy < 2) return;
+    static uint32_t *save, *img, *hr; const int N = vk_scale;
+    if (!save) { save = malloc(sizeof vm); img = malloc(1024 * 1024 * 4); hr = malloc((size_t)1024 * 1024 * 4 * 64); }
+    memcpy(save, vm, sizeof vm);
+    int w = 0, h = 0, ok = 1;
+    for (int k = 1; k < vk_ncopy && ok; k++) {
+        gsvk_download_copy(k, all_pages, vm);
+        int w2, h2; ok = display_from(priv, img, 1024, 1024, &w2, &h2); if (!ok) break;
+        w = w2; h = h2; const int i = (k - 1) % N, j = (k - 1) / N;
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) hr[(size_t)(y * N + j) * w * N + x * N + i] = img[y * w + x];
+    }
+    memcpy(vm, save, sizeof vm);
+    if (!ok) return;
+    char path[1024]; snprintf(path, sizeof path, "%s/hr_%06llu.ppm", dir, (unsigned long long)vb);
+    FILE *f = fopen(path, "wb"); if (!f) return;
+    fprintf(f, "P6\n%d %d\n255\n", w * N, h * N);
+    uint8_t *row = malloc((size_t)w * N * 3);
+    for (int y = 0; y < h * N; y++) {
+        for (int x = 0; x < w * N; x++) { uint32_t c = hr[(size_t)y * w * N + x]; row[x * 3] = c; row[x * 3 + 1] = c >> 8; row[x * 3 + 2] = c >> 16; }
+        fwrite(row, 1, (size_t)w * N * 3, f);
+    }
+    free(row); fclose(f);
+}
+#endif
 static void dump_frame(uint64_t vb, const uint8_t *priv) {
+#ifdef HAVE_VULKAN
+    dump_frame_hr(vb, priv);
+#endif
     const char *dir = getenv("HG_FRAMES"); if (!dir) return;
     static uint32_t buf[1024 * 1024]; int w, h;
     if (!display_from(priv, buf, 1024, 1024, &w, &h)) return;

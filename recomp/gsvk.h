@@ -17,18 +17,21 @@ typedef struct {
     int32_t lx0, ly0, lx1, ly1, ln;   /* 2 line, 3 point (texel in x0, y0) */
     int32_t serial;                   /* 1: one invocation draws every pixel in the CPU's order (buffers overlap) */
     uint32_t clutoff;                 /* set by gsvk_prim() */
+    uint32_t mbase;                   /* copy of local memory drawn into: copy k at k << 20 (0: the exact one) */
 } GsVkSprite;
 /* tables: the 8-, 4- and 16-bit block and column tables, laid out as the shader's BT8 ... CT16 offsets */
 #define GSVK_TABLES 1056
-int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *tables);   /* 0: no Vulkan */
+/* ncopies: 1, or 1 + N*N with the sub-pixel copies for upscaling (gs.c, HG_GSVK_SCALE) */
+int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *tables, int ncopies);   /* 0: no Vulkan */
 /* recording, in stream order. Primitives that are not `alone` collect into a batch that one dispatch draws, each
    invocation owning a pixel and going through the list in order: only primitives without order effects between
    their pixels may share a batch, and gsvk_break() must end it where a later one depends on an earlier one's
    pixels elsewhere (gs.c decides). */
 void gsvk_prim(const GsVkSprite *s, const uint32_t *clut, int alone);
 void gsvk_break(void);
-void gsvk_upload(uint32_t word, uint32_t nwords, const uint32_t *src);   /* CPU data into local memory */
+void gsvk_upload(uint32_t word, uint32_t nwords, const uint32_t *src);   /* CPU data into local memory (every copy) */
 void gsvk_download(const uint64_t pages[8], uint32_t *dst);              /* those 8 KB pages to dst (waits) */
+void gsvk_download_copy(int k, const uint64_t pages[8], uint32_t *dst);  /* the same from copy k */
 void gsvk_finish(void);                                                    /* submit and wait */
 void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms);   /* wait: wall ms in submit+wait */
 /* checking: the GPU's memory is set to `now`, then primitives are recorded, then the GPU's memory comes back */

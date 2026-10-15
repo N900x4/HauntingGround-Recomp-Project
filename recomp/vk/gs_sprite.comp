@@ -22,10 +22,12 @@ layout(std430, binding = 2) readonly buffer Clut { uint clut[]; };
     uint tc0, tc1, tc2, tz0, tz1, tz2; int tf0, tf1, tf2; \
     int lx0, ly0, lx1, ly1, ln; \
     int serial; \
-    uint clutoff;
+    uint clutoff; \
+    uint mbase;
 // prim 0: sprite (px0.. are its pixel rectangle), 1: triangle (px0.. its bounding box), 2: line from (lx0,ly0) to
 // (lx1,ly1) in ln steps, 3: point at (lx0,ly0) with texel (x0,y0)
-// the primitives, in a ring the CPU fills; push constants: a batch's count, origin and first primitive, or (one
+// mbase: the word where the copy of local memory this primitive draws into starts (0: the exact one; others:
+// sub-pixel offset copies for upscaling, HG_GSVK_SCALE). The primitives, in a ring the CPU fills; push constants: a batch's count, origin and first primitive, or (one
 // primitive at a time) its index in n
 struct Prim { PRIM_FIELDS };
 layout(std430, binding = 3) readonly buffer Prims { Prim prims[]; };
@@ -52,26 +54,26 @@ uint addr4(uint bp, uint bw, int x, int y) {            // nibble index
     uint page = uint((x >> 7) + (y >> 7) * int((bw + 1u) >> 1));
     return ((bp + page * 32u + uint(tab[BT4 + ((y >> 4) & 7) * 4 + ((x >> 5) & 3)])) * 512u + uint(tab[CT4 + (y & 15) * 32 + (x & 31)])) & 0x7FFFFFu;
 }
-uint rd16(uint h) { return (vm[h >> 1] >> ((h & 1u) * 16u)) & 0xFFFFu; }
-void wr16(uint h, uint v) { uint sh = (h & 1u) * 16u; atomicAnd(vm[h >> 1], ~(0xFFFFu << sh)); atomicOr(vm[h >> 1], (v & 0xFFFFu) << sh); }
+uint rd16(uint h) { return (vm[p.mbase + (h >> 1)] >> ((h & 1u) * 16u)) & 0xFFFFu; }
+void wr16(uint h, uint v) { uint sh = (h & 1u) * 16u; atomicAnd(vm[p.mbase + (h >> 1)], ~(0xFFFFu << sh)); atomicOr(vm[p.mbase + (h >> 1)], (v & 0xFFFFu) << sh); }
 int bt16of(int psm) { return psm == CT16S ? BT16S : (psm == Z16 || psm == Z16S) ? BT16Z : BT16; }
 // read_px()/write_px() of gs.c for the formats used here
 uint read_px(uint bp, uint bw, int psm, int x, int y) {
-    if (psm == CT32 || psm == CT24) return vm[addr32(bp, bw, x, y, 0u)];
-    if (psm == Z32 || psm == Z24) return vm[addr32(bp, bw, x, y, 33u * 2048u)];
+    if (psm == CT32 || psm == CT24) return vm[p.mbase + (addr32(bp, bw, x, y, 0u))];
+    if (psm == Z32 || psm == Z24) return vm[p.mbase + (addr32(bp, bw, x, y, 33u * 2048u))];
     if (psm == CT16x || psm == CT16S || psm == Z16 || psm == Z16S) return rd16(addr16(bp, bw, x, y, bt16of(psm)));
-    if (psm == T8) { uint a = addr8(bp, bw, x, y); return (vm[a >> 2] >> ((a & 3u) * 8u)) & 255u; }
-    if (psm == T4) { uint a = addr4(bp, bw, x, y); return (vm[a >> 3] >> ((a & 7u) * 4u)) & 15u; }
-    if (psm == T8H) return vm[addr32(bp, bw, x, y, 0u)] >> 24;
-    if (psm == T4HL) return (vm[addr32(bp, bw, x, y, 0u)] >> 24) & 15u;
-    if (psm == T4HH) return vm[addr32(bp, bw, x, y, 0u)] >> 28;
-    return vm[addr32(bp, bw, x, y, 0u)];
+    if (psm == T8) { uint a = addr8(bp, bw, x, y); return (vm[p.mbase + (a >> 2)] >> ((a & 3u) * 8u)) & 255u; }
+    if (psm == T4) { uint a = addr4(bp, bw, x, y); return (vm[p.mbase + (a >> 3)] >> ((a & 7u) * 4u)) & 15u; }
+    if (psm == T8H) return vm[p.mbase + (addr32(bp, bw, x, y, 0u))] >> 24;
+    if (psm == T4HL) return (vm[p.mbase + (addr32(bp, bw, x, y, 0u))] >> 24) & 15u;
+    if (psm == T4HH) return vm[p.mbase + (addr32(bp, bw, x, y, 0u))] >> 28;
+    return vm[p.mbase + (addr32(bp, bw, x, y, 0u))];
 }
 void write_px(uint bp, uint bw, int psm, int x, int y, uint v) {   // frame and Z formats
-    if (psm == CT32) vm[addr32(bp, bw, x, y, 0u)] = v;
-    else if (psm == CT24) { uint a = addr32(bp, bw, x, y, 0u); vm[a] = (vm[a] & 0xFF000000u) | (v & 0xFFFFFFu); }
-    else if (psm == Z32) vm[addr32(bp, bw, x, y, 33u * 2048u)] = v;
-    else if (psm == Z24) { uint a = addr32(bp, bw, x, y, 33u * 2048u); vm[a] = (vm[a] & 0xFF000000u) | (v & 0xFFFFFFu); }
+    if (psm == CT32) vm[p.mbase + (addr32(bp, bw, x, y, 0u))] = v;
+    else if (psm == CT24) { uint a = addr32(bp, bw, x, y, 0u); vm[p.mbase + (a)] = (vm[p.mbase + (a)] & 0xFF000000u) | (v & 0xFFFFFFu); }
+    else if (psm == Z32) vm[p.mbase + (addr32(bp, bw, x, y, 33u * 2048u))] = v;
+    else if (psm == Z24) { uint a = addr32(bp, bw, x, y, 33u * 2048u); vm[p.mbase + (a)] = (vm[p.mbase + (a)] & 0xFF000000u) | (v & 0xFFFFFFu); }
     else wr16(addr16(bp, bw, x, y, bt16of(psm)), v);
 }
 uint c16to32(uint c, int aem, uint ta0, uint ta1) {
@@ -180,8 +182,8 @@ void pixel(int x, int y, uint zv, uint col) {
         if (p.fba != 0) o |= 0x80000000u;
         if (rgb_only) o = (o & 0xFFFFFFu) | (dst32 & 0xFF000000u);
         if (p.fb16 != 0) { uint o16 = c32to16(o); o16 = (o16 & ~p.fbmsk) | (dst & p.fbmsk & 0xFFFFu); write_px(p.fbp, p.fbw, int(p.fpsm), x, y, o16); }
-        else if (int(p.fpsm) == CT24 || int(p.fpsm) == Z24) { uint a = addr32(p.fbp, p.fbw, x, y, int(p.fpsm) == Z24 ? 33u * 2048u : 0u); vm[a] = (dst & 0xFF000000u) | (((o & ~p.fbmsk) | (dst & p.fbmsk)) & 0xFFFFFFu); }
-        else vm[addr32(p.fbp, p.fbw, x, y, int(p.fpsm) == Z32 ? 33u * 2048u : 0u)] = (o & ~p.fbmsk) | (dst & p.fbmsk);
+        else if (int(p.fpsm) == CT24 || int(p.fpsm) == Z24) { uint a = addr32(p.fbp, p.fbw, x, y, int(p.fpsm) == Z24 ? 33u * 2048u : 0u); vm[p.mbase + (a)] = (dst & 0xFF000000u) | (((o & ~p.fbmsk) | (dst & p.fbmsk)) & 0xFFFFFFu); }
+        else vm[p.mbase + (addr32(p.fbp, p.fbw, x, y, int(p.fpsm) == Z32 ? 33u * 2048u : 0u))] = (o & ~p.fbmsk) | (dst & p.fbmsk);
     }
     if (z_ok && p.zmsk == 0) write_px(p.zbp, p.fbw, p.zpsm, x, y, zv);
 }

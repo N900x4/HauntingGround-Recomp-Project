@@ -23,7 +23,7 @@ identical frames). A full decompilation was judged a multi-year job; readable C 
    - both **completed and verified** (rules in section 4) before going on;
    - then **in-game settings**: the game's own settings/options page gains **resolution** (upscaling factor) and
      **frame rate** (30 / 60, later 120), **keyboard mapping** and **PlayStation controller mapping**;
-   - finally **native PS5 controller (DualSense) support**.
+   - finally **native PS5 controller (DualSense) support** (done 2026-10-15, `docs/controller.md`; the hardware checklist waits for the user).
    (Recommendations 1 and 3, the user's playtest and a PCSX2 4K comparison, are the user's call; ask about them.)
 
 ## 3. Where things stand (all committed, local git only)
@@ -42,6 +42,7 @@ identical frames). A full decompilation was judged a multi-year job; readable C 
 | Window / input | SDL2 window and input on a UI thread; with `HG_GSVK=1` the pictures stay in video memory and the UI thread blits them into a **Vulkan swapchain** (mailbox; `HG_VSYNC=1` FIFO, `HG_PRESENT=sdl` the old SDL texture path). The game thread paces emulated time to 59.94 Hz (locking to the display's refresh, roadmap Q14: not done). Keyboard and SDL GameController mapping is hard-coded in `recomp/host_sdl.c` (see its header comment). F3 speed overlay, F11 fullscreen, Esc quits. |
 | Verification kit | `tools/verify`: frozen references (`ref/hashA.md5`, `cs.md5`, `soak.md5`, see `REFERENCES.md`) and the gate scripts `hashcheck.sh`, `gpucheck.sh`, `soak.sh`, `wintest.sh` + `pacing.py`, `picgate.sh` + `piccmp.py`. Picture references for G10 (x5 + 60, native 60) are in `D:\ps2-work\scratch\pic_ref_*` (game pictures: never committed). |
 | **Settings** (phase 3, 2026-10-15) | **Native extra rows in the game's own Options menu** (Down past Screen Position): Renderer (next start), Resolution (native, x2-x6, auto), Frame rate (30/60/120, 120 at native), Display, V-Sync, and keyboard and controller mapping pages (press a key / a button; PlayStation names for PS pads, Xbox names otherwise). Drawn and driven by the game's own functions through two hooks (`recomp/game/options.c`, `docs/options-menu.md`). Values in `hg.ini` next to the exe (`recomp/settings.c`); environment variables still override; resolution, frame rate, vsync, full screen and mappings change live. Recordings carry the settings and host-side changes. |
+| **Controllers / DualSense** (phase 4, 2026-10-15) | The game's DualShock 2 vibration decoded from libvib's `sceVibSetActParam` RPC and played on the controller (both motors; the HLE's actuator profile answer fixed from `0x01` to `0x03`, all gates identical); strength setting (Off/Low/Medium/High), static light bar (dim amber, setting), touchpad click = Select, first controller to press is player 1, dead zone in `hg.ini`, `gamecontrollerdb.txt`, PS5 names ("DualSense"). `HG_RUMBLELOG=1`. The user's DualSense was detected over USB (HIDAPI, type PS5) with Steam running. **Waiting**: the user's hardware checklist, USB and Bluetooth (`docs/controller.md` section 8). |
 | Open user decision | Door specks in `ST_020` need PCSX2 in that room (user saves a state there / allows use of their states / formats a folder memory card). |
 
 ## 4. Rules (from the user; they override defaults)
@@ -115,7 +116,7 @@ possible (resolution = `HG_GSVK_SCALE` copies need re-allocation; frame rate = `
 for keyboard and controller write to the same config. Recorded sessions must still replay identically (settings
 are host-side; anything touching game state must be deterministic).
 
-**D. Native DualSense.** SDL2 already supports PS5 controllers via SDL_GameController (hidapi); "native" support
+**D. Native DualSense. Done 2026-10-15** (`docs/controller.md`). The original note: SDL2 already supports PS5 controllers via SDL_GameController (hidapi); "native" support
 likely means: correct button glyphs/names, rumble mapped from the game's DualShock 2 vibration commands, optionally
 light bar, adaptive triggers, touchpad. Check the SDL2 version in MSYS2 (`SDL_HINT_JOYSTICK_HIDAPI_PS5`,
 `SDL_GameControllerRumble`, `SDL_GameControllerSetLED`); vibration commands come through the pad emulation in

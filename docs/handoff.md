@@ -18,8 +18,43 @@ Castle Suite. The GS thread is the limit.
 | Exploration | `ST_02A` → `ST_013` → `ST_00D` reached; explorer tools | `exploration-notes.md` |
 | Reverb | Unverified: the game sets the depth to 0 at stage init, and no reached room changes it | `exploration-notes.md` |
 | Settings | Extra rows in the game's own Options menu (resolution, frame rate, display, vsync, key and button mapping); `hg.ini` next to the exe; environment variables override | `options-menu.md` |
+| Controllers | DualSense / DualShock 4 / Xbox through SDL (USB and Bluetooth); the game's vibration on the motors (strength setting); static light bar; touchpad = Select; first to press is player 1. Hardware checklist pending with the user | `controller.md` |
 
 Last commit before this doc: `bf60152`.
+
+### 2026-10-15 (late): roadmap phase 4, native DualSense (`docs/controller.md`)
+
+- **The game's vibration, decoded**: the vibration mixer `0x2d42a0` sets (small on/off, big 0-255) through
+  `0x1be1f0`. The pad task `0x1be4b0` reads libvib's actuator profile (`sceVibGetProfile`, DBCMAN SRData command
+  `0x01038002`) and sends changes with `sceVibSetActParam` (a no-wait RPC to DBCMAN `0x8000131e/f`, command
+  `0x0103400b`, block `{profile size, data size, data, profile}`, data packed per profile bit: bit 0 small 1 bit, bit
+  1 big 8 bits). `iop_pad_mc.c` decodes it and hands the motors to the host each VBlank (`host_rumble`).
+  `HG_RUMBLELOG=1` logs the changes per VBlank (`=2` adds the bytes).
+- **One answer to the game changed, on purpose**: the HLE answered every SRData read with `0x01`, so the profile
+  said "small motor only" and the game never sent the big motor. It now answers `0x03` (a DualShock 2) for the
+  profile command (`HG_VIBPROFILE=1` gives the old answer). Effect on the game: the profile byte in the pad object,
+  six more instructions a frame, two data bytes instead of one. The sends happen at the same VBlanks. All references
+  stay identical (below).
+- **Host** (`host_sdl.c`): every controller opened (up to 8). The first to press a button is player 1 (player LED;
+  the only one read; the next to press takes over when it goes). PS4/PS5 extended reports on, for Bluetooth rumble
+  and light bar. Rumble = the big motor on the low-frequency motor and the small one on the high-frequency motor,
+  times the strength, refreshed every 100 ms and lasting 250 ms (it stops by itself if the game stops).
+  `SDL_GameControllerSetLED` with the light bar colour. Touchpad click = Select. Radial dead zone. A
+  `gamecontrollerdb.txt` next to the exe is loaded. The connection log line gives type and features, and flags
+  Steam's virtual controller.
+- **Settings**: `vibration` (off/low/medium/high, default high), `lightbar` (amber default `401a00`, red, blue,
+  white, off, `RRGGBB`), `deadzone` (18 %), `touchpad_select` (1). The first two are entries on the Options
+  controller page (below Select, edited like the display rows) and are written to a recording's `# set` header.
+  Names: "DualSense" (Create, Mute) for PS5, "PlayStation" (Share) for PS3/PS4 (`padtype` 3 is new).
+- **The user's DualSense on this PC (USB, nobody holding it)**: SDL 2.32.10 opens it through HIDAPI with Steam
+  running; type PS5, rumble, light bar and touchpad reported. SetLED and two short low rumbles returned success.
+- **Gates**: G1/G1g 702/702 identical (software, GPU, +60, x5); G2 Castle Suite 742/742 each; G3 soak with
+  `HG_VU1CHECK=1`: 1,005/1,005 identical, 17.6 M runs, 0 mismatches, 0 handovers; the session vibrates (7 motor
+  changes) and two replays log the same lines; `tools/verify/rumbletest.sh` (the game's Vibration test): two runs, a
+  recording and its replay identical; `optionstest.sh` two runs identical, only the 37 controller-page frames differ
+  from phase 3; clean build 74 s; muted window runs with no controller and with the DualSense (player 1, rumble sent
+  at the game's test). Details: `docs/controller.md` section 5.
+- **Manual checklist** for the user (USB and Bluetooth): `docs/controller.md` section 8.
 
 ### 2026-10-15 (evening): roadmap phase 3, in-game settings as native rows in the game's Options menu
 

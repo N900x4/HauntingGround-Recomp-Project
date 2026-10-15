@@ -250,6 +250,13 @@ Dependencies: phase 1 (the scale change path should be the swapchain one). Risks
 
 Goal: a DualSense over USB or Bluetooth works out of the box with PlayStation names, the game's vibration reaches the controller, and the extras the user wants (light bar, triggers, touchpad) are implemented.
 
+**Status (2026-10-15): done except the user's hardware checklist** (`docs/controller.md`). The game's vibration is
+decoded from libvib's `sceVibSetActParam` RPC (DBCMAN `0x8000131e/f`, command `0x0103400b`); the HLE's actuator
+profile answer was wrong (`0x01`, small motor only) and is now a DualShock 2's `0x03`, with every gate identical.
+Rumble scaled by a Vibration setting, a static light bar (dim amber, a setting), touchpad click = Select, first
+controller to press is player 1, dead zone from `hg.ini`, `gamecontrollerdb.txt`, Steam Input documented. A
+panic-linked light bar (4.3) is not done.
+
 **Step 4.0: facts and plumbing (0.5 day).** SDL 2.32.10 (installed) has the HIDAPI PS5 driver on by default: `SDL_GameControllerGetType() == SDL_CONTROLLER_TYPE_PS5`, `SDL_GameControllerRumble` (two motors), `SDL_GameControllerRumbleTriggers`, `SDL_GameControllerSetLED`, `SDL_GameControllerSendEffect` (raw DualSense effect report: adaptive triggers), `SDL_GameControllerGetTouchpadFinger`, sensors (gyro/accel), battery level, player index. Over Bluetooth SDL switches the controller to enhanced reports itself. Note the Steam Input conflict: if Steam is running with PlayStation configuration support on, it owns the device; document it.
 
 **Step 4.1: the game's vibration (1-2 days).** The game sets the DualShock 2 actuators through libpad2/libdbc; the HLE answers the `SRData` command (`iop_pad_mc.c:251`) with "stable" and ignores the payload. Find the actuator bytes: run a scene that vibrates (Options has a Vibration setting; panic mode and hits vibrate) with `HG_DUMPSID=80001300` and watch the 0x8000131a payloads and the per-VBlank pad command; cross-check the libdbc code (0x1ee740-0x1ef968) for `SetActAlign`/`SetActDirect` equivalents. Implement: parse small-motor on/off and big-motor 0-255 per VBlank, map to `SDL_GameControllerRumble(pad, big * strength, small ? 0xFFFF * strength : 0, 40 ms)` refreshed every VBlank while active, honour the game's own Vibration option and the settings' strength. Add `HG_RUMBLELOG=1` so a replay prints the actuator sequence; the sequence must be identical across replays (gate).

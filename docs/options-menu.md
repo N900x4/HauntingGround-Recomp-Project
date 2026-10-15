@@ -143,7 +143,10 @@ Triangle keeps the old value. Choosing a resolution other than native while at 1
 connected) and two columns over the game's two-column area, ten entries each: the face buttons with the game's own
 glyphs, L1/R1/L2/R2/L3/R3, the D-pad, Start, Select, and for the keyboard the left stick's four directions. Right of
 each the key (SDL key names) or the controller button: PlayStation names (Cross, Circle, L1, R2, Options, Create ...)
-when SDL reports a PS3/PS4/PS5 controller, Xbox names (A, B, LB, RT, Menu, View ...) otherwise. Up/Down move within a
+when SDL reports a PS3/PS4/PS5 controller, Xbox names (A, B, LB, RT, Menu, View ...) otherwise. Since phase 4
+(`docs/controller.md`) the controller page also has two value entries below Select, **Vibration** (Off / Low /
+Medium / High) and **Light bar** (Amber / Red / Blue / White / Off), edited like the display page's rows, and the
+kind shown is "DualSense" for a PS5 controller (Create, Mute) or "PlayStation" for PS3/PS4 (Share). Up/Down move within a
 column, Left/Right between columns, Cross waits for a key or button ("Press a key" blinking; Esc cancels), Triangle
 goes back, Square resets the page to the defaults (the game's dialog). A key or button already used by another of
 the controller's buttons moves to the one that had the new one (a swap), so two buttons never share one key. After a
@@ -179,7 +182,9 @@ row is applied (never while a recording is replayed), and is plain `key = value`
 `renderer`, `resolution`, `fps`, `fullscreen`, `vsync`, `window_scale`, `kb.<button>` (SDL key names, `none`),
 `pad.<button>` (`a b x y back guide start leftstick rightstick leftshoulder rightshoulder dpup dpdown dpleft dpright
 misc1 paddle1-4 touchpad lefttrigger righttrigger none`). Button names: `select l3 r3 start up right down left l2 r2 l1
-r1 triangle circle cross square`, and for the keyboard `ls_up ls_down ls_left ls_right`. A setting the environment
+r1 triangle circle cross square`, and for the keyboard `ls_up ls_down ls_left ls_right`. Phase 4 added `vibration`
+(off/low/medium/high), `lightbar` (amber/red/blue/white/off or `RRGGBB`), `deadzone` (percent) and `touchpad_select`
+(`docs/controller.md`). A setting the environment
 overrides can still be changed in the menu (it applies at once and is saved; the log notes that the variable wins at
 the next start).
 

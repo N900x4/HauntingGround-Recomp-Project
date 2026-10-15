@@ -28,7 +28,8 @@ The output folder must be outside the repository (the script refuses otherwise).
    library as a zip without tests, Tk, IDLE, pip, networking and e-mail modules, and a `python3XY._pth` (isolated: no
    user site, no environment variables);
 5. builds `HauntingGround.exe` from `launcher.c` (static, no DLLs beyond Windows);
-6. writes `README.txt` (the repository's README), `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt` (from
+6. writes `README.txt` (the repository's README) with the docs it links (`docs/known-issues.md`, `controller.md`,
+   `options-menu.md`, `release/crash-reports.md`), `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt` (from
    `THIRD_PARTY_NOTICES.md` with the package table filled in), `engine/licenses/` and `engine/bundle.json`;
 7. zips it (`HauntingGround-Recomp-VERSION-win64.zip`) and prints its SHA-256.
 
@@ -38,7 +39,7 @@ For 0.1: 94 MB unpacked, **36.5 MB zipped**; compiler 82 MB (cc1.exe alone 39 MB
 
 ```
 HauntingGround.exe        launcher
-README.txt  LICENSE.txt  THIRD_PARTY_NOTICES.txt
+README.txt  LICENSE.txt  THIRD_PARTY_NOTICES.txt  docs/
 engine/                   version.txt, src/, ucrt64/ (compiler), python/, licenses/, bundle.json
 -- made at the first start --
 game/                     SLUS_210.75, DATA.CVM, MODULES/ copied from the player's disc image (1.6 GB)

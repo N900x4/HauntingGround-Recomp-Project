@@ -230,6 +230,8 @@ def main():
     # documents
     shutil.copy2(os.path.join(REPO, 'README.md'), os.path.join(S, 'README.txt'))
     shutil.copy2(os.path.join(REPO, 'LICENSE'), os.path.join(S, 'LICENSE.txt'))
+    for f in ('docs/known-issues.md', 'docs/controller.md', 'docs/options-menu.md', 'docs/release/crash-reports.md'):   # the README links them
+        d = os.path.join(S, f); os.makedirs(os.path.dirname(d), exist_ok=True); shutil.copy2(os.path.join(REPO, f), d)
     notes = open(os.path.join(HERE, 'THIRD_PARTY_NOTICES.md'), encoding='utf-8').read()
     rows = ['| %s | %s | %s | %d |' % (p.replace('mingw-w64-ucrt-x86_64-', ''), i['version'], i['licenses'], i['files']) for p, i in pkgs.items()]
     notes = notes.replace('<!-- PACKAGES -->', '| MSYS2 package (mingw-w64-ucrt-x86_64-...) | Version | Licence | Files bundled |\n|---|---|---|---|\n' + '\n'.join(rows))

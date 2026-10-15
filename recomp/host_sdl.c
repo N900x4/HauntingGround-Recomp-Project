@@ -434,6 +434,8 @@ static void lock_set(int on, uint64_t n, double t, double per, double ph) {
 }
 static void plog_line(const char *what, double t, uint64_t tag, const char *kind) {   /* HG_PRESENTLOG */
     if (plog <= 0 || t - t_ui0 < plog_from) return;
+    static int only = -1; if (only < 0) only = getenv("HG_PRESENTLOG_NEW") && atoi(getenv("HG_PRESENTLOG_NEW"));
+    if (only && (strcmp(what, "SCAN") || !kind || strcmp(kind, "new"))) return;   /* (long runs: the first scanout of each picture only) */
     plog--;
     char lat[32] = "";
     if (kind && !strcmp(kind, "new") && vb_wall[(tag >> 2) & 1023] > 0) snprintf(lat, sizeof lat, " lat %.1f", (t - vb_wall[(tag >> 2) & 1023]) * 1000);

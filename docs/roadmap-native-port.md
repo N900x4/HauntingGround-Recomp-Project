@@ -377,3 +377,12 @@ The user answered the questions in section 4 as follows; these decisions bind th
   recordings may be regression inputs, not committed (Q17); muted unattended window tests allowed when the PC is free,
   and installing mingw-w64-ucrt-x86_64-vulkan-validation-layers is allowed (Q18); scripted save test after backing up
   memcards/ (Q19); Linux kept building, no feature work (Q20).
+
+### Later decisions (2026-10-15)
+
+- **Order:** finish the current batch first (phase 1 4K + 60 fps, phase 2 VU1, phase 3 in-game settings, phase 4
+  DualSense). Texture upscaling (`docs/research-texture-upscaling.md`) and DLSS (`docs/research-dlss.md`) come
+  after; their questions are still open.
+- **Release:** the user wants a **public 0.1 build soon after the batch**. A release-readiness step (legal shape of
+  the distribution, saving verified, known-issues list, README/licence, crash reports, requirements) goes between
+  the batch and textures; its questions are open (see the conversation of 2026-10-15).

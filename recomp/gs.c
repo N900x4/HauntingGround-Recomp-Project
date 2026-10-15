@@ -2610,7 +2610,17 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
     static long every = -1; if (every < 0) every = getenv("HG_FRAME_EVERY") ? atol(getenv("HG_FRAME_EVERY")) : 60;
     if (every > 0 && vb % every == 0) dump_frame(vb, priv);
     static uint64_t last_log; if (vb - last_log >= 600) { last_log = vb; L("GS: VBlank %llu: %llu prims, %llu pixels, %llu GIF tags, %llu image qwords so far\n",
-        (unsigned long long)vb, (unsigned long long)n_prims, (unsigned long long)gs_count(0), (unsigned long long)n_gif_tags, (unsigned long long)n_xfer_qw); }
+        (unsigned long long)vb, (unsigned long long)n_prims, (unsigned long long)gs_count(0), (unsigned long long)n_gif_tags, (unsigned long long)n_xfer_qw);
+#ifdef HAVE_VULKAN
+        /* GPU ms per VBlank since the last line; per phase with HG_GSVK_TIMING */
+        static double ph0[10], g0, w0; double ph[10], g, w; uint64_t ns, nd; gsvk_phase_stats(ph); gsvk_stats(&ns, &nd, &g, &w);
+        if (vk_live) { double d[10]; for (int i = 0; i < 10; i++) { d[i] = (ph[i] - ph0[i]) / 600; ph0[i] = ph[i]; }
+            L("GSVK GPU ms per VBlank: %.2f (GS thread waited %.2f)", (g - g0) / 600, (w - w0) / 600); g0 = g; w0 = w;
+            if (ph[0] + ph[1] > 0) L(": exact %.2f, copies %.2f, single %.2f, compose %.2f, transfers %.2f; replays: exact %.2f, copies %.2f, single %.2f, transfers %.2f",
+                d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[9]);
+            L("\n"); }
+#endif
+    }
     n_kicks_frame = 0;
 }
 #if defined(__x86_64__)
@@ -2653,6 +2663,10 @@ void gs_dump_stats(void) {
           "GPU %.1f ms (waited %.1f ms); %llu read-backs (%llu pages), %llu pages uploaded\n", (unsigned long long)vk_n[0], (unsigned long long)vk_n[1], (unsigned long long)vk_n[2],
           (unsigned long long)vk_serial, (unsigned long long)(vk_cpu[0] + vk_cpu[1] + vk_cpu[2]), (unsigned long long)vkb_nbatch, (unsigned long long)dis,
           (unsigned long long)sub, gms, wms, (unsigned long long)vk_downloads, (unsigned long long)vk_dl_pages, (unsigned long long)vk_ul_pages);
+        double ph[10]; gsvk_phase_stats(ph);
+        if (ph[0] + ph[1] + ph[2] + ph[3] + ph[4] > 0)
+            L("GSVK GPU ms per phase (HG_GSVK_TIMING): exact batches %.1f, copies %.1f, single %.1f, compose %.1f, transfers %.1f; replays: exact %.1f, copies %.1f, single %.1f, transfers %.1f\n",
+              ph[0], ph[1], ph[2], ph[3], ph[4], ph[5], ph[6], ph[7], ph[9]);
     }
     if (vi_selftest) L("GSVK selftest: %llu frames replayed with no movement, %llu differ from the real frame\n", (unsigned long long)vi_st_frames, (unsigned long long)vi_st_bad);
     if (vk_interp) L("GSVK interpolation time: match %.1f s, replay %.1f s, compose %.1f s, logging %.1f s, presenting %.1f s; %llu submissions during replays, waiting %.1f s\n", vi_t_match, vi_t_replay, vi_t_compose, vi_t_log, vi_t_present, (unsigned long long)vi_r_sub, vi_r_wait / 1000.0);

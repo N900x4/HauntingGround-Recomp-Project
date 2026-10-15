@@ -47,6 +47,9 @@ void gsvk_finish(void);                                                    /* su
 uint64_t gsvk_submit(void);                                                /* submit, do not wait: an id */
 void gsvk_wait(uint64_t id);                                               /* that submission (and earlier) done */
 void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms);   /* wait: wall ms in submit+wait */
+/* HG_GSVK_TIMING=1: GPU ms per phase: exact batches, copies batches, single primitives, compose, transfers; then the
+   same five for the replays of frame interpolation */
+void gsvk_phase_stats(double ms[10]);
 /* checking: the GPU's memory is set to `now`, then primitives are recorded, then the GPU's memory comes back */
 void gsvk_check_begin(const uint32_t *now);
 const uint32_t *gsvk_check_end(double *ms);

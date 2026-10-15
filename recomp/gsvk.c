@@ -243,23 +243,32 @@ void gsvk_copy_copies(uint32_t dst, uint32_t src, uint32_t count) {
     VkBufferCopy c = { (VkDeviceSize)src << 22, (VkDeviceSize)dst << 22, (VkDeviceSize)count << 22 };
     vkCmdCopyBuffer(cmd, dvram.b, dvram.b, 1, &c);
 }
-int gsvk_compose(const GsVkSprite *s0, uint32_t *dst) {
-    if (state <= 0 || !outbytes) return 0;
+/* the out region holds 4 pictures (slots); compose_rec records one, compose_fetch reads it after a finish */
+int gsvk_compose_rec(const GsVkSprite *s0, int slot) {
+    if (state <= 0 || !outbytes || slot < 0 || slot > 3) return 0;
     GsVkSprite s = *s0;
-    const VkDeviceSize n = (VkDeviceSize)s.px1 * s.py1 * 4;
-    if (n > outbytes || s.px1 <= 0 || s.py1 <= 0) return 0;
-    s.prim = 4; s.px0 = s.py0 = 0; s.serial = 0; s.z = (uint32_t)(outbase / 4); s.mbase = 0;
+    const VkDeviceSize n = (VkDeviceSize)s.px1 * s.py1 * 4, slotb = (outbytes / 4) & ~(VkDeviceSize)255;
+    if (n > slotb || s.px1 <= 0 || s.py1 <= 0) return 0;
+    s.prim = 4; s.px0 = s.py0 = 0; s.serial = 0; s.z = (uint32_t)((outbase + slot * slotb) / 4); s.mbase = 0;
     const uint32_t keep = mbase_add; mbase_add = 0;   /* the compose primitive reads copies by itself */
     static const uint32_t noclut[256];
     gsvk_prim(&s, noclut, 1); mbase_add = keep;
     rec_open(); barrier();
-    VkBufferCopy c = { outbase, 0, n };
+    VkBufferCopy c = { outbase + slot * slotb, slot * slotb, n };
     vkCmdCopyBuffer(cmd, dvram.b, hrb.b, 1, &c);
     VkMemoryBarrier hb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, 0, 0, 0);
+    return 1;
+}
+void gsvk_compose_fetch(int slot, uint32_t *dst, size_t words) {
+    const VkDeviceSize slotb = (outbytes / 4) & ~(VkDeviceSize)255;
+    if (state > 0 && slot >= 0 && slot < 4 && words * 4 <= slotb) memcpy(dst, (uint8_t *)hrb.p + slot * slotb, words * 4);
+}
+int gsvk_compose(const GsVkSprite *s0, uint32_t *dst) {
+    if (!gsvk_compose_rec(s0, 0)) return 0;
     gsvk_finish();
     if (state <= 0) return 0;
-    memcpy(dst, hrb.p, n);
+    gsvk_compose_fetch(0, dst, (size_t)s0->px1 * s0->py1);
     return 1;
 }
 void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms) { *submits = n_submits; *dispatches = n_dispatch; *gpu_ms = gpu_ms_all; *wait_ms = wait_ms_all; }

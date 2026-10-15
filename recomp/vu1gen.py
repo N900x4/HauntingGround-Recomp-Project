@@ -10,7 +10,9 @@ E-bit), straight-line code per pair through pair_untimed() (vu1_core.h: the inte
 constant instruction words, so decode folds away and the semantics stay the interpreter's) and goto for control
 flow. No cycles are counted: a SAFE consumer commits the pending Q/P (q_commit/p_commit) just before it reads, an
 OLD consumer reads the previous value, and the VI register a branch must read old (written by the previous pair) is
-a constant. A run entering anywhere else returns to the interpreter at once (exact: the run has not started).
+a constant. In programs that never read MAC/status (no FMxxx/FSxxx/FSSET), an FMAC op whose flags another FMAC op
+overwrites on every path before the run can be observed (its end, or a runaway handover) only adds to the sticky
+status bits (flags_sticky in vu1_core.h); the others set MAC and status as usual. A run entering anywhere else returns to the interpreter at once (exact: the run has not started).
 A program the proof does not cover completely (an AMBIGUOUS consumer, a JR/JALR, a path leaving the program, a
 branch whose previous pair is not static) is emitted the version 1 way instead: every pair is the interpreter's
 step() with the cycle model, cut into functions of 64 pairs.
@@ -65,27 +67,44 @@ def v2_plan(code, R):
         prev[node] = k.pop()
     return qc, pcc, prev
 
+def dead_flags(R):
+    """nodes whose MAC/status result is overwritten by another flag-setting pair on every path before the run can be
+    observed (its end, or the runaway check on a backward jump); empty if the program reads MAC or status"""
+    if any(d.lk in ('FSEQ', 'FSSET', 'FSAND', 'FSOR', 'FMEQ', 'FMAND', 'FMOR') for d in R.dec): return set()
+    def obs(n): return any(x[0] == 'end' for x in R.nodes[n] if isinstance(x[0], str)) or 0 <= n[1] <= n[0]
+    def succ(n): return [x for x in R.nodes[n] if not isinstance(x[0], str)]
+    A = {n: False for n in R.nodes}   # an observation can come before the next flag-setting pair, from before n
+    ch = True
+    while ch:
+        ch = False
+        for n in R.nodes:
+            v = not R.dec[n[0]].flags and (obs(n) or any(A[s] for s in succ(n)))
+            if v and not A[n]: A[n] = True; ch = True
+    return {n for n in R.nodes if R.dec[n[0]].flags and not obs(n) and not any(A[s] for s in succ(n))}
+
 def emit_v2(p, code, R, plan):
     qc, pcc, prev = plan
+    dead = dead_flags(R)
     def lab(node):
         pc, bp, eb = node
         return 'N%d%s%s' % (pc, '' if bp < 0 else '_b%d' % bp, '_e' if eb else '')
     L = [BANNER, '#define VU1_FLAG_DELAY 0   /* compiled programs are used with HG_VUFLAGDELAY=0 only */', '#include "vu1_core.h"',
-         '/* one instruction pair at k: pre = the Q/P commit of a SAFE consumer; prev = VI register written by the previous pair */',
-         '#define PAIR(k, lo, up, pre, prev) do { Dec d_ = {0}; dec_const(&d_, lo, up); pre; taken = pair_untimed(&d_, (k), (prev), &pvo, &tgt); } while (0)',
+         '/* one instruction pair at k: pre = the Q/P commit of a SAFE consumer; prev = VI register written by the previous pair;',
+         '   fa = &fa: the flags are overwritten before anyone can see them, only the sticky bits count; 0: MAC/status as usual */',
+         '#define PAIR(k, lo, up, pre, prev, fa) do { Dec d_ = {0}; dec_const(&d_, lo, up); pre; taken = pair_untimed(&d_, (k), (prev), &pvo, &tgt, (fa)); } while (0)',
          '/* the run ends after this pair (the pair after an E-bit pair): Q and P committed, as the interpreter does */',
-         '#define END(next) do { vu1_tpc = (next); q_commit(); p_commit(); n_insns += (uint64_t)(n - s->n); s->n = n; return 1; } while (0)',
+         '#define END(next) do { vu1_tpc = (next); q_commit(); p_commit(); flags_sticky_fold(&fa); n_insns += (uint64_t)(n - s->n); s->n = n; return 1; } while (0)',
          '/* a runaway program (no end after VU1_MAXN pairs) goes back to the interpreter, which reports it */',
-         '#define LOOP(target, eb) do { if (__builtin_expect(n >= VU1_MAXN, 0)) { n_insns += (uint64_t)(n - s->n); s->n = n; s->pc = (target); \\',
+         '#define LOOP(target, eb) do { if (__builtin_expect(n >= VU1_MAXN, 0)) { flags_sticky_fold(&fa); n_insns += (uint64_t)(n - s->n); s->n = n; s->pc = (target); \\',
          '    s->branch_pending = 0; s->ebit_pending = (eb); s->prev_vi = -1; s->prev_old = pvo; return 0; } } while (0)',
          f'int aot_run_{p:02d}(RunSt *s) {{',
          '    if (q_wait || p_wait) return 0;   /* a Q/P pending from an unfinished run: the interpreter counts it down */',
-         '    long n = s->n; uint16_t pvo = 0; uint32_t tgt = 0; int taken = 0;',
+         '    long n = s->n; uint16_t pvo = 0; uint32_t tgt = 0; int taken = 0; FlagAcc fa = { _mm_setzero_si128(), _mm_setzero_si128(), _mm_setzero_si128() };',
          '    switch (s->pc) { ' + ' '.join(f'case {e}: goto {lab((e, -1, 0))};' for e in sorted(R.entries)) + ' default: return 0; }']
     for node in sorted(R.nodes):
         pc, bp, eb = node; d = R.dec[pc]; lo, up = code[pc]
         pre = ' '.join((['q_commit();'] if pc in qc else []) + (['p_commit();'] if pc in pcc else [])) or '(void)0'
-        L.append(f'{lab(node)}: n++; PAIR({pc}, 0x{lo:08x}u, 0x{up:08x}u, {pre}, {prev.get(node, -1)});')
+        L.append(f'{lab(node)}: n++; PAIR({pc}, 0x{lo:08x}u, 0x{up:08x}u, {pre}, {prev.get(node, -1)}, {"&fa" if node in dead else "0"});')
         nxt = bp if bp >= 0 else (pc + 1) & 2047
         succ = R.nodes[node]
         if eb:
@@ -106,11 +125,12 @@ def generate(outdir, game=None):
     for f in glob.glob(os.path.join(outdir, 'vu1_aot_*.c')): os.remove(f)
     banner = BANNER
     CH = 64   # instruction pairs per C function: compile time grows faster than linearly with function size
-    v1 = []
+    v1 = []; nflag = ndead = 0
     for p, code in enumerate(progs):
         R = T.analyse(code, T.program_entries(p, ()))
         plan = v2_plan(code, R)
         if plan:
+            nflag += sum(1 for n in R.nodes if R.dec[n[0]].flags); ndead += len(dead_flags(R))
             open(os.path.join(outdir, f'vu1_aot_{p:02d}.c'), 'w').write('\n'.join(emit_v2(p, code, R, plan)) + '\n')
             continue
         v1.append(p)
@@ -144,7 +164,7 @@ def generate(outdir, game=None):
     T += [f'    {{ code_{p:02d}, {len(code)}, aot_run_{p:02d} }},' for p, code in enumerate(progs)]
     T.append('};')
     open(os.path.join(outdir, 'vu1_aot_tab.c'), 'w').write('\n'.join(T) + '\n')
-    return f'{len(progs)} VU1 programs, {sum(map(len, progs))} instruction pairs -> {outdir} ({len(progs) - len(v1)} whole programs with timing proven at build time' + (f'; per pair with the cycle model: {v1})' if v1 else ')')
+    return f'{len(progs)} VU1 programs, {sum(map(len, progs))} instruction pairs -> {outdir} ({len(progs) - len(v1)} whole programs with timing proven at build time; {ndead} of {nflag} flag-setting pairs only sticky' + (f'; per pair with the cycle model: {v1})' if v1 else ')')
 
 if __name__ == '__main__':
     print(generate(sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, 'gen')))

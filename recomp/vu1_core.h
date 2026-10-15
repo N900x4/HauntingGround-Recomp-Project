@@ -103,6 +103,23 @@ AI void set_flags(__m128 v, int dest) {
     flag_push(0, (rev4[z] & dest) | (rev4[sg] & dest) << 4 | (rev4[ov] & dest) << 12);
 }
 
+/* The MAC/status flags of an FMAC result that is overwritten before anything can read MAC or status (proven per pair
+   by vu1gen.py, in programs without FMxxx/FSxxx/FSSET): only its share of the sticky status bits (6-9) is visible.
+   That share is OR-ed into three lane masks (zero, sign, overflow, in dest lanes) and folded into status where the
+   run can be observed (flags_sticky_fold: at the run's end); the bits only ever accumulate, so the order is free. */
+typedef struct { __m128i z, s, o; } FlagAcc;
+AI void flags_sticky(FlagAcc *a, __m128 v, int dest) {
+    const __m128i m = lane_mask[dest], b = _mm_castps_si128(v), z = _mm_castps_si128(_mm_cmpeq_ps(v, _mm_setzero_ps()));
+    a->z = _mm_or_si128(a->z, _mm_and_si128(z, m));
+    a->s = _mm_or_si128(a->s, _mm_and_si128(_mm_andnot_si128(z, b), m));   /* the sign bit of nonzero lanes */
+    a->o = _mm_or_si128(a->o, _mm_and_si128(_mm_cmpeq_epi32(_mm_and_si128(b, _mm_set1_epi32(0x7FFFFFFF)), _mm_set1_epi32(0x7F7FFFFF)), m));
+}
+AI void flags_sticky_fold(const FlagAcc *a) {
+    const uint32_t s = (_mm_movemask_ps(_mm_castsi128_ps(a->z)) ? 1u : 0) | (_mm_movemask_ps(_mm_castsi128_ps(a->s)) ? 2u : 0) |
+                       (_mm_movemask_ps(_mm_castsi128_ps(a->o)) ? 8u : 0);
+    status |= s << 6;
+}
+
 /* ---------------------------------------------------------------- decode */
 enum { U_NOP, U_ARITH, U_OPMULA, U_OPMSUB, U_ITOF, U_FTOI, U_ABS, U_CLIP };
 enum { K_ADD, K_SUB, K_MADD, K_MSUB, K_MAX, K_MINI, K_MUL };
@@ -204,7 +221,10 @@ AI void decode_lower(uint32_t l, Dec *d) {
 }
 /* ---------------------------------------------------------------- upper (FMAC) */
 typedef struct { __m128 v; int valid, to_acc, reg, dest, flags; } UpRes;
-AI void upper(const Dec *d, UpRes *r) {
+/* clean: bit 2 = ACC holds no exponent 255, so vclamp(acc) is the identity. That is always true: ACC is written only by
+   FMAC results, which are clamped (vclamp, clampf), and starts at zero; the compiled programs pass it, the interpreter
+   keeps the check (clean = 0). */
+AI void upper_x(const Dec *d, UpRes *r, const int clean) {
     r->valid = 0;
     switch (d->uk) {
     case U_NOP: return;
@@ -221,8 +241,8 @@ AI void upper(const Dec *d, UpRes *r) {
         switch (d->kind) {
         case K_ADD: x = _mm_add_ps(a, b); break;
         case K_SUB: x = _mm_sub_ps(a, b); break;
-        case K_MADD: x = _mm_add_ps(vclamp(acc.v), _mm_mul_ps(a, b)); break;
-        case K_MSUB: x = _mm_sub_ps(vclamp(acc.v), _mm_mul_ps(a, b)); break;
+        case K_MADD: x = _mm_add_ps(clean & 4 ? acc.v : vclamp(acc.v), _mm_mul_ps(a, b)); break;
+        case K_MSUB: x = _mm_sub_ps(clean & 4 ? acc.v : vclamp(acc.v), _mm_mul_ps(a, b)); break;
         case K_MAX: x = _mm_max_ps(a, b); break;     /* a > b ? a : b */
         case K_MINI: x = _mm_min_ps(a, b); break;    /* a < b ? a : b */
         default: x = _mm_mul_ps(a, b); break;
@@ -259,12 +279,15 @@ AI void upper(const Dec *d, UpRes *r) {
         flag_push(1, c); return; }
     }
 }
-AI void upper_commit(const UpRes *r) {
+AI void upper(const Dec *d, UpRes *r) { upper_x(d, r, 0); }
+/* fa: the flags of this result go only to the sticky bits (flags_sticky); NULL: MAC and status as usual */
+AI void upper_commit_x(const UpRes *r, FlagAcc *fa) {
     if (!r->valid) return;
     if (r->to_acc) put_lanes(&acc, r->v, r->dest);
     else if (r->reg) put_lanes(&vf[r->reg], r->v, r->dest);   /* if the lower op wrote the same VF, the upper result wins */
-    if (r->flags) set_flags(r->v, r->dest);
+    if (r->flags) { if (fa) flags_sticky(fa, r->v, r->dest); else set_flags(r->v, r->dest); }
 }
+AI void upper_commit(const UpRes *r) { upper_commit_x(r, 0); }
 
 /* ---------------------------------------------------------------- lower */
 AI void q_commit(void) { if (q_wait) { q_reg = q_pend; q_wait = 0; } }
@@ -455,16 +478,16 @@ AI int step(const Dec *d, RunSt *s, const uint32_t pc, const int stall) {
    is only a flag (q_wait, p_wait nonzero: q_commit()/p_commit() still commit it), and the VI register written by the
    previous pair is known (prev_vi, a constant; its old value in *prev_old). VF0 and VI0 need no reset: no op writes
    register 0 (every writer above checks it). Returns 1 if a branch is taken (target in *tgt). */
-AI int pair_untimed(const Dec *d, const uint32_t pc, const int prev_vi, uint16_t *prev_old, uint32_t *tgt) {
+AI int pair_untimed(const Dec *d, const uint32_t pc, const int prev_vi, uint16_t *prev_old, uint32_t *tgt, FlagAcc *fa) {
     if (!d->ibit) { if (d->lk == L_WAITQ) q_commit(); else if (d->lk == L_WAITP) p_commit(); }
-    UpRes ur; upper(d, &ur);
+    UpRes ur; upper_x(d, &ur, 4);
     int wvi = -1, taken = 0; uint16_t wold = 0;
     if (d->ibit) memcpy(&i_reg, &d->iimm, 4);
     else {
         if (d->lk >= L_FCEQ && d->lk <= L_FCGET) lk_count[d->lk]++;   /* the flag reads counted in the run log */
         taken = lower(d, pc, prev_vi, *prev_old, &wvi, &wold, tgt);
     }
-    upper_commit(&ur);
+    upper_commit_x(&ur, fa);
     *prev_old = wold;
     return taken;
 }

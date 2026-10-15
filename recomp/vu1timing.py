@@ -78,6 +78,7 @@ def decode(lo, up):
                  0x28: (K_ADD, B_VEC), 0x29: (K_MADD, B_VEC), 0x2A: (K_MUL, B_VEC), 0x2C: (K_SUB, B_VEC),
                  0x2D: (K_MSUB, B_VEC)}.get(sop)
             if k: d.uk = U_ARITH; d.to_acc = 1; d.kind, d.bsrc = k
+    d.flags = (d.uk == U_ARITH and (d.to_acc or d.kind not in (K_MAX, K_MINI))) or d.uk in (U_OPMSUB, U_OPMULA)   # sets MAC/status
     d.ibit = up >> 31; d.ebit = (up >> 30) & 1
     d.lk = 'NONE'; d.sop = 0; d.imm = 0
     d.ldest = (lo >> 21) & 15; d.lft = (lo >> 16) & 31; d.lfs = (lo >> 11) & 31; d.lit = d.lft & 15; d.lis = d.lfs & 15

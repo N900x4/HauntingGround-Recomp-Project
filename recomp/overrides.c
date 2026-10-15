@@ -40,6 +40,7 @@ static int ov_mwply_get_stat(Ctx *c) {
 }
 
 void overrides_init(void) {
+    extern void options_init(void); options_init();
     const char *m = getenv("HG_MOVIES");
     movie_skip = m && !strcmp(m, "skip");   /* movies play (IPU emulation); HG_MOVIES=skip skips them */
     if (getenv("HG_MOVIES_UNTIL")) skip_until = atol(getenv("HG_MOVIES_UNTIL"));

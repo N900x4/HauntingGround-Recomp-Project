@@ -7,15 +7,21 @@
    latest input to the emulated DualShock 2 (iop_pad_mc.c). Without SDL (or with HG_WINDOW=0, or no display)
    everything here is a no-op and the runtime stays headless.
 
-   Keyboard: arrows = D-pad, X = Cross, C = Circle, Z = Square, S = Triangle, Enter = Start, Right Shift = Select,
-             Q/E = L1/R1, 1/3 = L2/R2, I/J/K/L = left stick, F11 = fullscreen, Esc = quit.
+   Keyboard and controller mappings come from the settings (settings.c: hg.ini, changed in the game's Options menu).
+   The defaults: arrows = D-pad, X = Cross, C = Circle, Z = Square, S = Triangle, Enter = Start, Right Shift = Select,
+             Q/E = L1/R1, 1/3 = L2/R2, I/J/K/L = left stick; F11 = fullscreen, F3 = overlay, Esc = quit.
    Gamepad (SDL GameController): A/B/X/Y = Cross/Circle/Square/Triangle, shoulders = L1/R1, triggers = L2/R2,
-             sticks = analog sticks, stick clicks = L3/R3, Back = Select, Start = Start. */
+             sticks = analog sticks (not mapped), stick clicks = L3/R3, Back = Select, Start = Start.
+   Settings the UI thread applies itself when they change: full screen, vsync (the swapchain's present mode), the
+   presenting rate (60 or 120 a second, following the GS's frame interpolation). It also tells the settings which
+   kind of controller is connected (the names in the Options menu) and the display's height ("auto" resolution), and
+   turns the next key or button into a mapping while the Options menu waits for one. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ee_runtime.h"
 #include "hle.h"
+#include "settings.h"
 
 int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph);
 int gs_display_gpu(int *slot, uint64_t *id);
@@ -39,19 +45,11 @@ static SDL_atomic_t ui_stop, ui_stopped;                 /* host_shutdown() */
 static uint32_t *frame;   /* the SDL path: up to 4096 x 4096 (the upscaled picture, HG_GSVK_SCALE <= 6) */
 static int vkmode;   /* 0: SDL renderer; 1: waiting for the GPU renderer to present from video memory; 2: presenting from it */
 
-static const struct { SDL_Scancode sc; int bit; } keymap[] = {
-    { SDL_SCANCODE_UP, B_UP }, { SDL_SCANCODE_DOWN, B_DOWN }, { SDL_SCANCODE_LEFT, B_LEFT }, { SDL_SCANCODE_RIGHT, B_RIGHT },
-    { SDL_SCANCODE_X, B_CROSS }, { SDL_SCANCODE_C, B_CIRCLE }, { SDL_SCANCODE_Z, B_SQUARE }, { SDL_SCANCODE_S, B_TRIANGLE },
-    { SDL_SCANCODE_RETURN, B_START }, { SDL_SCANCODE_RSHIFT, B_SELECT }, { SDL_SCANCODE_Q, B_L1 }, { SDL_SCANCODE_E, B_R1 },
-    { SDL_SCANCODE_1, B_L2 }, { SDL_SCANCODE_3, B_R2 },
-};
-static const struct { SDL_GameControllerButton b; int bit; } padmap[] = {
-    { SDL_CONTROLLER_BUTTON_A, B_CROSS }, { SDL_CONTROLLER_BUTTON_B, B_CIRCLE }, { SDL_CONTROLLER_BUTTON_X, B_SQUARE }, { SDL_CONTROLLER_BUTTON_Y, B_TRIANGLE },
-    { SDL_CONTROLLER_BUTTON_LEFTSHOULDER, B_L1 }, { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, B_R1 }, { SDL_CONTROLLER_BUTTON_LEFTSTICK, B_L3 },
-    { SDL_CONTROLLER_BUTTON_RIGHTSTICK, B_R3 }, { SDL_CONTROLLER_BUTTON_BACK, B_SELECT }, { SDL_CONTROLLER_BUTTON_START, B_START },
-    { SDL_CONTROLLER_BUTTON_DPAD_UP, B_UP }, { SDL_CONTROLLER_BUTTON_DPAD_DOWN, B_DOWN }, { SDL_CONTROLLER_BUTTON_DPAD_LEFT, B_LEFT },
-    { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, B_RIGHT },
-};
+/* the mappings in use (copied from the settings whenever they change) */
+static int kbmap[PB_N], padmap[PB_BUTTONS];
+static uint32_t ui_gen;        /* the settings generation last applied by the UI thread */
+static int fs_flip;            /* F11 while a recording is replayed: the window only (the settings come from it) */
+static int ui_vsync = -1;      /* the present mode last asked of the swapchain */
 
 int host_window_wanted(void) { const char *w = getenv("HG_WINDOW"); return !(w && !strcmp(w, "0"))
 #ifndef _WIN32
@@ -59,10 +57,24 @@ int host_window_wanted(void) { const char *w = getenv("HG_WINDOW"); return !(w &
 #endif
         ; }
 int host_window_active(void) { return active == 1; }
+static int pad_kind(void) {   /* for the button names: 2 PlayStation, 1 others (Xbox names), 0 none */
+    if (!pad) return 0;
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    const SDL_GameControllerType t = SDL_GameControllerGetType(pad);
+    if (t == SDL_CONTROLLER_TYPE_PS3 || t == SDL_CONTROLLER_TYPE_PS4 || t == SDL_CONTROLLER_TYPE_PS5) return 2;
+#endif
+    return 1;
+}
 static void open_pad(int idx) {
     if (pad || !SDL_IsGameController(idx)) return;
     pad = SDL_GameControllerOpen(idx);
     if (pad) L("host: gamepad \"%s\" connected\n", SDL_GameControllerName(pad));
+    settings_set_pad_type_live(pad_kind());
+}
+/* "auto" resolution: the height of the display the window is on */
+static void note_display(void) {
+    SDL_DisplayMode m; const int d = SDL_GetWindowDisplayIndex(win);
+    if (d >= 0 && !SDL_GetDesktopDisplayMode(d, &m)) settings_ui_auto_scale(m.h);
 }
 static void sdl_renderer(void) {
     ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
@@ -72,15 +84,16 @@ static void sdl_renderer(void) {
 static int host_init(void) {   /* on the UI thread */
     SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");   /* a sharp window on scaled displays, not one Windows stretches */
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) { L("host: SDL_Init failed: %s (running headless)\n", SDL_GetError()); return 0; }
-    int scale = getenv("HG_SCALE") ? atoi(getenv("HG_SCALE")) : 2; if (scale < 1) scale = 1;
+    const int scale = settings()->window_scale;   /* HG_SCALE, window_scale */
     win = SDL_CreateWindow("Haunting Ground Recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640 * scale, 448 * scale, SDL_WINDOW_RESIZABLE);
     if (!win) { L("host: no window: %s (running headless)\n", SDL_GetError()); SDL_Quit(); return 0; }
 #ifdef HAVE_VULKAN   /* the GPU renderer presents itself once it is set up (at the first primitive): no SDL renderer on the window */
-    const char *g = getenv("HG_GSVK"), *pp = getenv("HG_PRESENT");
-    if (g && atoi(g) > 0 && !getenv("HG_GSVKCHECK") && !(pp && !strcmp(pp, "sdl"))) vkmode = 1;
+    const char *pp = getenv("HG_PRESENT");
+    if (settings()->renderer && !getenv("HG_GSVKCHECK") && !(pp && !strcmp(pp, "sdl"))) vkmode = 1;
 #endif
     if (!vkmode) sdl_renderer();
     for (int i = 0; i < SDL_NumJoysticks(); i++) open_pad(i);
+    note_display();
     L("host: SDL window open (%s, %d joystick(s))\n", vkmode ? "to be presented by the GPU renderer" : ren ? "SDL renderer" : "no renderer", SDL_NumJoysticks());
     return 1;
 }
@@ -133,14 +146,21 @@ static void ov_paint(uint32_t *fb, int w, int h) {
 static uint8_t axis8(Sint16 v) { int a = (v + 32768) >> 8; return a < 0 ? 0 : a > 255 ? 255 : a; }
 static void ui_input(void) {
     uint16_t held = 0; uint8_t an[4] = { 0x80, 0x80, 0x80, 0x80 };   /* rx ry lx ly */
-    const Uint8 *ks = SDL_GetKeyboardState(0);
-    for (size_t i = 0; i < sizeof keymap / sizeof keymap[0]; i++) if (ks[keymap[i].sc]) held |= 1u << keymap[i].bit;
-    if (ks[SDL_SCANCODE_J]) an[2] = 0x00; if (ks[SDL_SCANCODE_L]) an[2] = 0xFF;
-    if (ks[SDL_SCANCODE_I]) an[3] = 0x00; if (ks[SDL_SCANCODE_K]) an[3] = 0xFF;
+    int nk = 0; const Uint8 *ks = SDL_GetKeyboardState(&nk);
+    for (int b = 0; b < PB_BUTTONS; b++) if (kbmap[b] > 0 && kbmap[b] < nk && ks[kbmap[b]]) held |= 1u << b;
+#define KEY(pb) (kbmap[pb] > 0 && kbmap[pb] < nk && ks[kbmap[pb]])
+    if (KEY(PB_LS_LEFT)) an[2] = 0x00;
+    if (KEY(PB_LS_RIGHT)) an[2] = 0xFF;
+    if (KEY(PB_LS_UP)) an[3] = 0x00;
+    if (KEY(PB_LS_DOWN)) an[3] = 0xFF;
+#undef KEY
     if (pad) {
-        for (size_t i = 0; i < sizeof padmap / sizeof padmap[0]; i++) if (SDL_GameControllerGetButton(pad, padmap[i].b)) held |= 1u << padmap[i].bit;
-        if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 16000) held |= 1u << B_L2;
-        if (SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16000) held |= 1u << B_R2;
+        for (int b = 0; b < PB_BUTTONS; b++) {
+            const int in = padmap[b];
+            if (in == PAD_LT || in == PAD_RT) {
+                if (SDL_GameControllerGetAxis(pad, in == PAD_LT ? SDL_CONTROLLER_AXIS_TRIGGERLEFT : SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16000) held |= 1u << b;
+            } else if (in >= 0 && SDL_GameControllerGetButton(pad, (SDL_GameControllerButton)in)) held |= 1u << b;
+        }
         Sint16 lx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX), ly = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
         Sint16 rx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX), ry = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
         if (abs(lx) > 6000 || abs(ly) > 6000) { an[2] = axis8(lx); an[3] = axis8(ly); }
@@ -148,19 +168,66 @@ static void ui_input(void) {
     }
     SDL_AtomicSet(&in_held, held); SDL_AtomicSet(&in_an, (int)((uint32_t)an[0] | (uint32_t)an[1] << 8 | (uint32_t)an[2] << 16 | (uint32_t)an[3] << 24));
 }
+/* a key or button for the mapping page that waits for one (settings_capture_target): 1 if taken */
+static int capture_event(const SDL_Event *e) {
+    static int target = -1;
+    const int t = settings_ui_capture_target();   /* (taken: put back below unless this event answers it) */
+    if (t >= 0) target = t;
+    if (target < 0) return 0;
+    const int kind = target >> 8, pb = target & 0xFF;
+    char key[32], val[64]; key[0] = 0;
+    if (e->type == SDL_KEYDOWN && !e->key.repeat) {
+        const SDL_Scancode sc = e->key.keysym.scancode;
+        if (sc == SDL_SCANCODE_ESCAPE) { snprintf(key, sizeof key, "capture"); snprintf(val, sizeof val, "cancel"); }
+        else if (kind == 0 && sc != SDL_SCANCODE_F3 && sc != SDL_SCANCODE_F11) {
+            snprintf(key, sizeof key, "kb.%s", settings_button_key(pb)); snprintf(val, sizeof val, "%s", settings_key_name((int)sc));
+        }
+    } else if (kind == 1 && e->type == SDL_CONTROLLERBUTTONDOWN) {
+        snprintf(key, sizeof key, "pad.%s", settings_button_key(pb)); snprintf(val, sizeof val, "%s", settings_pad_ini(e->cbutton.button));
+    } else if (kind == 1 && e->type == SDL_CONTROLLERAXISMOTION && e->caxis.value > 16000 &&
+               (e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
+        snprintf(key, sizeof key, "pad.%s", settings_button_key(pb));
+        snprintf(val, sizeof val, "%s", settings_pad_ini(e->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? PAD_LT : PAD_RT));
+    }
+    if (!key[0]) return 0;
+    settings_host_request(key, val); target = -1;
+    return 1;
+}
 static void ui_events(void) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
+        if (capture_event(&e)) continue;   /* (Esc then cancels the capture instead of quitting) */
         if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) SDL_AtomicSet(&ui_quit, 1);
         if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F3 && !e.key.repeat) overlay = !(overlay > 0);
         if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
-            int fs = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP; SDL_SetWindowFullscreen(win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+            /* the setting (recorded, so a replay shows the same value in the menu); a replay flips the window only */
+            if (settings_replaying()) fs_flip ^= 1;
+            else settings_host_request("fullscreen", settings()->fullscreen ? "0" : "1");
         }
         if (e.type == SDL_CONTROLLERDEVICEADDED) open_pad(e.cdevice.which);
         if (e.type == SDL_CONTROLLERDEVICEREMOVED && pad && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad))) {
-            SDL_GameControllerClose(pad); pad = 0; L("host: gamepad disconnected\n");
+            SDL_GameControllerClose(pad); pad = 0; L("host: gamepad disconnected\n"); settings_set_pad_type_live(0);
         }
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+        if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED) note_display();
+#endif
     }
+}
+/* settings that changed since the last look: mappings, full screen, vsync */
+static void ui_settings(void) {
+    const uint32_t g = settings_generation();
+    static int fs_now = -1;
+    if (g != ui_gen) {
+        ui_gen = g;
+        const Settings *st = settings();
+        for (int i = 0; i < PB_N; i++) kbmap[i] = st->kb[i];
+        for (int i = 0; i < PB_BUTTONS; i++) padmap[i] = st->pad[i];
+#ifdef HAVE_VULKAN
+        if (st->vsync != ui_vsync) { ui_vsync = st->vsync; gsvk_present_mode(ui_vsync); }
+#endif
+    }
+    const int fs = settings()->fullscreen ^ fs_flip;
+    if (fs != fs_now) { fs_now = fs; SDL_SetWindowFullscreen(win, fs ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
 }
 static void ui_present(void) {
 #ifdef HAVE_VULKAN
@@ -204,8 +271,9 @@ static int ui_main(void *arg) {
     const int ok = host_init();
     SDL_AtomicSet(&ui_ready, ok ? 1 : -1);
     if (!ok) return 0;
-    const char *ip = getenv("HG_GSVK_INTERP");
-    const double rate = 59.94 * (ip && atoi(ip) >= 2 ? 2 : 1), period = 1.0 / rate;
+    extern int gs_interp_now(void);
+    int x2 = settings_ui_display_rate_x2();   /* 120 fps: two presents per VBlank (then from what the GS does) */
+    double rate = 59.94 * (x2 ? 2 : 1), period = 1.0 / rate;
     const Uint64 f = SDL_GetPerformanceFrequency();
     double next = (double)SDL_GetPerformanceCounter() / f;
     static int plog = -1; if (plog < 0) plog = getenv("HG_PRESENTLOG") ? 600 : 0;
@@ -218,8 +286,14 @@ static int ui_main(void *arg) {
 #endif
             SDL_DestroyWindow(win); SDL_AtomicSet(&ui_stopped, 1); return 0;
         }
-        ui_events(); ui_input();
+        ui_settings(); ui_events(); ui_input();
         ui_present();
+#ifdef HAVE_VULKAN
+        if (gsvk_ready() > 0 && (gs_interp_now() >= 2) != x2) {   /* (once the GPU renderer runs) */
+            x2 = gs_interp_now() >= 2; rate = 59.94 * (x2 ? 2 : 1); period = 1.0 / rate;
+            L("host: presenting at %.2f Hz\n", rate);
+        }
+#endif
         if (plog > 0 && (double)SDL_GetPerformanceCounter() / f - t_start >= plog_from) { plog--; const uint64_t tg = gs_display_tag();
             L("PRESENT %.3f ms vb %llu.%d%s\n", (double)SDL_GetPerformanceCounter() / f * 1000.0, (unsigned long long)(tg >> 2), (int)(tg >> 1 & 1), tg & 1 ? " i" : ""); }
         next += period;

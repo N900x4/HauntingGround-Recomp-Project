@@ -24,6 +24,7 @@ All take outputs into `$HG_SCRATCH` (default `D:/ps2-work/scratch`) and run from
 | G6 | `HG_VI_SELFTEST=1` with `HG_GSVK=1 HG_GSVK_INTERP=1` (e.g. a `runhash.sh` run; the summary is in its log) | 0 differ |
 | G7 | `wintest.sh TAG [env]` (window, muted, Castle Suite), then `pacing.py $HG_SCRATCH/win_TAG.log` | speed 1.00x, median 16.68 ms (8.34 at 120 fps), no repeats, none out of order |
 | G10 | `picgate.sh TAG [env]` (pictures shown, stage 1 and the Castle Suite), then `piccmp.py REF_DIR NEW_DIR` | copy-0 pictures identical; upscaled and in-between ones within 1 level in at most 0.01 % of pixels |
+| Options (phase 3) | `optionstest.sh TAG [env]`: the Options menu's extra rows driven by a script (every row changed, both mapping pages, Reset Defaults, live resolution and frame-rate switches); add `HG_PADREC=DIR` to record it, `HG_PADPLAY=DIR` to replay | two runs identical (frames every 5 VBlanks); the recording's replay identical too |
 
 Timing (G8): `abba.py BIN_A BIN_B [MAXVB [FROM_VB]]` from `recomp/` (EE thread and VU1 ms per VBlank, A-B-B-A with
 the drift; `HG_ROUTE=cs` for the Castle Suite, `HG_GSDRAW=0` to leave the GS out). VU1 lockstep (G4): any run with

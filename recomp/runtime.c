@@ -242,6 +242,8 @@ int main(int argc, char **argv) {
     t_start = now();
     host_start_timers(on_prof, on_alarm);
     host_thread_boost();   /* the EE thread */
+    extern void settings_init(void); settings_init();   /* hg.ini and the environment (settings.c) */
+    extern void pad_rr_init(void); pad_rr_init();       /* a replayed recording's settings apply before the window and the GS start */
     hle_init();
     extern void overrides_init(void); overrides_init();
     if (getenv("HG_PRESS")) { char *p = getenv("HG_PRESS"); while (*p && npress < 16) { press_at[npress++] = strtol(p, &p, 10); while (*p == ',') p++; }

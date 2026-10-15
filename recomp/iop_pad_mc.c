@@ -20,6 +20,7 @@
 #include "compat.h"
 #include "ee_runtime.h"
 #include "hle.h"
+#include "settings.h"
 
 static uint32_t R32(uint32_t a) { uint32_t v; memcpy(&v, gptr(a), 4); return v; }
 static void W32(uint32_t a, uint32_t v) { memcpy(gptr(a), &v, 4); }
@@ -41,12 +42,12 @@ static uint8_t pad_analog[16] = { 0x80, 0x80, 0x80, 0x80 };
 /* scripted input for headless runs: HG_PAD="600:cross,900:cross+start,1200-1260:up"
    vblank[:-end]:buttons ; a single vblank holds the buttons for 6 VBlanks */
 typedef struct { long from, to; uint16_t bits; } PadEv;
-static PadEv pev[64]; static int npev = -1;
+static PadEv pev[256]; static int npev = -1;
 static void pad_script_load(void) {
     npev = 0;
     const char *e = getenv("HG_PAD"); if (!e) return;
     char *s = strdup(e), *save = 0;
-    for (char *tok = strtok_r(s, ",", &save); tok && npev < 64; tok = strtok_r(0, ",", &save)) {
+    for (char *tok = strtok_r(s, ",", &save); tok && npev < 256; tok = strtok_r(0, ",", &save)) {
         PadEv *p = &pev[npev]; char *c = strchr(tok, ':'); if (!c) continue;
         *c = 0; p->from = strtol(tok, 0, 10); char *dash = strchr(tok, '-'); p->to = dash ? strtol(dash + 1, 0, 10) : p->from + 6;
         p->bits = 0;
@@ -66,7 +67,10 @@ void pad_set_input(uint16_t held, const uint8_t analog[4]) { pad_held = held; if
    input is ignored. Emulated time does not depend on the host, so a replay reaches the same frames as the session,
    as long as the build has not changed how the game runs. While recording or replaying, the clock the game reads
    (CDVD RTC, memory card file dates) is the recorded start time plus emulated time: a replay then writes the same
-   dates, and the load screen picks the same newest save. */
+   dates, and the load screen picks the same newest save.
+   The host settings in effect go into the header ("# set key=value"), and changes that do not come from the pad (F11,
+   a key or button captured by the Options menu's mapping pages, the kind of controller the menu names) are written
+   as "set VBLANK key=value" lines; a replay applies both (settings.c), so the menu's extra rows show the same. */
 static int rr_mode;                    /* 0 off, 1 recording, 2 replaying */
 static time_t rr_base;
 static FILE *rr_f;
@@ -113,6 +117,7 @@ static void remove_tree(const char *p) {
 static const char *const rr_envs[] = { "HG_MOVIES", "HG_MOVIES_UNTIL", "HG_EE_MIPS", "HG_TIMING", "HG_VUSTALL", "HG_VUFLAGDELAY", "HG_FPRZ" };
 static void rr_init(void) {
     static int done; if (done) return; done = 1;
+    settings_init();
     const char *rec = getenv("HG_PADREC"), *play = getenv("HG_PADPLAY");
     char p[1100];
     if (play) {
@@ -121,7 +126,10 @@ static void rr_init(void) {
         char line[512]; size_t cap = 0;
         while (fgets(line, sizeof line, f)) {
             unsigned long long vb; unsigned h, a0, a1, a2, a3; long long b; char k[64], v[256];
+            unsigned long long sv; char sk[64], sval[128];
             if (sscanf(line, "clock %lld", &b) == 1) rr_base = (time_t)b;
+            else if (sscanf(line, "# set %63[^=]=%127[^\n]", sk, sval) == 2) settings_replay_header(sk, sval);
+            else if (sscanf(line, "set %llu %63[^=]=%127[^\n]", &sv, sk, sval) == 3) settings_replay_event(sv, sk, sval);
             else if (sscanf(line, "# env %63[^=]=%255[^\n]", k, v) == 2) {
                 const char *now = getenv(k); if (!now) now = "";
                 if (strcmp(now, !strcmp(v, "(unset)") ? "" : v)) L("replay: WARNING: recorded with %s=%s, now \"%s\": the replay may differ\n", k, v, now);
@@ -152,6 +160,7 @@ static void rr_init(void) {
         fprintf(rr_f, "# Haunting Ground input recording (HG_PADPLAY=DIR replays it). Lines: VBlank, buttons (active-high bits), analog rx ry lx ly; hex\n");
         fprintf(rr_f, "clock %lld\n", (long long)rr_base);
         for (size_t i = 0; i < sizeof rr_envs / sizeof rr_envs[0]; i++) fprintf(rr_f, "# env %s=%s\n", rr_envs[i], getenv(rr_envs[i]) ? getenv(rr_envs[i]) : "(unset)");
+        settings_write_header(rr_f);
         fflush(rr_f);
         rr_mode = 1; L("recording input to %s\n", dir);
     }
@@ -186,6 +195,7 @@ static uint16_t explore(uint64_t vb) {
 }
 void pad_vblank(uint64_t vb) {
     rr_init();
+    settings_vblank(vb, rr_mode, rr_f);   /* host changes: recorded (or, replaying, taken from the recording) */
     {   /* HG_POSLOG=n: log Fiona's stage and position every n VBlanks, and at every stage change (no input of its own) */
         static long every = -1; static uint32_t last_stg = 0xFFFFFFFF;
         if (every < 0) every = getenv("HG_POSLOG") ? atol(getenv("HG_POSLOG")) : 0;
@@ -397,3 +407,4 @@ int mc_rpc(uint32_t sid, uint32_t fn, const uint8_t *S, uint32_t ssize, uint32_t
     }
     return 1;
 }
+void pad_rr_init(void) { rr_init(); }

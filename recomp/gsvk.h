@@ -43,6 +43,7 @@ void gsvk_compose_fetch(int slot, uint32_t *dst, size_t words);  /* after gsvk_f
 /* where primitives and uploads go: copies [first, first + count) (primitives add first << 20 to their mbase) */
 void gsvk_set_target(uint32_t first, uint32_t count);
 void gsvk_copy_copies(uint32_t dst, uint32_t src, uint32_t count);   /* whole copies, on the GPU, in stream order */
+int gsvk_resize(int ncopies);   /* local memory made again for another number of copies (contents lost); 0: kept the old size */
 void gsvk_skip_exact(int on);   /* 1: batches leave out the exact copy (copy 0) of the set drawn into (replays only need the others) */
 void gsvk_finish(void);                                                    /* submit and wait for everything */
 uint64_t gsvk_submit(void);                                                /* submit, do not wait: an id */
@@ -60,7 +61,8 @@ int gsvk_pic(const GsVkSprite *s, uint64_t *id);         /* GS thread: as gsvk_c
 void gsvk_pic_release(int k);                            /* any thread: picture image k is not needed (dropped unseen) */
 int gsvk_present_init(void *hinstance, void *hwnd);      /* UI thread: a swapchain on the window; 0: not possible */
 void gsvk_present(int k, uint64_t id, const uint32_t *ov);   /* UI thread: show picture k (k < 0: the last again), overlay 176 x 42 or 0 */
-void gsvk_present_shutdown(void);                        /* UI thread, before the process ends */
+void gsvk_present_shutdown(void);
+void gsvk_present_mode(int v);   /* any thread: 0 mailbox (default), 1 FIFO (vsync), 2 immediate; applied at the next present */                        /* UI thread, before the process ends */
 /* checking: the GPU's memory is set to `now`, then primitives are recorded, then the GPU's memory comes back */
 void gsvk_check_begin(const uint32_t *now);
 const uint32_t *gsvk_check_end(double *ms);

@@ -35,11 +35,13 @@ obj/runtime.o: runtime.c ee_runtime.h hle.h compat.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/hle.o: hle.c ee_runtime.h hle.h compat.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/iop_pad_mc.o: iop_pad_mc.c ee_runtime.h hle.h compat.h
+obj/iop_pad_mc.o: iop_pad_mc.c ee_runtime.h hle.h compat.h settings.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/overrides.o: overrides.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/gs.o: gs.c ee_runtime.h hle.h compat.h gsvk.h
+obj/options.o: game/options.c game/guest.h ee_runtime.h hle.h settings.h
+	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
+obj/gs.o: gs.c ee_runtime.h hle.h compat.h gsvk.h settings.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) $(VK_CFLAGS) -O2 -ffp-contract=off -c $< -o $@
 gen/gs_sprite_spv.h: vk/gs_sprite.comp
 	glslangValidator -V --target-env vulkan1.1 --vn gs_sprite_spv -o $@ $<
@@ -51,7 +53,9 @@ obj/gsvk.o: gsvk.c gsvk.h gen/gs_sprite_spv.h gen/gs_batch_spv.h gen/gs_batchc_s
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/dmac.o: dmac.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/host_sdl.o: host_sdl.c ee_runtime.h hle.h gsvk.h
+obj/settings.o: settings.c settings.h hle.h
+	@mkdir -p obj; $(CC) $(RTFLAGS) $(SDL_CFLAGS) -c $< -o $@
+obj/host_sdl.o: host_sdl.c ee_runtime.h hle.h gsvk.h settings.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) $(SDL_CFLAGS) $(VK_CFLAGS) -c $< -o $@
 obj/vu1.o: vu1.c vu1_core.h ee_runtime.h hle.h vu1_state.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -ffp-contract=off -c $< -o $@
@@ -69,7 +73,7 @@ obj/interp.o: interp.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/compat.o: compat.c compat.h ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-$(EXE): $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o obj/iop_pad_mc.o obj/overrides.o obj/gs.o obj/dmac.o obj/host_sdl.o obj/vu1.o obj/vu1_ref.o obj/ipu.o obj/iop_cpu.o obj/iop_kernel.o obj/spu2.o obj/compat.o $(VK_OBJ)
+$(EXE): $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o obj/iop_pad_mc.o obj/overrides.o obj/options.o obj/settings.o obj/gs.o obj/dmac.o obj/host_sdl.o obj/vu1.o obj/vu1_ref.o obj/ipu.o obj/iop_cpu.o obj/iop_kernel.o obj/spu2.o obj/compat.o $(VK_OBJ)
 	$(CC) $(LDFLAGS_OS) -o $@ $^ -lm -lpthread $(SDL_LIBS) $(VK_LIBS)
 clean:
 	rm -rf obj hgboot hgboot.exe

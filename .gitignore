@@ -54,3 +54,6 @@ memcards/
 hostprof.txt
 recordings/
 crashes/
+
+# Host settings (the Options menu writes them next to the executable)
+hg.ini

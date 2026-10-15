@@ -15,6 +15,7 @@
 #include "compat.h"
 #include "ee_runtime.h"
 #include "hle.h"
+#include "settings.h"
 #if defined(__x86_64__)
 #include <immintrin.h>
 #endif
@@ -1173,6 +1174,8 @@ static const Draw *vi_cd; static const Vtx *vi_cw; static int vi_cprim; static u
 static void vi_log_rec(const GsVkSprite *rec, const uint32_t *clut, int alone); static void vi_log_break(void);
 typedef struct { VkLogEnt *e; size_t n, cap; uint32_t *cl; size_t ncl, capcl; uint32_t *data; size_t nd, capd; int disp; } VkLog;
 static VkLog vlog[2]; static int vlog_i, vlog_prev_ok, vk_have_snap, vi_show; static uint64_t vk_last_done;
+static int vi_partial;     /* the log being collected began in the middle of a frame (vk_reconfigure) */
+static unsigned vk_conf_gen;   /* bumped by vk_reconfigure: pictures composed before it are gone */
 static uint32_t vk_disp_fbp = ~0u;
 static uint64_t vi_r_sub; static double vi_r_wait;
 static double vi_t_match, vi_t_replay, vi_t_compose, vi_t_log, vi_t_present;
@@ -1203,15 +1206,15 @@ static void draw_triangle_cpu(const Draw *d, const Vtx *v0, const Vtx *v1, const
 static void gsvk_setup(void) {
     if (vkchk_from != -2) return;
     vkchk_from = -1;
-    const char *e = getenv("HG_GSVKCHECK"), *lv = getenv("HG_GSVK");
-    vk_live = lv && atoi(lv) > 0;
+    const char *e = getenv("HG_GSVKCHECK");
+    vk_live = settings()->renderer;   /* HG_GSVK or renderer = gpu (settings.c) */
     vkb_mode = getenv("HG_GSVKBATCH") && atoi(getenv("HG_GSVKBATCH")) > 0;
-    if (vk_live && getenv("HG_GSVK_SCALE")) { int n = atoi(getenv("HG_GSVK_SCALE")); if (n >= 2 && n <= 8) { vk_scale = n; vk_ncopy = 1 + n * n; } }
+    if (vk_live) { const int n = settings_gs_scale(); if (n >= 2 && n <= 8) { vk_scale = n; vk_ncopy = 1 + n * n; } }   /* HG_GSVK_SCALE */
     if (e) { vkchk_from = atol(e); const char *c = strchr(e, ':'); vkchk_to = c ? atol(c + 1) : vkchk_from;
              if (vk_live) { L("GSVK: HG_GSVKCHECK given: checking, not live\n"); vk_live = 0; } }
     if (vkchk_from < 0 && !vk_live) return;
     static int32_t tabs[GSVK_TABLES]; gsvk_tables(tabs);
-    vk_interp = vk_live && getenv("HG_GSVK_INTERP") ? atoi(getenv("HG_GSVK_INTERP")) : 0;   /* 1: 60 fps, 2: 120 fps */
+    vk_interp = vk_live ? settings_gs_interp() : 0;   /* 1: 60 fps, 2: 120 fps (HG_GSVK_INTERP, fps) */
     if (vk_interp < 0 || vk_interp > 2) vk_interp = vk_interp > 2 ? 2 : 0;
     if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0], tabs, vk_interp ? 3 * vk_ncopy : vk_ncopy)) { vkchk_from = -1; vk_live = vk_interp = 0; return; }
     gsvk_set_target(0, vk_ncopy);
@@ -1861,9 +1864,42 @@ static void vi_vblank(uint64_t vb, const uint8_t *priv) {
     else vi_off_cadence++;
     gsvk_batch_close();
     gsvk_copy_copies(2 * vk_ncopy, 0, vk_ncopy); vk_have_snap = 1;   /* S = the memory as the next frame begins */
-    vk_last_done = vb; vlog_prev_ok = 1;
+    vk_last_done = vb; vlog_prev_ok = !vi_partial; vi_partial = 0;
     vlog_i ^= 1; vi_reset(&vlog[vlog_i]);
 }
+/* The upscaling factor and the frame rate can change while the game runs (the Options menu): gs_vblank passes the
+   wanted ones with each VBlank and the GS thread switches at that VBlank, before anything of it is drawn. The GPU
+   finishes, what it drew comes back into vm, local memory is made again for the new number of copies and filled from
+   vm, and frame interpolation starts over (its logs and snapshot belonged to the old copies; the first in-between
+   picture comes two frames later). Copy 0, the exact one, holds the same memory before and after, so the game's own
+   frames and everything the CPU reads are unaffected. */
+static int vi_pending;
+static void vk_reconfigure(uint64_t vb, int scale, int interp) {
+    if (vkchk_from == -2 || !vk_live) return;   /* not set up yet (it reads the settings itself), or not the GPU renderer */
+    if (scale < 2 || scale > 8) scale = 1;
+    if (interp < 0 || interp > 2) interp = 0;
+    if (scale == vk_scale && interp == vk_interp) return;
+    const double t0 = host_now();
+    gsvk_batch_close();
+    gsvk_live_need(all_pages);   /* everything the GPU drew, into vm */
+    for (int j = 0; j < 3; j++) { vi_drop(j); vi_pw[j] = 0; }
+    vi_pending = 0; vi_show = 0; vlog_prev_ok = 0; vk_have_snap = 0; vi_partial = 1;
+    vi_reset(&vlog[0]); vi_reset(&vlog[1]);
+    const int ncopy = scale >= 2 ? 1 + scale * scale : 1;
+    if (!gsvk_resize(interp ? 3 * ncopy : ncopy)) {   /* kept the old size (or lost the GPU) */
+        L("GSVK: could not switch to x%d%s; staying at x%d\n", scale, interp ? " with interpolation" : "", vk_scale);
+        memcpy(pg_cpu, all_pages, sizeof pg_cpu); memset(pg_gpu, 0, sizeof pg_gpu); memset(pg_rt, 0, sizeof pg_rt);
+        vk_hr_changes++; vk_conf_gen++; return;
+    }
+    vk_scale = scale; vk_ncopy = ncopy; vk_interp = interp;
+    gsvk_set_target(0, vk_ncopy);
+    memcpy(pg_cpu, all_pages, sizeof pg_cpu); memset(pg_gpu, 0, sizeof pg_gpu); memset(pg_rt, 0, sizeof pg_rt);
+    vk_hr_changes++; vk_conf_gen++;
+    char res[16]; if (vk_scale > 1) snprintf(res, sizeof res, "x%d", vk_scale); else snprintf(res, sizeof res, "native");
+    L("GSVK: switched at VBlank %llu to %s, %d fps (local memory %d x 4 MB, %.0f ms)\n", (unsigned long long)vb,
+      res, vk_interp == 2 ? 120 : vk_interp ? 60 : 30, interp ? 3 * ncopy : ncopy, (host_now() - t0) * 1e3);
+}
+int gs_interp_now(void) { return vk_interp; }   /* any thread: the frame rate the pictures come at (UI thread pacing) */
 #endif
 static void draw_triangle_cpu(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2) {
 #if defined(__x86_64__)
@@ -2029,7 +2065,7 @@ static void gsw_init(void) {
     const char *e = getenv("HG_GSTHREADS"); int n = e ? atoi(e) : host_ncpus() / 2;
     if (!e && n > 8) n = 8;
     if (n > GS_MAXW) n = GS_MAXW;
-    if (getenv("HG_PIXWATCH") || getenv("HG_SPRLOG") || getenv("HG_SPRSTAT") || getenv("HG_GSVKCHECK") || (getenv("HG_GSVK") && atoi(getenv("HG_GSVK")) > 0)) n = 0;   /* per-pixel debugging, or the GPU: no workers */
+    if (getenv("HG_PIXWATCH") || getenv("HG_SPRLOG") || getenv("HG_SPRSTAT") || getenv("HG_GSVKCHECK") || settings()->renderer) n = 0;   /* per-pixel debugging, or the GPU: no workers */
     if (n < 1 || !(gsq = calloc(GSQ, sizeof *gsq))) { L("GS: drawing on the GS thread (HG_GSTHREADS=0)\n"); return; }
     gsw_n = n;
     for (int k = 0; k < n; k++) if (pthread_create(&gsw_thr[k], 0, gsw_main, (void *)(intptr_t)k)) { L("GS: worker %d failed to start\n", k); exit(1); }
@@ -2438,7 +2474,8 @@ static int real_pic(const uint8_t *priv, uint32_t **out, int *pw, int *ph, int l
     if (!buf) buf = malloc((size_t)4096 * 4096 * 4);
     *out = buf;
     if (vk_ncopy > 1 && late_ok) {   /* the window: composed now, collected at the next VBlank, the GPU never waited for */
-        static int pend, pslot, pw_, ph_; static uint64_t pid; static unsigned flip;
+        static int pend, pslot, pw_, ph_; static uint64_t pid; static unsigned flip, gen;
+        if (gen != vk_conf_gen) { gen = vk_conf_gen; pend = 0; have = 0; }
         const int changed = !have || vk_hr_changes || memcmp(last, priv, 0xB0);
         int submitted = 0, w2, h2; uint64_t id = 0; const int slot = 4 + (int)(flip & 1);
         if (changed) { memcpy(last, priv, 0xB0); if (display_pic_(priv, 0, 4096, 4096, &w2, &h2, 1, vk_scale, slot)) { id = gsvk_submit(); submitted = 1; flip++; vk_hr_changes = 0; } }
@@ -2460,7 +2497,7 @@ static int real_pic(const uint8_t *priv, uint32_t **out, int *pw, int *ph, int l
    VBlank later than without interpolation); at 120 fps two (1/4 and 1/2 when a frame completed, then 3/4 and the real
    one). With the window presented from video memory (gpu) they go to it as picture images, composed now and never
    waited for; dumps (HG_FRAMES_SHOWN) and the SDL window read them back. */
-static int vi_pending;   /* 120 fps: the 3/4 picture waits for the next VBlank */
+/* vi_pending (120 fps): the 3/4 picture waits for the next VBlank */
 static void vi_present(uint64_t vb, const uint8_t *priv, int window) {
     const int dump = shown_wanted(vb), k = vk_interp >= 2 ? 2 : 1, gpu = window && vi_gpu, cpu = dump || (window && !gpu);
     int it[2], n = 0;   /* in-between picture j (0-2), or 3: the real one */
@@ -2569,7 +2606,7 @@ int gs_display_gpu(int *slot, uint64_t *id) {
     int got = 0;
     pthread_mutex_lock(&front_mx);
 #ifdef HAVE_VULKAN
-    if (vk_interp >= 2) fq_keep = 5;
+    fq_keep = vk_interp >= 2 ? 5 : 2;
 #endif
     while (fq_n > fq_keep) fq_drop();   /* keep the delay short */
 #ifdef HAVE_VULKAN
@@ -2584,7 +2621,7 @@ int gs_display_gpu(int *slot, uint64_t *id) {
     pthread_mutex_unlock(&front_mx);
     return got;
 }
-static void gs_vblank_exec(uint64_t vb, const uint8_t *priv);
+static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg);
 static void *gs_main(void *arg) {
     (void)arg; host_prof_thread("gs"); host_thread_boost();
     for (;;) {
@@ -2598,7 +2635,7 @@ static void *gs_main(void *arg) {
         for (; t != h; t++) {
             const GsEnt *e = &ring[t & (RING - 1)];
             if (e->kind < 4) gif_qword_exec((int)e->kind, e->q);
-            else { gs_vblank_exec(e->q[0], priv_snap[e->q[0] & 3]); atomic_store_explicit(&vb_done, e->q[0], memory_order_release); }
+            else { gs_vblank_exec(e->q[0], priv_snap[e->q[0] & 3], e->q[1]); atomic_store_explicit(&vb_done, e->q[0], memory_order_release); }
             if (((t + 1) & 1023) == 0 && t + 1 != h) {   /* hand space back regularly (not the last: see below) */
                 atomic_store_explicit(&r_tail, t + 1, memory_order_release);
                 if (atomic_load(&prod_sleeping)) { pthread_mutex_lock(&gs_mx); pthread_cond_signal(&gs_cv_space); pthread_mutex_unlock(&gs_mx); }
@@ -2689,7 +2726,7 @@ int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
     want_front = 1;
     pthread_mutex_lock(&front_mx);
 #ifdef HAVE_VULKAN
-    if (vk_interp >= 2) fq_keep = 5;
+    fq_keep = vk_interp >= 2 ? 5 : 2;
 #endif
     while (fq_n > fq_keep) fq_drop();   /* keep the delay short */
     while (fq_n && fq[fq_head].slot >= 0) fq_drop();   /* (picture images: not for this window) */
@@ -2704,14 +2741,21 @@ int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
     return ok;
 }
 void gs_vblank(uint64_t vb) {
-    if (!mtgs) { gs_vblank_exec(vb, gspriv); return; }
+    /* the renderer configuration wanted from this VBlank on (settings): factor | interpolation << 8 */
+    const uint64_t cfg = (uint64_t)settings_gs_scale() | (uint64_t)settings_gs_interp() << 8;
+    if (!mtgs) { gs_vblank_exec(vb, gspriv, cfg); return; }
     memcpy(priv_snap[vb & 3], gspriv, 0xB0);
     atomic_store(&vb_sent, vb);
-    const uint64_t q[2] = { vb, 0 }; push(E_VBLANK, q); wake_consumer();
+    const uint64_t q[2] = { vb, cfg }; push(E_VBLANK, q); wake_consumer();
     if (!lag_ok()) prod_wait(lag_ok);
 }
-static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
+static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg) {
     gsw_drain();   /* the display and frame dumps read local memory */
+#ifdef HAVE_VULKAN
+    vk_reconfigure(vb, (int)(cfg & 0xFF), (int)(cfg >> 8 & 0xFF));
+#else
+    (void)cfg;
+#endif
 #ifdef HAVE_VULKAN
     /* frame dumps (HG_FRAMES) read local memory: what the GPU drew comes back; the window's picture is composed on the
        GPU (upscaled, or presented from video memory) or read back by real_pic() */

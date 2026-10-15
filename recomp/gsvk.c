@@ -77,6 +77,21 @@ static int mkbuf_(Buf *b, VkDeviceSize n, VkBufferUsageFlags use, int mode) {
 }
 static int mkbuf(Buf *b, VkDeviceSize n, VkBufferUsageFlags use) { return mkbuf_(b, n, use, 0); }
 
+/* local memory: ncopies copies of 4 MB, then the out region (6 picture slots), and its host-visible read-back hrb */
+static int mk_local(int ncopies) {
+    const VkBufferUsageFlags xfer = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, sto = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    ncopy = ncopies < 1 ? 1 : (uint32_t)ncopies; up_first = 0; up_count = ncopy; mbase_add = 0;
+    outbase = (VkDeviceSize)ncopy * (1u << 22) + 16;
+    outbytes = ncopy > 1 ? (VkDeviceSize)ncopy * 8 * 1024 * 1024 : (VkDeviceSize)32 << 20;
+    if (!mkbuf_(&dvram, outbase + outbytes, sto | xfer, 2)) return 0;
+    if (!mkbuf_(&hrb, outbytes, xfer, 1) && !mkbuf(&hrb, outbytes, xfer)) return 0;
+    return 1;
+}
+static void free_buf(Buf *b) {
+    if (b->b) vkDestroyBuffer(dev, b->b, 0);
+    if (b->m) vkFreeMemory(dev, b->m, 0);   /* (unmaps it) */
+    memset(b, 0, sizeof *b);
+}
 static _Atomic int ready = 0;   /* gsvk_ready(): state as other threads may see it, once gsvk_init() is over */
 static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *tables, int ncopies);
 int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *tables, int ncopies) {
@@ -135,11 +150,8 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     }
     const VkBufferUsageFlags xfer = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, sto = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     const VkDeviceSize vbytes = ((1u << 20) + 4) * 4;
-    ncopy = ncopies < 1 ? 1 : (uint32_t)ncopies; up_first = 0; up_count = ncopy;
-    outbase = (VkDeviceSize)ncopy * (1u << 22) + 16;
     if (!mkbuf_(&vram, vbytes, xfer, 1)) { vkDestroyBuffer(dev, vram.b, 0); vram.b = 0; L("GSVK: no host-cached memory, mirror uncached\n"); }
-    if ((!vram.p && !mkbuf(&vram, vbytes, xfer)) || !mkbuf_(&dvram, (VkDeviceSize)ncopy * (1u << 22) + 16 + (outbytes = ncopy > 1 ? (VkDeviceSize)ncopy * 8 * 1024 * 1024 : (VkDeviceSize)32 << 20), sto | xfer, 2) ||
-        (outbytes && !mkbuf_(&hrb, outbytes, xfer, 1) && !mkbuf(&hrb, outbytes, xfer)) || !mkbuf(&xoffb, 66u * 2048 * 4, sto) ||
+    if ((!vram.p && !mkbuf(&vram, vbytes, xfer)) || !mk_local(ncopies) || !mkbuf(&xoffb, 66u * 2048 * 4, sto) ||
         !mkbuf(&tabb, GSVK_TABLES * 4, sto) || !mkbuf_(&primb, (VkDeviceSize)PRIM_MAX * sizeof(GsVkSprite), sto, 3) ||
         !mkbuf_(&clutb, (VkDeviceSize)CLUT_MAX * 1024, sto, 3) || !mkbuf(&upb, UP_BYTES, xfer)) { L("GSVK: buffers failed\n"); return 0; }
     memcpy(xoffb.p, xoff32, 33u * 2048 * 4); memcpy((uint32_t *)xoffb.p + 33u * 2048, xoff32z, 33u * 2048 * 4); memcpy(tabb.p, tables, GSVK_TABLES * 4);
@@ -357,6 +369,26 @@ void gsvk_set_target(uint32_t first, uint32_t count) {
     if (first + count > ncopy) return;
     mbase_add = first << 20; up_first = first; up_count = count;
 }
+/* a different number of copies (the upscaling factor or frame interpolation changed while the game runs): all GPU
+   work is finished and local memory is made again at the new size. Its contents are gone: the caller uploads local
+   memory again. The window's picture images are separate and stay. */
+int gsvk_resize(int ncopies) {
+    if (state <= 0) return 0;
+    submit(1);
+    const uint32_t old = ncopy;
+    free_buf(&dvram); free_buf(&hrb);
+    if (!mk_local(ncopies)) {
+        L("GSVK: no video memory for %d copies of local memory; back to %u\n", ncopies, old);
+        free_buf(&dvram); free_buf(&hrb);
+        if (!mk_local((int)old)) { L("GSVK: local memory lost\n"); state = -1; return 0; }
+    }
+    VkDescriptorBufferInfo bi = { dvram.b, 0, VK_WHOLE_SIZE };
+    VkWriteDescriptorSet wr = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = dset, .dstBinding = 0, .descriptorCount = 1,
+                                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi };
+    vkUpdateDescriptorSets(dev, 1, &wr, 0, 0);
+    vfresh = 1;
+    return ncopy == (uint32_t)ncopies;
+}
 void gsvk_copy_copies(uint32_t dst, uint32_t src, uint32_t count) {
     if (state <= 0 || dst + count > ncopy || src + count > ncopy || !count) return;
     close_batch(); rec_open(); barrier(); phase(PH_XFER);
@@ -499,6 +531,14 @@ int gsvk_pic(const GsVkSprite *s0, uint64_t *id) {
 
 /* the UI thread's side */
 static VkSurfaceKHR surf; static VkSwapchainKHR sc; static VkFormat scfmt; static VkColorSpaceKHR sccs; static VkExtent2D scext; static VkPresentModeKHR pmode;
+static int pm_has[4];                    /* present modes the surface offers */
+static _Atomic int pm_want = 0, pm_set = -1;   /* gsvk_present_mode(): 0 mailbox, 1 FIFO (vsync), 2 immediate */
+void gsvk_present_mode(int v) { atomic_store(&pm_want, v); }
+static VkPresentModeKHR pick_mode(int v) {
+    const VkPresentModeKHR want = v == 1 ? VK_PRESENT_MODE_FIFO_KHR : v == 2 ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_MAILBOX_KHR;
+    return pm_has[want] ? want : pm_has[VK_PRESENT_MODE_MAILBOX_KHR] ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+}
+static const char *mode_name(VkPresentModeKHR m) { return m == VK_PRESENT_MODE_FIFO_KHR ? "vsync" : m == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "immediate"; }
 static uint32_t scn; static VkImage scimg[8]; static VkSemaphore scdone[8]; static int sc_stale;
 static VkCommandPool upool; static VkCommandBuffer ucb[NFR]; static VkFence ufence[NFR]; static VkSemaphore uacq[NFR]; static int ufr, usub[NFR], uslot[NFR];
 static int ucur = -1, uref[NPIC]; static uint64_t ucur_id;
@@ -548,10 +588,9 @@ int gsvk_present_init(void *hinstance, void *hwnd) {
     /* Mailbox: the picture replaces any not yet shown and is shown at the display's next refresh, no tearing; the UI
        thread's own clock (59.94 Hz) decides when. FIFO (HG_VSYNC=1) stalled the UI thread's submissions 60-200 ms at a
        time in a window on the 120 Hz screen, even at native resolution. HG_VSYNC=0: immediate (may tear). */
-    { VkPresentModeKHR pm[16]; uint32_t np = 16; vkGetPhysicalDeviceSurfacePresentModesKHR(phys, surf, &np, pm);
-      const char *vs = getenv("HG_VSYNC"); const VkPresentModeKHR want = !vs ? VK_PRESENT_MODE_MAILBOX_KHR : atoi(vs) ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
-      int has[4] = { 0 }; for (uint32_t i = 0; i < np; i++) if ((uint32_t)pm[i] < 4) has[pm[i]] = 1;
-      pmode = has[want] ? want : has[VK_PRESENT_MODE_MAILBOX_KHR] ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR; }
+    { VkPresentModeKHR pm[16]; uint32_t np = 16; vkGetPhysicalDeviceSurfacePresentModesKHR(phys, surf, &np, pm);   /* (vsync: settings.c, HG_VSYNC) */
+      for (uint32_t i = 0; i < np; i++) if ((uint32_t)pm[i] < 4) pm_has[pm[i]] = 1;
+      pm_set = atomic_load(&pm_want); pmode = pick_mode(pm_set); }
     VkCommandPoolCreateInfo cpci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qfam };
     VkCommandBufferAllocateInfo cbai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = NFR };
     VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
@@ -560,7 +599,7 @@ int gsvk_present_init(void *hinstance, void *hwnd) {
     for (int f = 0; f < NFR; f++) { if (vkCreateFence(dev, &fci, 0, &ufence[f]) || vkCreateSemaphore(dev, &sci, 0, &uacq[f])) return 0; uslot[f] = -1; }
     if (!mkbuf(&ovbuf, (VkDeviceSize)NFR * OVW * OVH * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) || !mkimg(&ovimg, &ovmem, OVW, OVH)) return 0;
     if (!mk_swapchain()) sc_stale = 1;
-    L("GSVK: the window is presented from video memory (%s)\n", pmode == VK_PRESENT_MODE_FIFO_KHR ? "vsync" : pmode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "immediate");
+    L("GSVK: the window is presented from video memory (%s)\n", mode_name(pmode));
     atomic_store(&pres_ok, 1); return 1;
 }
 /* UI thread: show picture k (k < 0: the current one again) once GS submission id is done, with the overlay ov
@@ -570,6 +609,8 @@ void gsvk_present(int k, uint64_t id, const uint32_t *ov) {
     if (k >= 0 && k < NPIC) { uref[k]++; ui_unref(ucur); ucur = k; ucur_id = id; }
     const int f = ufr;
     if (usub[f]) { vkWaitForFences(dev, 1, &ufence[f], VK_TRUE, UINT64_MAX); usub[f] = 0; ui_unref(uslot[f]); uslot[f] = -1; }
+    { const int w = atomic_load(&pm_want);   /* vsync changed (the Options menu): a new swapchain in that mode */
+      if (w != pm_set) { pm_set = w; const VkPresentModeKHR m = pick_mode(w); if (m != pmode) { pmode = m; sc_stale = 1; L("GSVK: presenting with %s\n", mode_name(m)); } } }
     if (sc_stale || !sc) { if (!mk_swapchain()) return; }
     uint32_t ii;
     VkResult r = vkAcquireNextImageKHR(dev, sc, 100000000ull, uacq[f], VK_NULL_HANDLE, &ii);

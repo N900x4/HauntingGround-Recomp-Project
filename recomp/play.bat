@@ -3,14 +3,18 @@ rem Haunting Ground (Windows build): window, keyboard or gamepad, sound, paced t
 rem Build hgboot.exe first (README). The memory card is ..\memcards\port0; the run log goes to play.log.
 rem Every session is recorded to ..\recordings\YYYYMMDD-HHMMSS (input and a copy of the memory card at the start),
 rem so it can be replayed exactly with replay.bat. set HG_PADREC=off before starting to turn that off.
-rem Options are environment variables, set before starting, e.g.:
-rem   set HG_SCALE=3                     window scale (default 2)
+rem Settings: in the game, Options, then Down past Screen Position: Renderer, Resolution, Frame rate, Display,
+rem V-Sync, Keyboard and Controller mapping. They are saved to hg.ini next to hgboot.exe (read it for the keys).
+rem Environment variables set before starting override hg.ini, e.g.:
+rem   set HG_SCALE=3                     window size at start (default 2; hg.ini: window_scale)
 rem   set HG_WAV=D:\ps2-work\session.wav  record the game's sound
 rem   set HG_MOVIES=skip                 skip the movies
 rem   set HG_GSVK=1                      draw with the GPU (Vulkan; new, same picture as the software renderer)
 rem   set HG_GSVK_SCALE=5                with HG_GSVK=1: 5 times the resolution, 3200x2240, for 4K screens (2..8; up to 5 at full speed)
 rem   set HG_GSVK_INTERP=1               with HG_GSVK=1: 60 fps (in-between pictures; full speed up to SCALE=5; 2 = 120 fps, native only)
 rem   set HG_VSYNC=1                     with HG_GSVK=1: the window waits for the display (default: mailbox, no tearing; 0: immediate)
+rem   set HG_FULLSCREEN=1                start in full screen (hg.ini: fullscreen)
+rem   set HG_INI=off                     no hg.ini (HG_INI=path: another file)
 rem   F11 = fullscreen, F3 = speed overlay
 cd /d "%~dp0"
 set "PATH=%~dp0;C:\msys64\ucrt64\bin;%PATH%"

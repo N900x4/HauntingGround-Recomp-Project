@@ -119,7 +119,10 @@ def extract(iso, game, disc):
         stage('Copying the game files from your disc image (%.1f GB)' % (total / 1e9))
         for rel, (want_size, want_sha) in disc['files'].items():
             lba, sz, _ = files[rel.upper()]
-            if sz != want_size: bad.append(rel); continue
+            if sz != want_size:
+                bad.append(rel)
+                if rel == disc['elf']: break
+                continue
             dst = os.path.join(game, rel); tmp = dst + '.part'
             sha = copy_hashed(f, lba, sz, tmp, lambda n, d0=done: progress(2 + 12 * (d0 + n) / total))
             if sha != want_sha:

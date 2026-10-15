@@ -7,7 +7,8 @@ Roadmap Phase 5. The goal is a GPU renderer for 4K output at 60 fps. Reached on 
 - a **live mode** (`HG_GSVK=1`) in which the GPU draws everything: frames to VB 4000 are identical to the software
   GS's (702/702 against `hashA`), and the run is faster than the software GS on 4 worker threads.
 
-Upscaling is built on top of that; see "Next" at the end.
+- a first **upscaling** mode (`HG_GSVK_SCALE=2/4/8`) on top of it: at x4 the game draws at 2560x1792 in the window
+  at 96 % speed (x2 at full speed), while the native local memory stays exact.
 
 ## Files
 
@@ -27,6 +28,8 @@ The build finds Vulkan through `pkg-config vulkan` (MSYS2 packages `mingw-w64-uc
 | `HG_GSVK=1` | Live: the GPU draws everything, the software GS draws nothing. GS worker threads are off. |
 | `HG_GSVKCHECK=FROM[:TO]` | Check: in those VBlanks every primitive is drawn by the GPU and by the CPU, from the same memory, and the whole 4 MB is compared after each one. Overrides `HG_GSVK`. |
 | `HG_GSVKBATCH=1` | With `HG_GSVKCHECK`: compare after each batch instead (the live mode's batching). |
+| `HG_GSVK_SCALE=N` | With `HG_GSVK=1`: N = 2, 4 or 8 times the resolution (see Upscaling). |
+| `HG_FRAMES_HR=dir` | With `HG_GSVK_SCALE`: dump the upscaled picture (`hr_VVVVVV.ppm`, every `HG_FRAME_EVERY` VBlanks). |
 
 Do not combine `HG_HOSTPROF=1` with the GPU modes: a run with both hung during boot (the sampler suspends threads,
 probably inside the Vulkan driver).
@@ -91,6 +94,31 @@ never in both.
 Run to VB 4000 (`runhash.sh` with `HG_GSVK=1`): 8.0M primitives in 116,588 batches, 8,935 submissions, 8,934
 read-backs (1.1M pages), 255k pages uploaded, GPU busy 4.0 s; frames identical to `hashA`.
 
+## Upscaling
+
+Besides the exact local memory (copy 0) the GPU keeps N x N more 4 MB copies. Copy `1 + i + j*N` is drawn with every
+primitive moved by `(-dx_i, -dy_j)`, so its pixel (x, y) shows the scene at `(x + dx_i, y + dy_j)`, with
+`dx_i = ((2i + 1) * 8 / N - 8) / 16` pixel: a whole number of the GS's 1/16 units, so the fixed-point set-up stays
+exact (N = 2, 4 or 8). Interleaving the copies gives a picture N times larger in each direction, rendered properly
+(geometry, coverage, depth and texture coordinates per sample), not stretched.
+
+- Uploads (textures, CLUTs, movie frames) go to every copy; everything the CPU reads comes from copy 0, which stays
+  bit-exact: frames to VB 4000 with x4 are identical to `hashA`.
+- **Render targets.** In copy k a frame buffer's pixel t holds the scene at t + offset. A primitive that textures
+  from pages the GPU has drawn (since the CPU last wrote them) therefore reads, in copy k, at its coordinates minus
+  the offset. Without this, the full-screen effect passes mixed a different set of neighbours in each copy, which
+  showed as vertical banding.
+- Textures keep their native resolution (texture replacement is a later step).
+- A batch holds each primitive once per copy, at a fixed stride, with an empty place holder where a copy draws
+  nothing. The copies go on the dispatch's z axis, so each copy's tiles cull only their own primitives.
+- A compute pass interleaves the copies' display area (as `display_from()` reads it) into one picture, which is read
+  back and shown in the window. It runs only when something was drawn or uploaded since the last one.
+- The copies are for the picture only. Their order analysis uses copy 0's geometry, and they are not
+  bit-reproducible between runs: 18 of 4.6M pixels differed by one level at x4.
+
+Speed (Castle Suite, windowed, F3 overlay): x2 (1280x896) 100 %, x4 (2560x1792) 96 % at 17.3 ms of work per
+VBlank. GPU time to VB 4000 at x4 went from 48.2 s (first version) to 10.8 s: copies on z, then the fixed stride.
+
 ## Checking
 
 Local memory lives in device-local memory with a host-cached mirror. For a check the GPU's memory is set to the CPU's
@@ -136,9 +164,9 @@ GPU time per frame from timestamps, batch dispatches only, at native resolution:
    dumps. Presenting straight from video memory, and double-buffering the command buffer, removes both.
 2. **Speed**: coarse binning instead of the per-tile scan; serial primitives (none in the test ranges, but other
    rooms may have some) in a wavefront order.
-3. **Upscaling to 4K.** Keep the native-resolution local memory exact (it is what the game reads back, uses as
-   textures and as CLUTs), and draw each frame-buffer pixel also into an N x N super-sampled surface. Textures read
-   from frame buffers can use the super-sampled data, and the display shows it. This keeps every game effect that
-   depends on memory layout intact, unlike a texture-cache renderer.
+3. **Upscaling, next steps.** x4 to full speed with margin: load each primitive once per workgroup (shared
+   memory) instead of per invocation, overlap the GPU with the CPU (double-buffered command buffers). Then 4K
+   output (3840x2160 scaled from the x4 picture, or x8 downsampled), present from video memory, and check
+   the effect passes room by room (any that sample render targets at another scale may need their own offset rule).
 4. **60 fps**: the game logic runs at 30 fps (`docs/frame-timing.md`); 60 needs frame interpolation or a logic
    change, separate from the renderer.

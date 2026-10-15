@@ -37,8 +37,11 @@ Last commit before this doc: `bf60152`.
     15–29 % busy, and the EE thread is the limit. `play.bat` takes `set HG_GSVK=1` (untried in a window).
   - Packages installed with the user's approval: MSYS2 `mingw-w64-ucrt-x86_64-vulkan-devel` and `...-glslang`.
   - Do not combine `HG_HOSTPROF=1` with `HG_GSVK`/`HG_GSVKCHECK`: such a run hung during boot.
-- **Not done: upscaling.** The plan (super-sampled frame buffers next to the exact native memory) is in
-  `docs/gpu-renderer.md`.
+- **Phase 5, upscaling, first version** (`HG_GSVK=1 HG_GSVK_SCALE=2|4|8`): N x N sub-pixel copies of local memory
+  besides the exact one, interleaved into an N times larger picture; render targets read with the copy's offset.
+  Windowed, Castle Suite: x2 (1280x896) 100 % speed, x4 (2560x1792) 96 %. Copy 0 stays exact (frames identical to
+  `hashA` at x4). Pictures: `D:\ps2-work\scratch\castle_suite_x4_2560x1792.png` and
+  `castle_suite_native_vs_x4_closeup.png`. Textures stay native; 4K output and more speed are next.
 
 ### Night 2026-10-14/15 (unattended): playtest 1 findings, Castle Suite, frame timing, crash reports
 
@@ -236,15 +239,15 @@ Since 2026-10-13 the project lives on the user's Windows 11 PC (Ryzen 7 9800X3D,
 
 - The door specks in `ST_020` need PCSX2 in that room: the user saves a state there (about 2 minutes), allows us to
   use their own PCSX2 states, or formats a folder memory card in PCSX2's GUI so our save can be copied in.
-- A playtest with `set HG_GSVK=1` (GPU renderer) and without, to confirm the window path and pacing.
+- A playtest with `set HG_GSVK=1` (GPU renderer), and with `set HG_GSVK_SCALE=2` or `4` as well (upscaled).
 - The user's playtest (controls, live sound, saving from our build).
 
 ## Next steps, in order
 
 GPU and speed (the roadmap's Phases 4 to 6; details in `docs/gpu-renderer.md`):
 
-- GPU renderer: present from video memory instead of reading each frame back, double-buffer the command buffer,
-  then super-sampled frame buffers for 4K.
+- GPU renderer: x4 upscaling to full speed with margin (shared-memory primitive loads, double-buffered command
+  buffers), 4K output, present from video memory; check the effect passes room by room at x4.
 - VU1: whole-program compilation with build-time timing, then its own thread (the EE thread limit).
 
 Accuracy and play (from before):

@@ -221,6 +221,11 @@ Dependencies: none on phase 1 (different files), so 2.0 can run while phase 1's 
 
 ### 3.3 Phase 3: in-game settings (item C)
 
+**Status (2026-10-15): done** with option (i), the user's choice (Q6): native extra rows in the game's Options page,
+found practical by step 3.0 (`docs/options-menu.md`: the page is two hard-coded functions, hooked; every picture,
+text, sound and the dialog are the game's own). Settings module, `hg.ini`, live changes and recordings as planned in
+3.1; gates in `docs/handoff.md`.
+
 Goal: the game's own Options page offers Resolution (upscaling factor), Frame rate (30/60/120), Keyboard mapping and Controller mapping; values live in a host config file; recordings still replay identically.
 
 **Step 3.0: research the Options menu (1-2 days; produces `docs/options-menu.md` and a decision).**

@@ -41,7 +41,7 @@ identical frames). A full decompilation was judged a multi-year job; readable C 
 | 120 fps (`HG_GSVK_INTERP=2`) | **Full speed at native resolution** (presents every 8.4 ms, 0 repeats); with upscaling GPU-bound (x5: 55 %). |
 | Window / input | SDL2 window and input on a UI thread; with `HG_GSVK=1` the pictures stay in video memory and the UI thread blits them into a **Vulkan swapchain** (mailbox; `HG_VSYNC=1` FIFO, `HG_PRESENT=sdl` the old SDL texture path). The game thread paces emulated time to 59.94 Hz (locking to the display's refresh, roadmap Q14: not done). Keyboard and SDL GameController mapping is hard-coded in `recomp/host_sdl.c` (see its header comment). F3 speed overlay, F11 fullscreen, Esc quits. |
 | Verification kit | `tools/verify`: frozen references (`ref/hashA.md5`, `cs.md5`, `soak.md5`, see `REFERENCES.md`) and the gate scripts `hashcheck.sh`, `gpucheck.sh`, `soak.sh`, `wintest.sh` + `pacing.py`, `picgate.sh` + `piccmp.py`. Picture references for G10 (x5 + 60, native 60) are in `D:\ps2-work\scratch\pic_ref_*` (game pictures: never committed). |
-| Settings | Everything is environment variables (`recomp/play.bat` lists them). No in-game options yet. |
+| **Settings** (phase 3, 2026-10-15) | **Native extra rows in the game's own Options menu** (Down past Screen Position): Renderer (next start), Resolution (native, x2-x6, auto), Frame rate (30/60/120, 120 at native), Display, V-Sync, and keyboard and controller mapping pages (press a key / a button; PlayStation names for PS pads, Xbox names otherwise). Drawn and driven by the game's own functions through two hooks (`recomp/game/options.c`, `docs/options-menu.md`). Values in `hg.ini` next to the exe (`recomp/settings.c`); environment variables still override; resolution, frame rate, vsync, full screen and mappings change live. Recordings carry the settings and host-side changes. |
 | Open user decision | Door specks in `ST_020` need PCSX2 in that room (user saves a state there / allows use of their states / formats a folder memory card). |
 
 ## 4. Rules (from the user; they override defaults)
@@ -106,7 +106,8 @@ arrive for every consumer (0 AMBIGUOUS); `recomp/vu1gen.py` v2 compiles each pro
 bookkeeping (`HG_VU1AOT=0` = interpreter). VU1 cost down 61 %. The VU1 thread was not built (Q2: not needed now);
 its design is in `docs/renderer-performance.md`. Any later VU1 change: `HG_VU1CHECK` lockstep + frame hashes.
 
-**C. In-game settings.** Find the game's options screen (Haunting Ground has an Options menu: vibration, sound,
+**C. In-game settings. Done 2026-10-15** (native extra rows; `docs/options-menu.md`, commit `749df0d`). The
+original plan: find the game's options screen (Haunting Ground has an Options menu: vibration, sound,
 screen adjust...). Approach: locate its menu code and data (strings in the ELF, the menu state machine), add entries
 by hooking the recompiled functions (`set_hook` in `recomp/overrides.c`) or by rewriting the menu functions as named
 C (the targeted decompilation); store settings in a host config file (not the PS2 memory card), applied live where

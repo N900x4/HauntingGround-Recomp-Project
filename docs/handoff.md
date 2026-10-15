@@ -17,8 +17,42 @@ Castle Suite. The GS thread is the limit.
 | Movies | The IPU is emulated, and the game's own Sofdec player runs. Movie audio is bit-exact. | `movies-ipu.md` |
 | Exploration | `ST_02A` → `ST_013` → `ST_00D` reached; explorer tools | `exploration-notes.md` |
 | Reverb | Unverified: the game sets the depth to 0 at stage init, and no reached room changes it | `exploration-notes.md` |
+| Settings | Extra rows in the game's own Options menu (resolution, frame rate, display, vsync, key and button mapping); `hg.ini` next to the exe; environment variables override | `options-menu.md` |
 
 Last commit before this doc: `bf60152`.
+
+### 2026-10-15 (evening): roadmap phase 3, in-game settings as native rows in the game's Options menu
+
+- **Research (3.0, `docs/options-menu.md`)**: the Options page is a C++ object whose rows are hard-coded in two
+  functions, "choose a row" `0x393bd0` and "draw the page" `0x391450`; the row byte `obj+0xa8c56` is touched only by
+  them and the init. Every picture (panel pieces, icons, arrows, cursor), text, sound and the Reset Defaults dialog is a
+  game function callable from host code. Native rows were judged practical (the user's option (i), Q6).
+- **The rows** (`recomp/game/options.c`, hooks on those two functions): Down past Screen Position turns to a page with
+  Renderer (next start), Resolution (native, x2-x6, auto), Frame rate (30/60/120; 120 at native), Display (window /
+  full screen), V-Sync (fast / on / off), Keyboard and Controller; a note line "60 and 120 fps add about 17 ms of
+  delay". Keyboard and Controller open mapping pages (press a key / a button; Esc cancels; swaps; PlayStation names when
+  SDL reports a PS3/PS4/PS5 pad, Xbox names otherwise). The game's own panel, glyphs, bars, colours, sounds, footer and
+  YES/NO dialog; the same in the in-game sub-screen's Options tab (L1/R1 still switch tabs). Strings live on the guest
+  stack during the hook; panel rectangles through a piece-table entry restored within the call: game memory unchanged.
+- **Settings** (`recomp/settings.c/.h`): a typed struct, `hg.ini` next to the exe (`HG_INI=path|off`), environment
+  variables override (`HG_GSVK`, `HG_GSVK_SCALE`, `HG_GSVK_INTERP`, `HG_VSYNC`, `HG_SCALE`, new `HG_FULLSCREEN`), one
+  `settings:` log line at start. Without `hg.ini` everything is as before. Host settings never touch game memory or
+  the memory-card save.
+- **Live changes**: resolution and frame rate at the next VBlank on the GS thread (`vk_reconfigure`: GPU finished, read
+  back into vm, local memory re-made with `gsvk_resize`, re-uploaded, interpolation restarted; 2-27 ms); the window's
+  presenting rate follows; vsync re-makes the swapchain (`gsvk_present_mode`); full screen and the maps at once.
+- **Recordings**: the header gets `# set key=value` for every setting; host-originated changes (F11, captured keys and
+  buttons, the controller kind) become `set VB key=value` lines; replays apply both and save nothing.
+  `HG_HOSTEV=VB:key=value,...` scripts host changes for tests; `HG_PAD` now takes up to 256 events.
+- **Gates**: G1/G1g software, GPU, +60, x5: 702/702 identical to `hashA` each; G2 (Castle Suite) the same
+  four: 742/742; G3 `soak.sh` with `HG_VU1CHECK=1`: 1,005/1,005 identical to `soak.md5`, 17.6 M runs, 0 mismatches,
+  0 handovers, and again on the GPU at x5 + 60: 1,005/1,005; G5 `gpucheck.sh batch`: 0 batches differ in the four
+  ranges; `tools/verify/optionstest.sh` (every new row, both mapping pages, both Reset Defaults, live switches to x3,
+  60 fps, native and 120 fps): two runs, a recording of it and its replay all give the same 672 frame hashes, and the
+  same run in a muted window (full screen and vsync switched live) too; G7 window, Castle Suite: x5 30 fps median
+  16.68 ms, x5 + 60 fps 16.74 ms (p5-p95 16.41-16.94), native 120 fps 8.39 ms, each 1.00x, 0 repeats, 0 out of order;
+  clean build 76 s. The hooked functions never run in the reference routes or the user's recorded session.
+- **Manual checklist for the playtest**: `docs/options-menu.md`, section 11.
 
 ### 2026-10-15 (afternoon): roadmap phase 2, VU1 compiled as whole programs
 

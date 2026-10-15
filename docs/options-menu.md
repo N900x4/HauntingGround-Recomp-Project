@@ -94,7 +94,7 @@ Native rows are practical and safe. The design (implemented in `recomp/game/opti
   duration of the hook (`recomp/game/guest.h`).
 - **Edit model** as in the original: Cross on a row starts editing (yellow label, blinking arrows), left/right change
   the value, Cross applies it (sound 43), Triangle restores it (sound 44). Square: the game's own Reset Defaults dialog
-  (message 132), resetting the new rows' settings only.
+  (message 132, NO preselected as in the game), resetting only the settings of the page it is opened on.
 
 ## 4. Determinism and the recorded sessions
 
@@ -113,3 +113,148 @@ Native rows are practical and safe. The design (implemented in `recomp/game/opti
   price of different value strings on the new rows if a recording shows them.
 - On the new rows our C code runs instead of the game's, so emulated time per frame differs from what the game's code
   would take; it is the same in every run with the same input, which is what replays need.
+
+## 5. What was built (phase 3.1 and 3.2, 2026-10-15)
+
+### The rows
+
+Down from Screen Position (or Up from Controller Type) turns the page: the same panel (the title's "Options" header,
+or the sub-screen's tabs) with seven rows in the game's 32-pixel grid, the game's icons, bars, cursor, arrows, colours,
+sounds and footer:
+
+```
+ [+]  Renderer          GPU (Vulkan)          Software | GPU (Vulkan); takes effect at the next start
+ [+]  Resolution        x5  3200 x 2240       Native, x2 ... x6, Auto (this display); GPU renderer only
+ [~]  Frame rate        60 fps                30 | 60 | 120 (120 only at native resolution); GPU renderer only
+ [+]  Display           Window                Window | Full screen
+ [~]  V-Sync            Fast (no tearing)     Fast (no tearing) | On | Off (may tear)
+ [pad] Keyboard         Change                -> the keyboard page
+ [pad] Controller       PlayStation           -> the controller page (the value: the kind connected)
+      (a note when the renderer differs from the running one, or when the software renderer runs)
+      60 and 120 fps add about 17 ms of delay.
+ (x):Select  (^):Back  ([]):Reset Defaults
+```
+
+Down from Controller goes round to Controller Type; Up from Renderer back to Screen Position. Cross on a value row
+starts editing it; Left/Right change it; Cross applies it (the renderer at the next start, everything else at once),
+Triangle keeps the old value. Choosing a resolution other than native while at 120 fps drops to 60 fps (logged).
+
+**The mapping pages** (Cross on Keyboard or Controller): a heading row (KEYBOARD, or CONTROLLER with the kind
+connected) and two columns over the game's two-column area, ten entries each: the face buttons with the game's own
+glyphs, L1/R1/L2/R2/L3/R3, the D-pad, Start, Select, and for the keyboard the left stick's four directions. Right of
+each the key (SDL key names) or the controller button: PlayStation names (Cross, Circle, L1, R2, Options, Create ...)
+when SDL reports a PS3/PS4/PS5 controller, Xbox names (A, B, LB, RT, Menu, View ...) otherwise. Up/Down move within a
+column, Left/Right between columns, Cross waits for a key or button ("Press a key" blinking; Esc cancels), Triangle
+goes back, Square resets the page to the defaults (the game's dialog). A key or button already used by another of
+the controller's buttons moves to the one that had the new one (a swap), so two buttons never share one key. After a
+capture the page takes no input until every button is up (the captured key may now stand for a menu button).
+
+### How it is drawn
+
+`recomp/game/options.c` replays the start of `0x391450` to draw the panel (the same set of pieces, chosen the same
+way), then: the "Sound" row's strip (separator line and bar, picture 7) copied into the two-column area at the new
+rows' heights; plain parchment (the two-column area left and right of its divider, picture 6) over the two last rows,
+where the notes go; for the mapping pages the two-column area (with its divider) copied down over the old row bars.
+Text, icons (16-20), arrows (26/27), cursor (28) and the dialog are the game's functions. Nothing is left in game
+memory: rectangles go through a borrowed piece-table entry that is put back within the call, strings live on the
+guest stack below the hook's frame (`recomp/game/guest.h`). The footer of the display page is the game's own message
+130; the mapping pages draw "(x):Change (^):Back ([]):Reset Defaults" with the game's glyph escapes.
+
+## 6. Settings (`recomp/settings.c`, `settings.h`)
+
+One typed structure for the host-facing options: renderer (and the one chosen for the next start), resolution (1-8 or
+auto), frame rate, full screen, vsync, window size at start, the keyboard map (20 entries) and the controller map
+(16). Precedence, highest first: environment variables (`HG_GSVK`, `HG_GSVK_SCALE`, `HG_GSVK_INTERP`, `HG_VSYNC`,
+`HG_SCALE`, `HG_FULLSCREEN`, with the meanings they always had), the header of a replayed recording, `hg.ini`, the
+defaults. **Without `hg.ini` the defaults are exactly the behaviour before settings existed** (software GS, native,
+30 fps, window x2, mailbox, the old key and button tables). One log line at start lists the effective settings, the
+file and the environment variables in use:
+
+```
+settings: renderer gpu, resolution x5, 60 fps, window, vsync mailbox, window x2 (file: ...\recomp\hg.ini, none; environment: HG_GSVK)
+```
+
+`hg.ini` lives next to the executable (`HG_INI=path` for another file, `HG_INI=off` for none), is written whenever a
+row is applied (never while a recording is replayed), and is plain `key = value` (comments start with `#`):
+`renderer`, `resolution`, `fps`, `fullscreen`, `vsync`, `window_scale`, `kb.<button>` (SDL key names, `none`),
+`pad.<button>` (`a b x y back guide start leftstick rightstick leftshoulder rightshoulder dpup dpdown dpleft dpright
+misc1 paddle1-4 touchpad lefttrigger righttrigger none`). Button names: `select l3 r3 start up right down left l2 r2 l1
+r1 triangle circle cross square`, and for the keyboard `ls_up ls_down ls_left ls_right`. A setting the environment
+overrides can still be changed in the menu (it applies at once and is saved; the log notes that the variable wins at
+the next start).
+
+The settings are host state only. The game's own options (vibration, sound, volume, screen position, controller type)
+stay in its system data and its memory-card save; nothing of ours is written there.
+
+## 7. Live changes
+
+| Setting | Applied | How |
+|---|---|---|
+| Resolution, frame rate | at the next VBlank | `gs_vblank` passes the wanted factor and interpolation with each VBlank marker; the GS thread (`vk_reconfigure` in `gs.c`) finishes the GPU's work, reads back what it drew into `vm`, makes local memory again for the new number of copies (`gsvk_resize`: buffers and descriptor), uploads it all from `vm`, and restarts frame interpolation (two whole frames before the first in-between picture). Copy 0 holds the same memory before and after. 2-27 ms. |
+| Presenting rate | when the GS switches | the UI thread follows `gs_interp_now()`: 59.94 or 119.88 presents a second; the picture queue's depth follows (2 or 5) |
+| Full screen | at once | the UI thread compares the setting with the window |
+| V-Sync | at the next present | `gsvk_present_mode()`: the swapchain is made again in the new mode |
+| Keyboard, controller | at once | the UI thread copies the maps when the settings' generation changes |
+| Renderer | next start | the software GS and the GPU renderer are chosen when the game starts |
+
+## 8. Recordings and replays
+
+A recording's header gets `# set key=value` lines with every setting in effect, and the changes that do not come from
+the pad are written as `set VBLANK key=value` lines at the VBlank the game thread applied them: F11 (full screen), a
+captured key or button (`kb.cross=V`, `pad.circle=y`, `capture=cancel`), the kind of controller that names the buttons
+(`padtype=0/1/2`, also when one is plugged in or out). A replay applies the header (unless an environment variable
+sets the same thing: then it warns), applies the events at their VBlanks, ignores live ones, and saves nothing. While
+replaying, F11 changes the window only. `HG_HOSTEV="VB:key=value,..."` makes such host changes from a script (tests).
+
+## 9. Verification (gates, 2026-10-15)
+
+`tools/verify/optionstest.sh TAG [env...]`: the scripted run described in the script (every new row changed once,
+both mapping pages, both kinds of Reset Defaults, 120 fps, round trips between the game's rows and ours, leaving),
+frames hashed every 5 VBlanks, the settings changes and GS switches listed.
+
+| Check | Result |
+|---|---|
+| G1/G1g `hashcheck.sh` (software, GPU, +60, x5) | 702/702 identical to `hashA` each (no `hg.ini`: behaviour as before) |
+| G2 the same, Castle Suite | 742/742 each |
+| G3 `soak.sh` with `HG_VU1CHECK=1` | 1,005/1,005 identical to `soak.md5`; 17.6 M VU1 runs, 0 mismatches, 0 handovers; GPU x5 + 60: 1,005/1,005 |
+| G5 `gpucheck.sh batch` | 0 batches differ (menus, stage 1, Castle Suite, `ST_020`) |
+| Options test, two runs / recorded / replayed / in a muted window | 672/672 frame hashes identical in all five; 12 setting changes; GS switches to x3, 60 fps, native and 120 fps took 2-27 ms |
+| G7 window, Castle Suite (`wintest.sh`, `pacing.py`) | x5 30 fps: median 16.68 ms, x5 + 60: 16.74 (p5-p95 16.41-16.94), native 120: 8.39; each 1.00x, 0 repeats, 0 out of order |
+| G12 clean build | 76 s |
+
+## 10. Limits and open points
+
+- The renderer cannot change while the game runs (software GS <-> GPU): the row records the choice for the next start.
+- "Auto" picks the smallest factor whose height fills the display the window is on (at most x6); headless it is native.
+- The mapping pages map one key and one controller input per button; the analog sticks are not remappable (a
+  controller's sticks stay sticks; the keyboard's left stick is four keys).
+- Keys are shown with SDL's English names; the game's font has no glyphs for the D-pad, L3/R3 or keyboard keys.
+- A recording that wraps the game's cursor round the page (Down from Screen Position) behaves differently now.
+- `HG_OPTIONS_ROWS=0` turns the extra rows off (the game's page exactly as it was).
+
+## 11. Manual checklist for the user's playtest
+
+Start with `play.bat` (a first start without `hg.ini` behaves as before: the software renderer unless `set
+HG_GSVK=1`). Then:
+
+1. Main menu, OPTIONS: the page looks as before. Down from Screen Position: the new page (Renderer ... Controller,
+   the delay note). Up from Renderer goes back to Screen Position; Down from Controller goes round to Controller
+   Type; Up from Controller Type comes to Controller.
+2. Renderer: GPU (Vulkan), Cross; "The renderer changes at the next start." Leave, quit (Esc), start again: the log's
+   first `settings:` line says `renderer gpu`, and `hg.ini` exists next to `hgboot.exe`.
+3. Resolution: x5 (or Auto), Cross: the picture sharpens at once (F3: speed 100 %). Back to Native works too.
+4. Frame rate: 60 fps, Cross: smoother at once. 120 fps is offered only at Native; with it, the F3 overlay should
+   still say 100 %. Choosing x5 while at 120 drops to 60.
+5. Display: Full screen / Window; F11 toggles too, and the row follows it.
+6. V-Sync: Fast (no tearing), On, Off: look for tearing or stutter in each.
+7. Keyboard: Cross on a button (e.g. Cross), press a key (e.g. Space): it shows at once and works in the menus. Esc
+   cancels a "Press a key". A key already used moves to the button that had the new one. Square, Left (YES), Cross:
+   the defaults return.
+8. Controller (a DualSense or PS4 pad): the row says PlayStation and the page uses PlayStation names (an Xbox pad:
+   Xbox names; none: "Not connected"). Remap one button, try it in the game, then Reset Defaults.
+9. In the game: Select (sub-screen), L1 to the Options tab: the same new rows; L1/R1 still switch tabs from them;
+   Triangle leaves.
+10. Reset Defaults on the display page: resolution, frame rate, display and vsync to the defaults (not the renderer).
+11. The game's own options (vibration, sound, volume, screen position, controller type) still change and save as
+    before; `hg.ini` holds only ours.
+12. `replay.bat` of the session shows the same pages and values.

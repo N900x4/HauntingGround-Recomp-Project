@@ -46,6 +46,7 @@ def main():
     ap.add_argument('--src', required=True); ap.add_argument('--gen', required=True); ap.add_argument('--obj', required=True)
     ap.add_argument('--out', required=True); ap.add_argument('--cc', default='gcc'); ap.add_argument('--jobs', type=int, default=0)
     ap.add_argument('--sdl-include', default=None); ap.add_argument('--print', action='store_true')
+    ap.add_argument('--warnings', action='store_true')
     a = ap.parse_args()
     cc = a.cc
     if a.sdl_include: sdl_inc = a.sdl_include
@@ -64,7 +65,8 @@ def main():
     flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
     # the biggest translation units first, so the long ones do not end up last
     order = sorted(jobs, key=lambda j: -os.path.getsize(j[1][j[1].index('-c') + 1]))
-    lock = threading.Lock(); done = [0]; failed = []
+    lock = threading.Lock(); done = [0]; failed = []; warned = [0]
+    show_warnings = a.warnings   # the runtime's -Wall warnings mean nothing to a player: only on request or on failure
     t0 = time.time()
     def one(job):
         o, c = job
@@ -72,13 +74,15 @@ def main():
         r = subprocess.run([cc] + c, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors='replace', creationflags=flags)
         with lock:
             done[0] += 1
-            if r.stdout.strip() or r.stderr.strip(): print((r.stdout + r.stderr).rstrip(), flush=True)
+            msg = (r.stdout + r.stderr).rstrip()
+            if msg and (r.returncode != 0 or show_warnings): print(msg, flush=True)
+            elif msg: warned[0] += 1
             if r.returncode != 0: failed.append(os.path.basename(o)); print(f'@error compiling {os.path.basename(o)} failed (status {r.returncode})', flush=True)
             else: print(f'@progress {done[0]} {len(jobs) + 1} {os.path.basename(o)}', flush=True)
     print(f'compiling {len(jobs)} files with {n} jobs ({cc})', flush=True)
     with ThreadPoolExecutor(max_workers=n) as ex: list(ex.map(one, order))
     if failed: return 1
-    print(f'compiled in {time.time() - t0:.1f} s; linking', flush=True)
+    print(f'compiled in {time.time() - t0:.1f} s ({warned[0]} files with compiler warnings, not shown; --warnings shows them); linking', flush=True)
     r = subprocess.run(link, stdin=subprocess.DEVNULL, capture_output=True, text=True, errors='replace', creationflags=flags)
     if r.stdout.strip() or r.stderr.strip(): print((r.stdout + r.stderr).rstrip(), flush=True)
     if r.returncode != 0 or not os.path.exists(a.out): print(f'@error linking failed (status {r.returncode})', flush=True); return 1

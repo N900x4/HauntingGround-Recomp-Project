@@ -40,6 +40,7 @@ The build finds Vulkan through `pkg-config vulkan` (MSYS2 packages `mingw-w64-uc
 | `HG_PRESENT_DEPTH=N` | Display-locked: presents in flight ahead of the screen (default 1; 2-3 add a refresh of delay each). |
 | `HG_PRESENT_TIMED=1` | Display-locked: each picture presented once with a target time (`VK_EXT_present_timing`, relative), taken `HG_PRESENT_SLACK` ms (10) before it is due. Opt-in, not measured long enough. |
 | `HG_LOCK=0` | Display-locked mode without the lock: FIFO, pictures on the 59.94 Hz host clock. |
+| `HG_FSE=1` | A test: full-screen exclusive mode (`VK_EXT_full_screen_exclusive`, application controlled) while the window is full screen. |
 | `HG_PACEDBG=1` | Log every late present: time in events, the take, each step of the present call, the wait (and the blit's GPU timing, calibrated timestamps). |
 | `HG_PRESENTWAIT=0`, `HG_PRESENTTIMING=0`, `HG_PRESENTREL=0` | Leave out `VK_KHR_present_wait`, `VK_EXT_present_timing`, its relative presents. |
 | `HG_GSVK_QUEUE=graphics` | The GS's work on the graphics queue family too (default: an async compute family when there is one). |

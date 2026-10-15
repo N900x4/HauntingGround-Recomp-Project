@@ -351,7 +351,12 @@ static void ui_settings(void) {
 #endif
     }
     const int fs = settings()->fullscreen ^ fs_flip;
-    if (fs != fs_now) { fs_now = fs; SDL_SetWindowFullscreen(win, fs ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
+    if (fs != fs_now) {
+        fs_now = fs; SDL_SetWindowFullscreen(win, fs ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+#ifdef HAVE_VULKAN
+        gsvk_present_fullscreen(fs);   /* (HG_FSE=1: full-screen exclusive mode while full screen) */
+#endif
+    }
 }
 /* the F3 overlay for the GPU path (176 x 42), or 0 when it is off */
 static const uint32_t *ov_build(void) {

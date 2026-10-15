@@ -72,6 +72,7 @@ int gsvk_present_wait(uint64_t pid, uint64_t timeout_ns);   /* UI thread: presen
 int gsvk_present_can_wait(void);                         /* VK_KHR_present_wait is in use */
 int gsvk_present_scanout(uint64_t *pid, double *t, int max);   /* UI thread: when presents went out to the screen (VK_EXT_present_timing); the count */
 int gsvk_present_gen(void);                              /* swapchains made so far */
+void gsvk_present_fullscreen(int on);                     /* any thread: the window is full screen (HG_FSE=1: exclusive mode) */
 int gsvk_present_fifo(void);                             /* UI thread: the swapchain is FIFO (waits for the display) */
 void gsvk_present_shutdown(void);                        /* UI thread, before the process ends */
 void gsvk_present_mode(int v);   /* any thread: 0 mailbox, 1 FIFO (vsync), 2 immediate; applied at the next present */

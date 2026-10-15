@@ -54,6 +54,8 @@ static int can_wait, ui_prio; static PFN_vkWaitForPresentKHR wait_present;
 static int have_caps2, can_ptim, can_prel, sc_ptim, sc_prel; static uint64_t pt_dom; static int pt_qpc;   /* (can_prel, sc_prel: presents at a time relative to the previous one) */
 static PFN_vkGetSwapchainTimingPropertiesEXT pt_props;
 /* HG_PACEDBG: the window's blits timed on the GPU (calibrated to the host clock): when they started and ended */
+static int use_fse; static VkResult (VKAPI_PTR *fse_acquire)(VkDevice, VkSwapchainKHR); static void *fse_mon; static _Atomic int fse_want, fse_have;
+void gsvk_present_fullscreen(int on) { atomic_store(&fse_want, on); }   /* any thread: the window is full screen (HG_FSE) */
 static int use_cal; static PFN_vkGetCalibratedTimestampsKHR get_cal; static VkQueryPool uqp; static double cal_off, cal_t;
 static struct { uint64_t pid; double sub, beg, end; } ugt[64]; static uint64_t upid[8];   /* VK_EXT_present_timing: on, on this swapchain, its QPC time domain */
 static PFN_vkSetSwapchainPresentTimingQueueSizeEXT pt_qsize; static PFN_vkGetSwapchainTimeDomainPropertiesEXT pt_domains; static PFN_vkGetPastPresentationTimingEXT pt_past;
@@ -162,14 +164,15 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     /* presenting needs the swapchain extension and timeline semaphores (Vulkan 1.2) */
     VkPhysicalDeviceTimelineSemaphoreFeatures tsf = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES };
     VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &tsf }; vkGetPhysicalDeviceFeatures2(phys, &f2);
-    int has_pid = 0, has_pwait = 0, has_gprio = 0, has_ptim = 0, has_cal = 0;
+    int has_pid = 0, has_pwait = 0, has_gprio = 0, has_ptim = 0, has_cal = 0, has_fse = 0;
     { uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(phys, 0, &ne, 0); VkExtensionProperties *ep = calloc(ne + 1, sizeof *ep); int sw = 0;
       if (ep) { vkEnumerateDeviceExtensionProperties(phys, 0, &ne, ep);
                 for (uint32_t i = 0; i < ne; i++) { sw |= !strcmp(ep[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
                     has_pid |= !strcmp(ep[i].extensionName, "VK_KHR_present_id"); has_pwait |= !strcmp(ep[i].extensionName, "VK_KHR_present_wait");
                     has_gprio |= !strcmp(ep[i].extensionName, "VK_EXT_global_priority");
                     has_ptim |= !strcmp(ep[i].extensionName, "VK_EXT_present_timing");
-                    has_cal |= !strcmp(ep[i].extensionName, "VK_KHR_calibrated_timestamps"); }
+                    has_cal |= !strcmp(ep[i].extensionName, "VK_KHR_calibrated_timestamps");
+                    has_fse |= !strcmp(ep[i].extensionName, "VK_EXT_full_screen_exclusive"); }
                 free(ep); }
       can_present = niext >= 2 && sw && tsf.timelineSemaphore && pr.apiVersion >= VK_API_VERSION_1_2; }
     /* the display's timing (display-locked pacing, host_sdl.c): VK_KHR_present_wait tells when each present reached the
@@ -191,7 +194,7 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     if (!have.shaderFloat64) { L("GSVK: no 64-bit floats in shaders (triangle Z)\n"); return 0; }
     want.shaderFloat64 = VK_TRUE;
     VkPhysicalDeviceTimelineSemaphoreFeatures tsw = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES, .timelineSemaphore = VK_TRUE };
-    const char *dext[6] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_present_id", "VK_KHR_present_wait", "VK_EXT_present_timing", "VK_EXT_global_priority", "VK_KHR_calibrated_timestamps" };
+    const char *dext[7] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_present_id", "VK_KHR_present_wait", "VK_EXT_present_timing", "VK_EXT_global_priority", "VK_KHR_calibrated_timestamps", "VK_EXT_full_screen_exclusive" };
     if (can_wait) { pif.presentId = VK_TRUE; pwf.presentWait = VK_TRUE; pwf.pNext = 0; tsw.pNext = &pif; }
     if (can_ptim) { can_prel = ptf.presentAtRelativeTime && !(getenv("HG_PRESENTREL") && !atoi(getenv("HG_PRESENTREL"))); ptf.presentAtAbsoluteTime = VK_FALSE; ptf.presentAtRelativeTime = can_prel ? VK_TRUE : VK_FALSE; ptf.pNext = 0; pwf.pNext = &ptf; }
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = can_present ? &tsw : 0, .queueCreateInfoCount = ufam != qfam ? 2 : 1, .pQueueCreateInfos = qcis,
@@ -204,9 +207,12 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
         dext[dci.enabledExtensionCount] = "VK_EXT_global_priority"; dci.enabledExtensionCount++;
         qcis[0].pNext = &gp; ui_prio = 1;
     }
+    /* HG_FSE=1 (a test): full-screen exclusive mode when the window is full screen (VK_EXT_full_screen_exclusive) */
+    if (has_fse && can_present && have_caps2 && getenv("HG_FSE") && atoi(getenv("HG_FSE"))) { dext[dci.enabledExtensionCount] = "VK_EXT_full_screen_exclusive"; dci.enabledExtensionCount++; use_fse = 1; }
     if (has_cal && can_present && getenv("HG_PACEDBG")) { dext[dci.enabledExtensionCount] = "VK_KHR_calibrated_timestamps"; dci.enabledExtensionCount++; use_cal = 1; }
     if (vkCreateDevice(phys, &dci, 0, &dev)) { L("GSVK: no device\n"); return 0; }
     if (use_cal && !(get_cal = (PFN_vkGetCalibratedTimestampsKHR)vkGetDeviceProcAddr(dev, "vkGetCalibratedTimestampsKHR"))) use_cal = 0;
+    if (use_fse && !(fse_acquire = (VkResult (VKAPI_PTR *)(VkDevice, VkSwapchainKHR))vkGetDeviceProcAddr(dev, "vkAcquireFullScreenExclusiveModeEXT"))) use_fse = 0;
     if (can_wait && !(wait_present = (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(dev, "vkWaitForPresentKHR"))) can_wait = 0;
     if (can_ptim) {
         pt_qsize = (PFN_vkSetSwapchainPresentTimingQueueSizeEXT)vkGetDeviceProcAddr(dev, "vkSetSwapchainPresentTimingQueueSizeEXT");
@@ -718,8 +724,14 @@ static int mk_swapchain(void) {
         sc_prel = ptim && can_prel && ptc.presentAtRelativeTimeSupported;
         if (ptim) ci.flags |= VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
     }
+    struct { VkStructureType sType; const void *pNext; void *hmonitor; } fw = { (VkStructureType)1000255001, 0, fse_mon };   /* VkSurfaceFullScreenExclusiveWin32InfoEXT */
+    struct { VkStructureType sType; void *pNext; int mode; } fx = { (VkStructureType)1000255000, &fw, 3 };   /* VkSurfaceFullScreenExclusiveInfoEXT, application controlled */
+    const int fse = use_fse && fse_mon && atomic_load(&fse_want);
+    if (fse) { fx.pNext = (void *)&fw; fw.pNext = ci.pNext; ci.pNext = &fx; }
     VkSwapchainKHR nsc;
     if (vkCreateSwapchainKHR(dev, &ci, 0, &nsc)) { L("GSVK: no swapchain\n"); return 0; }
+    atomic_store(&fse_have, 0);
+    if (fse) { const VkResult fr = fse_acquire(dev, nsc); atomic_store(&fse_have, fr == VK_SUCCESS); static int nl; if (nl++ < 8) L("GSVK: full-screen exclusive: %s (%d)\n", fr == VK_SUCCESS ? "acquired" : "not acquired", (int)fr); }
     sc_ptim = 0; if (!ptim) sc_prel = 0;
     if (ptim && !pt_qsize(dev, nsc, 64)) {   /* the time domain: QueryPerformanceCounter, the host clock (host_now) */
         VkTimeDomainKHR dm[8]; uint64_t di[8];
@@ -744,6 +756,9 @@ static int mk_swapchain(void) {
    possible (the caller then draws with SDL) */
 int gsvk_present_init(void *hinstance, void *hwnd) {
     if (gsvk_ready() <= 0 || !can_present) return 0;
+#ifdef _WIN32
+    { extern __declspec(dllimport) void *__stdcall MonitorFromWindow(void *, unsigned long); fse_mon = MonitorFromWindow(hwnd, 2); }
+#endif
 #ifdef _WIN32
     typedef struct { VkStructureType sType; const void *pNext; VkFlags flags; void *hinstance, *hwnd; } W32SurfaceInfo;   /* VkWin32SurfaceCreateInfoKHR */
     typedef VkResult (VKAPI_PTR *CreateW32Surface)(VkInstance, const W32SurfaceInfo *, const VkAllocationCallbacks *, VkSurfaceKHR *);
@@ -799,6 +814,7 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, uint64_t rel_ns) {
     const double p1 = host_now();
     { const int w = atomic_load(&pm_want);   /* vsync changed (the Options menu): a new swapchain in that mode */
       if (w != pm_set) { pm_set = w; const VkPresentModeKHR m = pick_mode(w); if (m != pmode) { pmode = m; sc_stale = 1; L("GSVK: presenting with %s\n", mode_name(m)); } } }
+    if (use_fse && atomic_load(&fse_want) != atomic_load(&fse_have)) { static int last = -1; const int w = atomic_load(&fse_want); if (w != last) { last = w; sc_stale = 1; } }
     if (sc_stale || !sc) { if (!mk_swapchain()) return 0; }
     uint32_t ii;
     VkResult r = vkAcquireNextImageKHR(dev, sc, 100000000ull, uacq[f], VK_NULL_HANDLE, &ii);
@@ -862,7 +878,7 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, uint64_t rel_ns) {
     gsvk_present_ms[0] = (p1 - p0) * 1e3; gsvk_present_ms[1] = (p2 - p1) * 1e3; gsvk_present_ms[2] = (p3 - p2) * 1e3; gsvk_present_ms[3] = (p4 - p3) * 1e3; gsvk_present_ms[4] = (p5 - p4) * 1e3;
     if (shared_q) pthread_mutex_unlock(&qmx);
     if (r) { L("GSVK: window submit failed (%d)\n", (int)r); atomic_store(&pres_ok, 0); return 0; }
-    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) sc_stale = 1;
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR || (int)pr == -1000255000) sc_stale = 1;   /* (or full-screen exclusive lost) */
     usub[f] = 1; uslot[f] = ucur; if (ucur >= 0) uref[ucur]++;
     ufr = (f + 1) % NFR;
     if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) return 0;

@@ -89,6 +89,9 @@ and `20261015-181554` (x5) replayed from **scratch copies** (a replay writes `re
 - Gates (headless, scratch copies of cards and recordings): G1/G1g 702/702 x4, G2 742/742 x4, G3 soak x4 with
   `HG_VU1CHECK` identical (17.6 M runs, 0 mismatches), G5 0 batches differ, G6 0 differ, G10 native 60 identical, x5
   changed where the strips were (checked side by side).
+- **Waiting for the display** (run `sh D:/ps2-work/scratch/smooth/morning.sh` from the Bash tool, muted, about 35 min:
+  mailbox before-numbers, locked full screen and windowed, `HG_PRESENT_TIMED=1`, `HG_FSE=1`, and a 20-minute soak of
+  181554 at x4 + 60 with the audio underrun count; results in `morning_HHMM.txt`).
 - Scripts in `D:\ps2-work\scratch\smooth`: `rwin.sh` (window replay), `hrun.sh` (headless replay), `gates.sh`,
   `cadence.py` (now `tools/verify`). Builds from the Bash tool fail ("Cannot create temporary file in C:\WINDOWS"):
   build through PowerShell + `C:\msys64\usr\bin\bash.exe -lc`.

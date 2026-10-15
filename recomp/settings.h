@@ -33,6 +33,12 @@ enum { PAD_LT = 100, PAD_RT = 101, PAD_NONE = -1 };
 
 enum { VSYNC_MAILBOX = 0, VSYNC_ON = 1, VSYNC_OFF = 2 };   /* 0: no tearing, the game's clock; 1: FIFO; 2: immediate */
 
+/* the kind of controller that names the buttons (recorded as "padtype") */
+enum { PADKIND_NONE = 0, PADKIND_XBOX = 1, PADKIND_PS = 2 /* DualShock 3/4 */, PADKIND_PS5 = 3 /* DualSense */ };
+
+/* vibration strength: the game's DualShock 2 motors on the controller, scaled */
+enum { VIB_OFF = 0, VIB_LOW = 1, VIB_MEDIUM = 2, VIB_HIGH = 3 };
+
 typedef struct {
     int renderer;       /* 0 software GS, 1 GPU (Vulkan): the one running */
     int renderer_next;  /* the one chosen in the menu for the next start */
@@ -43,6 +49,10 @@ typedef struct {
     int window_scale;   /* the window's size at start, times 640 x 448 */
     int kb[PB_N];       /* SDL scancode per button (0: none) */
     int pad[PB_BUTTONS];   /* controller input per button (PAD_*), or PAD_NONE */
+    int vibration;      /* VIB_*: strength of the game's vibration on the controller */
+    uint32_t lightbar;  /* 0xRRGGBB: the light bar of PlayStation controllers (0: off) */
+    int deadzone;       /* the analog sticks' dead zone, percent of full travel (0-50) */
+    int touchpad_select;   /* 1: a click of the touchpad is Select too (unless the touchpad is mapped) */
 } Settings;
 
 void settings_init(void);                 /* load, apply the environment, log; once, at start */
@@ -56,7 +66,8 @@ int settings_gs_interp(void);             /* 0, 1 (60 fps), 2 (120 fps); 0 with 
 
 /* changing a setting from the game thread (the Options rows): applied at once, logged, saved to hg.ini unless a
    recording is replayed. `why` goes into the log line. Keys: renderer, resolution, fps, fullscreen, vsync,
-   window_scale, kb.<button>, pad.<button> (button names as in hg.ini). Returns 0 for an unknown key or value. */
+   window_scale, kb.<button>, pad.<button> (button names as in hg.ini), vibration, lightbar, deadzone,
+   touchpad_select. Returns 0 for an unknown key or value. */
 int settings_set(const char *key, const char *value, const char *why);
 void settings_reset(const char *group, const char *why);   /* "display", "keyboard" or "controller" to the defaults */
 void settings_save(void);
@@ -76,7 +87,7 @@ uint32_t settings_generation(void);      /* bumped by every change (the UI threa
 int settings_ui_display_rate_x2(void);   /* 1 at 120 fps (two presents per VBlank) */
 void settings_ui_auto_scale(int display_height);   /* the display the window is on: resolves "auto" */
 int settings_auto_scale(void);
-int settings_pad_type(void);             /* 0 none, 1 Xbox-like, 2 PlayStation (as recorded for the names) */
+int settings_pad_type(void);             /* PADKIND_* (as recorded for the names) */
 void settings_set_pad_type_live(int t);  /* UI thread: a controller came or went (recorded as an event) */
 
 /* "press a key" / "press a button" (the mapping pages): the game thread names the target (kind 0 keyboard, 1
@@ -92,6 +103,10 @@ int settings_replaying(void);
 const char *settings_button_key(int pb);          /* "cross", "l1", "ls_up" ... (hg.ini keys) */
 const char *settings_button_label(int pb);        /* "Cross", "L1", "L-stick up" ... */
 const char *settings_key_name(int scancode);      /* "X", "Return", "-" */
-const char *settings_pad_name(int input, int ps); /* "Cross"/"A", "L2"/"LT" ... ps: PlayStation names */
+const char *settings_pad_name(int input, int kind); /* "Cross"/"A", "L2"/"LT" ... for a PADKIND_* */
+const char *settings_vibration_name(int level);   /* "Off", "Low", "Medium", "High" */
+int settings_vibration_percent(int level);        /* 0, 35, 65, 100 */
+const char *settings_lightbar_name(uint32_t rgb); /* "Amber", "Off" ... or "RRGGBB" */
+int settings_lightbar_presets(const uint32_t **rgb);   /* the colours the Options row offers */
 const char *settings_pad_ini(int input);          /* "a", "lefttrigger" ... (hg.ini) */
 #endif

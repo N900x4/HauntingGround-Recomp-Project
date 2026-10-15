@@ -58,6 +58,7 @@ static void pad_script_load(void) {
     free(s);
     L("pad: %d scripted input events from HG_PAD\n", npev);
 }
+static uint8_t act_small, act_big;     /* the motors as the game last set them (see "vibration" below) */
 void pad_set_input(uint16_t held, const uint8_t analog[4]) { pad_held = held; if (analog) memcpy(pad_analog, analog, 4); }
 
 /* ================================================================== input recording and replay
@@ -240,12 +241,60 @@ void pad_vblank(uint64_t vb) {
         memset(b + 0x1c + PAD_DATA_LEN, 0xff, PAD_PROF_LEN);
         memcpy(b + 0x7c, &k->counter, 4);
     }
+    host_rumble(act_small, act_big);   /* (the motors' state; the host only reads it) */
+}
+
+/* ================================================================== vibration
+   The game drives the DualShock 2's two motors through Sony's libvib (addresses SLUS_210.75):
+     0x2d42a0  the vibration mixer (object *(0x44e7a8)): four channels of decaying envelopes per motor plus pattern
+               players; each VBlank it asks the pad manager for (small on/off, big 0-255) through 0x1be1f0, which
+               stores them in the pad object (+0x288, +0x289). The game's own Vibration option turns the mixer off
+               (its vfunc 10), so with Vibration Off nothing but zeros reaches the pad.
+     0x1be4b0  the pad task: once the pad is ready, every VBlank sceVibGetProfile (0x2d25d8: DBCMAN SRData 0x8000131a,
+               command 0x01038002) reads the actuator profile; when the wanted values changed it packs them by the
+               profile and calls sceVibSetActParam (0x2d2658 -> 0x1ef538: a no-wait RPC to the DBCMAN servers
+               0x8000131e / 0x8000131f, command 0x0103400b).
+   SetActParam's payload: socket, command, size (40), then { profile size, data size, data[data size], profile[] }.
+   The data holds one field per profile bit, packed from bit 0 up: bit 0 = the small motor (1 bit, on/off), bit 1 =
+   the big motor (8 bits, 0-255). A DualShock 2 reports profile 0x03 (both motors); until phase 4 the HLE answered
+   every SRData with 0x01, so the game sent the small motor only. HG_VIBPROFILE=hex overrides the profile (tests).
+   The motors keep the last values sent (as the real DBCMAN keeps sending them to the pad) until new ones arrive or
+   the socket goes. The host (host_sdl.c) turns them into controller rumble; HG_RUMBLELOG=1 logs every change with
+   its VBlank, which a replay reproduces exactly. */
+static int vib_profile(void) {
+    static int p = -1;
+    if (p < 0) { const char *e = getenv("HG_VIBPROFILE"); p = e ? (int)(strtoul(e, 0, 16) & 0xFF) : 0x03; }
+    return p;
+}
+static int rumble_log(void) { static int v = -1; if (v < 0) v = getenv("HG_RUMBLELOG") ? atoi(getenv("HG_RUMBLELOG")) : 0; return v; }
+static void act_set(int small, int big, const char *why) {
+    if (small == act_small && big == act_big) return;
+    act_small = (uint8_t)small; act_big = (uint8_t)big;
+    if (rumble_log()) L("rumble: VBlank %llu small %d big %d (%s)\n", (unsigned long long)hle_vblank_count(), small, big, why);
+}
+/* sceVibSetActParam's block (after socket, command and size) */
+static void act_param(const uint8_t *p, uint32_t len) {
+    int32_t psize, dsize; memcpy(&psize, p, 4); memcpy(&dsize, p + 4, 4);
+    if (psize < 0 || dsize < 0 || 8u + (uint32_t)psize + (uint32_t)dsize > len) { L("DBCMAN: SetActParam: bad sizes %d %d\n", psize, dsize); return; }
+    const uint8_t *data = p + 8, *prof = p + 8 + dsize;
+    int bit = 0, small = act_small, big = act_big;
+    #define FIELD(nbits) ({ uint32_t v_ = 0; for (int i_ = 0; i_ < (nbits); i_++, bit++) if (bit < 8 * dsize && (data[bit >> 3] >> (bit & 7) & 1)) v_ |= 1u << i_; v_; })
+    if (psize > 0 && (prof[0] & 1)) small = FIELD(1) != 0;
+    if (psize > 0 && (prof[0] & 2)) big = (int)FIELD(8);
+    #undef FIELD
+    if (rumble_log() > 1) {
+        L("rumble: VBlank %llu SetActParam profile %d:", (unsigned long long)hle_vblank_count(), psize);
+        for (int i = 0; i < psize; i++) L(" %02x", prof[i]);
+        L(" data %d:", dsize); for (int i = 0; i < dsize; i++) L(" %02x", data[i]); L("\n");
+    }
+    act_set(small, big, "SetActParam");
 }
 
 /* returns 1 when the sid belongs to DBCMAN */
 int pad_rpc(uint32_t sid, uint32_t fn, const uint8_t *S, uint32_t ssize, uint32_t recv, uint32_t rsize) {
-    (void)ssize;
     if ((sid & 0xFFFFFF00u) != 0x80001300u) return 0;
+    if ((sid == 0x8000131eu || sid == 0x8000131fu) && ssize >= 12 && S32(S, 4) == 0x0103400bu)   /* sceVibSetActParam */
+        act_param(S + 12, ssize - 12 < S32(S, 8) ? ssize - 12 : S32(S, 8));
     if (!recv || rsize < 4) return 1;
     switch (fn) {
     case 0x80001363: W32(recv, 0x0310); break;                                   /* module version: libdbc wants 0x31x */
@@ -255,11 +304,12 @@ int pad_rpc(uint32_t sid, uint32_t fn, const uint8_t *S, uint32_t ssize, uint32_
         sock[s].used = 1; sock[s].buf = S32(S, 0x28); sock[s].counter = 0;
         W32(recv, 1); if (rsize >= 0x28) W32(recv + 0x24, s);
         L("DBCMAN: CreateSocket type 0x%x port %d -> socket %d, buffer 0x%x\n", S32(S, 0), S32(S, 4), s, sock[s].buf); break; }
-    case 0x80001302: { uint32_t s = S32(S, 0); if (s < 16) sock[s].used = 0; W32(recv, 1); break; }  /* DeleteSocket */
+    case 0x80001302: { uint32_t s = S32(S, 0); if (s < 16) sock[s].used = 0; W32(recv, 1); act_set(0, 0, "DeleteSocket"); break; }
     case 0x80001303: W32(recv, 0); W32(recv + 4, 0); break;                      /* GetDepNumber: device 0 */
     case 0x80001317: W32(recv, 0); W32(recv + 4, 1); break;                      /* GetDeviceStatus: present */
-    case 0x8000131a:                                                             /* SRData: command to the device; answer "stable" */
-        if (rsize >= 0x90) { W32(recv + 8, 1); *gptr(recv + 0xc) = 1; W32(recv + 0x8c, 0); }
+    case 0x8000131a:                                                             /* SRData: a read from the device (one byte) */
+        /* commands: 0x0101800c the pad's state (1: stable), 0x01038002 the actuator profile (sceVibGetProfile) */
+        if (rsize >= 0x90) { W32(recv + 8, 1); *gptr(recv + 0xc) = S32(S, 4) == 0x01038002u ? (uint8_t)vib_profile() : 1; W32(recv + 0x8c, 0); }
         break;
     default: W32(recv, 1); if (rsize >= 8) W32(recv + 4, 0); break;
     }

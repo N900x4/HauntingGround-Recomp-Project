@@ -5,6 +5,10 @@ rem Every session is recorded to ..\recordings\YYYYMMDD-HHMMSS (input and a copy
 rem so it can be replayed exactly with replay.bat. set HG_PADREC=off before starting to turn that off.
 rem Settings: in the game, Options, then Down past Screen Position: Renderer, Resolution, Frame rate, Display,
 rem V-Sync, Keyboard and Controller mapping. They are saved to hg.ini next to hgboot.exe (read it for the keys).
+rem Controllers: a DualSense or DualShock 4 (USB or Bluetooth) or an Xbox pad; the first to press a button is
+rem player 1. The game's vibration reaches the controller; the Controller page sets its strength and the light bar
+rem colour (hg.ini: vibration, lightbar, deadzone, touchpad_select). Touchpad click = Select. If Steam has
+rem PlayStation controller support on and owns the pad, see docs\controller.md (Steam Input).
 rem Environment variables set before starting override hg.ini, e.g.:
 rem   set HG_SCALE=3                     window size at start (default 2; hg.ini: window_scale)
 rem   set HG_WAV=D:\ps2-work\session.wav  record the game's sound
@@ -15,6 +19,7 @@ rem   set HG_GSVK_INTERP=1               with HG_GSVK=1: 60 fps (in-between pict
 rem   set HG_VSYNC=1                     with HG_GSVK=1: the window waits for the display (default: mailbox, no tearing; 0: immediate)
 rem   set HG_FULLSCREEN=1                start in full screen (hg.ini: fullscreen)
 rem   set HG_INI=off                     no hg.ini (HG_INI=path: another file)
+rem   set HG_RUMBLELOG=1                 log the game's vibration (each change of the two motors) to play.log
 rem   F11 = fullscreen, F3 = speed overlay
 cd /d "%~dp0"
 set "PATH=%~dp0;C:\msys64\ucrt64\bin;%PATH%"

@@ -11,7 +11,15 @@
    The defaults: arrows = D-pad, X = Cross, C = Circle, Z = Square, S = Triangle, Enter = Start, Right Shift = Select,
              Q/E = L1/R1, 1/3 = L2/R2, I/J/K/L = left stick; F11 = fullscreen, F3 = overlay, Esc = quit.
    Gamepad (SDL GameController): A/B/X/Y = Cross/Circle/Square/Triangle, shoulders = L1/R1, triggers = L2/R2,
-             sticks = analog sticks (not mapped), stick clicks = L3/R3, Back = Select, Start = Start.
+             sticks = analog sticks (not mapped), stick clicks = L3/R3, Back = Select, Start = Start; on a
+             PlayStation controller the same buttons by their own names (Cross = Cross ...), Create/Share = Select,
+             Options = Start, and a click of the touchpad is Select too (touchpad_select).
+   Controllers (docs/controller.md): every controller SDL sees is opened (USB or Bluetooth; DualSense and DualShock 4
+   through SDL's HIDAPI drivers, with their extended reports switched on so rumble and the light bar work over
+   Bluetooth too); the first one to press a button becomes player 1 and is the only one read, until it goes. The
+   game's DualShock 2 vibration (iop_pad_mc.c: host_rumble each VBlank) is played on player 1's motors, scaled by
+   the vibration setting; PlayStation controllers get the light bar colour of the settings. A gamecontrollerdb.txt
+   next to the executable adds SDL mappings for unusual controllers.
    Settings the UI thread applies itself when they change: full screen, vsync (the swapchain's present mode), the
    presenting rate (60 or 120 a second, following the GS's frame interpolation). It also tells the settings which
    kind of controller is connected (the names in the Options menu) and the display's height ("auto" resolution), and
@@ -38,7 +46,10 @@ double host_idle;   /* seconds slept to pace the window to real time (HG_SPEEDLO
 
 enum { B_SELECT = 0, B_L3, B_R3, B_START, B_UP, B_RIGHT, B_DOWN, B_LEFT, B_L2, B_R2, B_L1, B_R1, B_TRIANGLE, B_CIRCLE, B_CROSS, B_SQUARE };
 static SDL_Window *win; static SDL_Renderer *ren; static SDL_Texture *tex;
-static SDL_GameController *pad;
+#define MAXPADS 8
+static SDL_GameController *pads[MAXPADS];   /* every controller open */
+static SDL_GameController *pad;             /* player 1: the first to press a button (0 until one does) */
+static SDL_atomic_t rumble_req, rumble_tick;   /* game thread -> UI thread: small << 8 | big, SDL ticks of that VBlank */
 static int tex_w, tex_h, active = -1;
 static SDL_atomic_t ui_ready, ui_quit, in_held, in_an;   /* UI thread -> game thread */
 static SDL_atomic_t ui_stop, ui_stopped;                 /* host_shutdown() */
@@ -50,6 +61,8 @@ static int kbmap[PB_N], padmap[PB_BUTTONS];
 static uint32_t ui_gen;        /* the settings generation last applied by the UI thread */
 static int fs_flip;            /* F11 while a recording is replayed: the window only (the settings come from it) */
 static int ui_vsync = -1;      /* the present mode last asked of the swapchain */
+static int ui_vib = VIB_HIGH, ui_deadzone = 18, ui_touchsel = 1;   /* controller settings (copied like the maps) */
+static uint32_t ui_lightbar = 0x401a00;
 
 int host_window_wanted(void) { const char *w = getenv("HG_WINDOW"); return !(w && !strcmp(w, "0"))
 #ifndef _WIN32
@@ -57,19 +70,96 @@ int host_window_wanted(void) { const char *w = getenv("HG_WINDOW"); return !(w &
 #endif
         ; }
 int host_window_active(void) { return active == 1; }
-static int pad_kind(void) {   /* for the button names: 2 PlayStation, 1 others (Xbox names), 0 none */
-    if (!pad) return 0;
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-    const SDL_GameControllerType t = SDL_GameControllerGetType(pad);
-    if (t == SDL_CONTROLLER_TYPE_PS3 || t == SDL_CONTROLLER_TYPE_PS4 || t == SDL_CONTROLLER_TYPE_PS5) return 2;
-#endif
-    return 1;
+static int pad_kind(SDL_GameController *c) {   /* for the button names: PADKIND_* */
+    if (!c) return PADKIND_NONE;
+    const SDL_GameControllerType t = SDL_GameControllerGetType(c);
+    if (t == SDL_CONTROLLER_TYPE_PS5) return PADKIND_PS5;
+    if (t == SDL_CONTROLLER_TYPE_PS3 || t == SDL_CONTROLLER_TYPE_PS4) return PADKIND_PS;
+    return PADKIND_XBOX;
 }
+static const char *type_name(SDL_GameController *c) {
+    switch (SDL_GameControllerGetType(c)) {
+    case SDL_CONTROLLER_TYPE_PS5: return "PS5 (DualSense)";
+    case SDL_CONTROLLER_TYPE_PS4: return "PS4 (DualShock 4)";
+    case SDL_CONTROLLER_TYPE_PS3: return "PS3";
+    case SDL_CONTROLLER_TYPE_XBOX360: return "Xbox 360";
+    case SDL_CONTROLLER_TYPE_XBOXONE: return "Xbox One";
+    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO: return "Switch Pro";
+    case SDL_CONTROLLER_TYPE_VIRTUAL: return "virtual";
+    default: return "other";
+    }
+}
+/* the controller that names the buttons: player 1, or before anyone pressed a button the first one open */
+static void note_kind(void) {
+    SDL_GameController *c = pad;
+    for (int i = 0; !c && i < MAXPADS; i++) c = pads[i];
+    settings_set_pad_type_live(pad_kind(c));
+}
+static void set_lightbar(SDL_GameController *c) {
+    if (c && SDL_GameControllerHasLED(c)) SDL_GameControllerSetLED(c, ui_lightbar >> 16 & 0xFF, ui_lightbar >> 8 & 0xFF, ui_lightbar & 0xFF);
+}
+static void pad_pressed(SDL_JoystickID id);
 static void open_pad(int idx) {
-    if (pad || !SDL_IsGameController(idx)) return;
-    pad = SDL_GameControllerOpen(idx);
-    if (pad) L("host: gamepad \"%s\" connected\n", SDL_GameControllerName(pad));
-    settings_set_pad_type_live(pad_kind());
+    if (!SDL_IsGameController(idx)) return;
+    const SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(idx);
+    for (int i = 0; i < MAXPADS; i++) if (pads[i] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pads[i])) == id) return;   /* open already */
+    int slot = 0; while (slot < MAXPADS && pads[slot]) slot++;
+    if (slot == MAXPADS) return;
+    SDL_GameController *c = SDL_GameControllerOpen(idx);
+    if (!c) { L("host: gamepad %d: %s\n", idx, SDL_GetError()); return; }
+    pads[slot] = c;
+    SDL_GameControllerSetPlayerIndex(c, -1);   /* (no player LEDs until it is player 1) */
+    const char *name = SDL_GameControllerName(c);
+    L("host: gamepad \"%s\" connected: type %s, rumble %s, light bar %s, touchpad %s%s\n", name ? name : "?", type_name(c),
+      SDL_GameControllerHasRumble(c) ? "yes" : "no", SDL_GameControllerHasLED(c) ? "yes" : "no", SDL_GameControllerGetNumTouchpads(c) > 0 ? "yes" : "no",
+      name && SDL_strstr(name, "Steam") ? " (Steam Input's virtual controller: Steam owns the real one, docs/controller.md)" : "");
+    set_lightbar(c);
+    note_kind();
+    if (getenv("HG_PADAUTO") && atoi(getenv("HG_PADAUTO"))) pad_pressed(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(c)));   /* tests: player 1 without a press */
+}
+static void close_pad(SDL_JoystickID id) {
+    for (int i = 0; i < MAXPADS; i++) if (pads[i] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pads[i])) == id) {
+        if (pads[i] == pad) { pad = 0; L("host: player 1's gamepad disconnected (the next to press a button is player 1)\n"); }
+        else L("host: gamepad disconnected\n");
+        SDL_GameControllerClose(pads[i]); pads[i] = 0;
+        note_kind();
+        return;
+    }
+}
+/* a button (or trigger) pressed on controller `id`: the first one becomes player 1 */
+static void pad_pressed(SDL_JoystickID id) {
+    if (pad) return;
+    SDL_GameController *c = SDL_GameControllerFromInstanceID(id);
+    if (!c) return;
+    pad = c;
+    SDL_GameControllerSetPlayerIndex(c, 0);
+    L("host: \"%s\" is player 1\n", SDL_GameControllerName(c) ? SDL_GameControllerName(c) : "?");
+    note_kind();
+}
+/* the game's motors on player 1's controller: sent when they change, and again every 100 ms while running (each send
+   lasts 250 ms, so the motors stop by themselves if the game stops reporting, e.g. the window closes or it hangs) */
+static void ui_rumble(int stop) {
+    static SDL_GameController *to; static Uint16 lo_s, hi_s; static Uint32 at;
+    static int log = -1; if (log < 0) log = getenv("HG_RUMBLELOG") && atoi(getenv("HG_RUMBLELOG"));
+    const Uint32 now = SDL_GetTicks();
+    Uint16 lo = 0, hi = 0;
+    if (!stop && pad && now - (Uint32)SDL_AtomicGet(&rumble_tick) < 250) {
+        const int r = SDL_AtomicGet(&rumble_req), pct = settings_vibration_percent(ui_vib);
+        lo = (Uint16)((unsigned)(r & 0xFF) * 257u * (unsigned)pct / 100u);   /* the big motor: the low-frequency (left) one */
+        hi = (r >> 8 & 1) ? (Uint16)(65535u * (unsigned)pct / 100u) : 0;     /* the small one, on or off: the right one */
+    }
+    if (pad != to) { to = pad; lo_s = hi_s = 0; at = 0; }
+    if (!pad) return;
+    if (lo != lo_s || hi != hi_s || ((lo || hi) && now - at >= 100)) {
+        if (log && (lo != lo_s || hi != hi_s)) L("host rumble: low %u high %u\n", lo, hi);
+        SDL_GameControllerRumble(pad, lo, hi, lo || hi ? 250 : 0);
+        lo_s = lo; hi_s = hi; at = now;
+    }
+}
+void host_rumble(int small, int big) {
+    if (active != 1) return;
+    SDL_AtomicSet(&rumble_req, (small ? 0x100 : 0) | (big & 0xFF));
+    SDL_AtomicSet(&rumble_tick, (int)SDL_GetTicks());
 }
 /* "auto" resolution: the height of the display the window is on */
 static void note_display(void) {
@@ -83,7 +173,19 @@ static void sdl_renderer(void) {
 }
 static int host_init(void) {   /* on the UI thread */
     SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");   /* a sharp window on scaled displays, not one Windows stretches */
+    /* DualSense / DualShock 4 over Bluetooth: rumble and the light bar need the extended reports (an environment
+       variable of the same name still wins; once on, other programs see the controller differently until it is
+       switched off and on again) */
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
+    SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) { L("host: SDL_Init failed: %s (running headless)\n", SDL_GetError()); return 0; }
+    {   /* community controller mappings next to the executable (optional) */
+        char *base = SDL_GetBasePath(), p[1100];
+        snprintf(p, sizeof p, "%sgamecontrollerdb.txt", base ? base : "");
+        SDL_free(base);
+        FILE *f = fopen(p, "rb");
+        if (f) { fclose(f); const int n = SDL_GameControllerAddMappingsFromFile(p); L("host: %s: %d controller mappings%s%s\n", p, n, n < 0 ? ": " : "", n < 0 ? SDL_GetError() : ""); }
+    }
     const int scale = settings()->window_scale;   /* HG_SCALE, window_scale */
     win = SDL_CreateWindow("Haunting Ground Recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640 * scale, 448 * scale, SDL_WINDOW_RESIZABLE);
     if (!win) { L("host: no window: %s (running headless)\n", SDL_GetError()); SDL_Quit(); return 0; }
@@ -92,6 +194,7 @@ static int host_init(void) {   /* on the UI thread */
     if (settings()->renderer && !getenv("HG_GSVKCHECK") && !(pp && !strcmp(pp, "sdl"))) vkmode = 1;
 #endif
     if (!vkmode) sdl_renderer();
+    ui_lightbar = settings()->lightbar;
     for (int i = 0; i < SDL_NumJoysticks(); i++) open_pad(i);
     note_display();
     L("host: SDL window open (%s, %d joystick(s))\n", vkmode ? "to be presented by the GPU renderer" : ren ? "SDL renderer" : "no renderer", SDL_NumJoysticks());
@@ -155,16 +258,21 @@ static void ui_input(void) {
     if (KEY(PB_LS_DOWN)) an[3] = 0xFF;
 #undef KEY
     if (pad) {
+        int touch_mapped = 0;
         for (int b = 0; b < PB_BUTTONS; b++) {
             const int in = padmap[b];
+            if (in == SDL_CONTROLLER_BUTTON_TOUCHPAD) touch_mapped = 1;
             if (in == PAD_LT || in == PAD_RT) {
                 if (SDL_GameControllerGetAxis(pad, in == PAD_LT ? SDL_CONTROLLER_AXIS_TRIGGERLEFT : SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16000) held |= 1u << b;
             } else if (in >= 0 && SDL_GameControllerGetButton(pad, (SDL_GameControllerButton)in)) held |= 1u << b;
         }
+        if (ui_touchsel && !touch_mapped && SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_TOUCHPAD)) held |= 1u << B_SELECT;
+        /* the sticks: centred inside the dead zone (a circle), the raw position outside it */
+        const long dz = (long)ui_deadzone * 32767 / 100;
         Sint16 lx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX), ly = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
         Sint16 rx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX), ry = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
-        if (abs(lx) > 6000 || abs(ly) > 6000) { an[2] = axis8(lx); an[3] = axis8(ly); }
-        if (abs(rx) > 6000 || abs(ry) > 6000) { an[0] = axis8(rx); an[1] = axis8(ry); }
+        if ((long)lx * lx + (long)ly * ly > dz * dz) { an[2] = axis8(lx); an[3] = axis8(ly); }
+        if ((long)rx * rx + (long)ry * ry > dz * dz) { an[0] = axis8(rx); an[1] = axis8(ry); }
     }
     SDL_AtomicSet(&in_held, held); SDL_AtomicSet(&in_an, (int)((uint32_t)an[0] | (uint32_t)an[1] << 8 | (uint32_t)an[2] << 16 | (uint32_t)an[3] << 24));
 }
@@ -196,6 +304,9 @@ static int capture_event(const SDL_Event *e) {
 static void ui_events(void) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_CONTROLLERBUTTONDOWN) pad_pressed(e.cbutton.which);
+        if (e.type == SDL_CONTROLLERAXISMOTION && e.caxis.value > 16000 &&
+            (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) pad_pressed(e.caxis.which);
         if (capture_event(&e)) continue;   /* (Esc then cancels the capture instead of quitting) */
         if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) SDL_AtomicSet(&ui_quit, 1);
         if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F3 && !e.key.repeat) overlay = !(overlay > 0);
@@ -205,9 +316,7 @@ static void ui_events(void) {
             else settings_host_request("fullscreen", settings()->fullscreen ? "0" : "1");
         }
         if (e.type == SDL_CONTROLLERDEVICEADDED) open_pad(e.cdevice.which);
-        if (e.type == SDL_CONTROLLERDEVICEREMOVED && pad && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad))) {
-            SDL_GameControllerClose(pad); pad = 0; L("host: gamepad disconnected\n"); settings_set_pad_type_live(0);
-        }
+        if (e.type == SDL_CONTROLLERDEVICEREMOVED) close_pad(e.cdevice.which);
 #if SDL_VERSION_ATLEAST(2, 0, 18)
         if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED) note_display();
 #endif
@@ -222,6 +331,8 @@ static void ui_settings(void) {
         const Settings *st = settings();
         for (int i = 0; i < PB_N; i++) kbmap[i] = st->kb[i];
         for (int i = 0; i < PB_BUTTONS; i++) padmap[i] = st->pad[i];
+        ui_vib = st->vibration; ui_deadzone = st->deadzone; ui_touchsel = st->touchpad_select;
+        if (st->lightbar != ui_lightbar) { ui_lightbar = st->lightbar; for (int i = 0; i < MAXPADS; i++) set_lightbar(pads[i]); }
 #ifdef HAVE_VULKAN
         if (st->vsync != ui_vsync) { ui_vsync = st->vsync; gsvk_present_mode(ui_vsync); }
 #endif
@@ -284,9 +395,10 @@ static int ui_main(void *arg) {
 #ifdef HAVE_VULKAN
             if (vkmode == 2) gsvk_present_shutdown();
 #endif
+            ui_rumble(1);
             SDL_DestroyWindow(win); SDL_AtomicSet(&ui_stopped, 1); return 0;
         }
-        ui_settings(); ui_events(); ui_input();
+        ui_settings(); ui_events(); ui_input(); ui_rumble(0);
         ui_present();
 #ifdef HAVE_VULKAN
         if (gsvk_ready() > 0 && (gs_interp_now() >= 2) != x2) {   /* (once the GPU renderer runs) */
@@ -371,5 +483,6 @@ void host_audio_push(const int16_t *s, int frames) { (void)s; (void)frames; }
 int host_window_wanted(void) { return 0; }
 int host_window_active(void) { return 0; }
 void host_vblank(uint64_t vb) { (void)vb; }
+void host_rumble(int small, int big) { (void)small; (void)big; }
 void host_shutdown(void) { }
 #endif

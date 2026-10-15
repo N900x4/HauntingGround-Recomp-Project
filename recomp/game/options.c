@@ -202,6 +202,8 @@ static const int map_order[PB_N] = {
 };
 #define MAP_ROWS 10
 #define MAP_Y(i) (122 + 25 * (i))
+/* the controller page's two value entries after its 16 buttons (right column): vibration strength, light bar */
+enum { E_VIB = PB_BUTTONS, E_LIGHT, PAD_ENTRIES };
 
 typedef struct {
     uint32_t obj;
@@ -305,7 +307,27 @@ static int blink_alpha(uint32_t obj) {   /* as the game's edit states blink thei
 }
 static const char *pad_type_name(void) {
     const int t = settings_pad_type();
-    return t == 2 ? "PlayStation" : t == 1 ? "Xbox / other" : "Not connected";
+    return t == PADKIND_PS5 ? "DualSense" : t == PADKIND_PS ? "PlayStation" : t == PADKIND_XBOX ? "Xbox / other" : "Not connected";
+}
+/* the controller page's value entries: the values offered (v) and their names; the light bar keeps a colour from
+   hg.ini that is not one of the presets as an extra value */
+static int pad_values(int e, int *v, const char **names) {
+    int k = 0;
+    if (e == E_VIB) for (int i = VIB_OFF; i <= VIB_HIGH; i++) { v[k] = i; names[k++] = settings_vibration_name(i); }
+    else {
+        const uint32_t *rgb; const int n = settings_lightbar_presets(&rgb);
+        int found = 0;
+        for (int i = 0; i < n; i++) { v[k] = (int)rgb[i]; names[k++] = settings_lightbar_name(rgb[i]); found |= rgb[i] == settings()->lightbar; }
+        if (!found) { v[k] = (int)settings()->lightbar; names[k++] = settings_lightbar_name(settings()->lightbar); }
+    }
+    return k;
+}
+static int pad_current(int e) { return e == E_VIB ? settings()->vibration : (int)settings()->lightbar; }
+static int pad_value_index(int e, int val) {
+    int v[16]; const char *n[16];
+    const int k = pad_values(e, v, n);
+    for (int i = 0; i < k; i++) if (v[i] == val) return i;
+    return 0;
 }
 static void draw_display_page(Draw *d, const Opt *o) {
     const Settings *s = settings();
@@ -335,16 +357,30 @@ static void draw_display_page(Draw *d, const Opt *o) {
 }
 static void draw_map_page(Draw *d, const Opt *o) {
     const Settings *s = settings();
-    const int kb = o->page == PG_KEYBOARD, n = kb ? PB_N : PB_BUTTONS, ps = settings_pad_type() == 2;
+    const int kb = o->page == PG_KEYBOARD, n = kb ? PB_N : PAD_ENTRIES, kind = settings_pad_type();
     d_panel(d);
     d_columns(d, 236, 136);   /* the two columns down to the last row (the row bars and the slider line go) */
     d_sprite(d, 32, 84, SPR_ICON_PAD, 128);
     d_text(d, 72, 90, COL_NORMAL, kb ? "KEYBOARD" : "CONTROLLER", 16);
     if (!kb) d_text_centred(d, 352, 90, COL_NORMAL, pad_type_name(), 16);
     for (int i = 0; i < n; i++) {
-        const int pb = map_order[i], col = i / MAP_ROWS, y = MAP_Y(i % MAP_ROWS), x = col ? 272 : 40;
+        const int col = i / MAP_ROWS, y = MAP_Y(i % MAP_ROWS), x = col ? 272 : 40;
         const int sel = o->row == i, colour = sel ? COL_EDIT : COL_NORMAL;
         char val[48];
+        if (!kb && i >= E_VIB) {   /* a value: as the display page's rows, the arrows blinking while it changes */
+            int v[16]; const char *nm[16];
+            const int k = pad_values(i, v, nm), edit = sel && o->editing;
+            d_text(d, x, y, colour, i == E_VIB ? "Vibration" : "Light bar", 14);
+            snprintf(val, sizeof val, "%s", k ? nm[pad_value_index(i, edit ? o->value : pad_current(i))] : "");
+            d_text(d, x + 118, y, colour, val, 14);
+            if (edit) {
+                const int a = blink_alpha(d->obj);
+                d_sprite(d, x + 118 - 30, y - 9, SPR_ARROW_L, a);
+                d_sprite(d, x + 118 + d_width(d, val, 14) - 2, y - 9, SPR_ARROW_R, a);
+            }
+            continue;
+        }
+        const int pb = map_order[i];
         const char *glyph = pb == PB_CROSS ? G_CROSS : pb == PB_CIRCLE ? G_CIRCLE : pb == PB_SQUARE ? G_SQUARE : pb == PB_TRIANGLE ? G_TRIANGLE : 0;
         if (glyph) {   /* the game's own glyph, then the name (drawn apart: a glyph sets its own colour) */
             d_text(d, x, y, COL_NORMAL, glyph, 14);
@@ -354,7 +390,7 @@ static void draw_map_page(Draw *d, const Opt *o) {
             snprintf(val, sizeof val, "%s", kb ? "Press a key" : "Press a button");
             d_text(d, x + 118, y, blink_alpha(d->obj) > 64 ? COL_EDIT : COL_NORMAL, val, 14);
         } else {
-            snprintf(val, sizeof val, "%s", kb ? settings_key_name(s->kb[pb]) : settings_pad_name(s->pad[pb], ps));
+            snprintf(val, sizeof val, "%s", kb ? settings_key_name(s->kb[pb]) : settings_pad_name(s->pad[pb], kind));
             d_text(d, x + 118, y, colour, val, 14);
         }
     }
@@ -436,13 +472,38 @@ static int input(Ctx *c, Opt *o) {
         return IN_DRAW;
     }
     /* a mapping page */
-    const int n = o->page == PG_KEYBOARD ? PB_N : PB_BUTTONS;
-    if (p & M_OK) {
+    const int n = o->page == PG_KEYBOARD ? PB_N : PAD_ENTRIES;
+    if (o->page == PG_PAD && o->row >= E_VIB && o->editing) {   /* vibration or light bar being changed */
+        int v[16]; const char *nm[16];
+        const int k = pad_values(o->row, v, nm);
+        if (p & M_OK) {
+            o->editing = 0;
+            if (o->value != pad_current(o->row)) {
+                if (o->row == E_VIB) settings_set("vibration", settings_vibration_name(o->value), "Options menu");
+                else { char b[16]; snprintf(b, sizeof b, "%06x", (unsigned)o->value & 0xFFFFFF); settings_set("lightbar", b, "Options menu"); }
+            }
+            sound(c, SND_OK);
+        } else if (p & M_BACK) {
+            o->editing = 0;
+            sound(c, SND_CANCEL);
+        } else if (p & (M_LEFT | M_RIGHT)) {
+            const int i = pad_value_index(o->row, o->value);
+            o->value = v[(i + ((p & M_RIGHT) ? 1 : k - 1)) % k];
+            sound(c, SND_MOVE);
+        }
+        return IN_DRAW;
+    }
+    if (p & M_OK && o->page == PG_PAD && o->row >= E_VIB) {
+        o->editing = 1;
+        o->value = pad_current(o->row);
+        sound(c, SND_OK);
+    } else if (p & M_OK) {
         o->capturing = 1;
         o->cap_seen = settings_capture_count();
         if (!settings_replaying()) settings_capture_target(o->page == PG_KEYBOARD ? 0 : 1, map_order[o->row]);   /* (replays: the recording has it) */
         sound(c, SND_OK);
     } else if (p & M_BACK) {
+        o->editing = 0;
         o->row = o->page == PG_KEYBOARD ? R_KEYBOARD : R_PAD;
         o->page = PG_DISPLAY;
         sound(c, SND_CANCEL);

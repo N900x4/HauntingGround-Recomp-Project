@@ -42,35 +42,48 @@ const char *settings_button_key(int pb) { return pb >= 0 && pb < PB_N ? pb_key[p
 const char *settings_button_label(int pb) { return pb >= 0 && pb < PB_N ? pb_label[pb] : "?"; }
 
 /* SDL game-controller buttons (SDL2 numbering), their hg.ini names and display names */
-static const struct { int id; const char *ini, *ps, *xbox; } padnames[] = {
-    { 0, "a", "Cross", "A" },
-    { 1, "b", "Circle", "B" },
-    { 2, "x", "Square", "X" },
-    { 3, "y", "Triangle", "Y" },
-    { 4, "back", "Create", "View" },
-    { 5, "guide", "PS", "Xbox" },
-    { 6, "start", "Options", "Menu" },
-    { 7, "leftstick", "L3", "LS" },
-    { 8, "rightstick", "R3", "RS" },
-    { 9, "leftshoulder", "L1", "LB" },
-    { 10, "rightshoulder", "R1", "RB" },
-    { 11, "dpup", "Up", "Up" },
-    { 12, "dpdown", "Down", "Down" },
-    { 13, "dpleft", "Left", "Left" },
-    { 14, "dpright", "Right", "Right" },
-    { 15, "misc1", "Mute", "Share" },
-    { 16, "paddle1", "Paddle 1", "P1" },
-    { 17, "paddle2", "Paddle 2", "P2" },
-    { 18, "paddle3", "Paddle 3", "P3" },
-    { 19, "paddle4", "Paddle 4", "P4" },
-    { 20, "touchpad", "Touchpad", "Touchpad" },
-    { PAD_LT, "lefttrigger", "L2", "LT" },
-    { PAD_RT, "righttrigger", "R2", "RT" },
+static const struct { int id; const char *ini, *ps5, *ps4, *xbox; } padnames[] = {
+    { 0, "a", "Cross", "Cross", "A" },
+    { 1, "b", "Circle", "Circle", "B" },
+    { 2, "x", "Square", "Square", "X" },
+    { 3, "y", "Triangle", "Triangle", "Y" },
+    { 4, "back", "Create", "Share", "View" },
+    { 5, "guide", "PS", "PS", "Xbox" },
+    { 6, "start", "Options", "Options", "Menu" },
+    { 7, "leftstick", "L3", "L3", "LS" },
+    { 8, "rightstick", "R3", "R3", "RS" },
+    { 9, "leftshoulder", "L1", "L1", "LB" },
+    { 10, "rightshoulder", "R1", "R1", "RB" },
+    { 11, "dpup", "Up", "Up", "Up" },
+    { 12, "dpdown", "Down", "Down", "Down" },
+    { 13, "dpleft", "Left", "Left", "Left" },
+    { 14, "dpright", "Right", "Right", "Right" },
+    { 15, "misc1", "Mute", "Misc", "Share" },
+    { 16, "paddle1", "Paddle 1", "Paddle 1", "P1" },
+    { 17, "paddle2", "Paddle 2", "Paddle 2", "P2" },
+    { 18, "paddle3", "Paddle 3", "Paddle 3", "P3" },
+    { 19, "paddle4", "Paddle 4", "Paddle 4", "P4" },
+    { 20, "touchpad", "Touchpad", "Touchpad", "Touchpad" },
+    { PAD_LT, "lefttrigger", "L2", "L2", "LT" },
+    { PAD_RT, "righttrigger", "R2", "R2", "RT" },
 };
 #define NPADNAMES (int)(sizeof padnames / sizeof padnames[0])
-const char *settings_pad_name(int input, int ps) {
-    for (int i = 0; i < NPADNAMES; i++) if (padnames[i].id == input) return ps ? padnames[i].ps : padnames[i].xbox;
+const char *settings_pad_name(int input, int kind) {
+    for (int i = 0; i < NPADNAMES; i++) if (padnames[i].id == input)
+        return kind == PADKIND_PS5 ? padnames[i].ps5 : kind == PADKIND_PS ? padnames[i].ps4 : padnames[i].xbox;
     return "-";
+}
+static const char *const vib_names[4] = { "Off", "Low", "Medium", "High" };
+const char *settings_vibration_name(int level) { return level >= 0 && level < 4 ? vib_names[level] : "?"; }
+int settings_vibration_percent(int level) { static const int p[4] = { 0, 35, 65, 100 }; return level >= 0 && level < 4 ? p[level] : 100; }
+/* light bar colours: dim, so the bar does not light up a dark room (the game is played in the dark) */
+static const uint32_t lb_rgb[] = { 0x401a00, 0x400400, 0x000c40, 0x282828, 0x000000 };
+static const char *const lb_name[] = { "Amber", "Red", "Blue", "White", "Off" };
+#define NLB (int)(sizeof lb_rgb / sizeof lb_rgb[0])
+int settings_lightbar_presets(const uint32_t **rgb) { *rgb = lb_rgb; return NLB; }
+const char *settings_lightbar_name(uint32_t rgb) {
+    for (int i = 0; i < NLB; i++) if (lb_rgb[i] == rgb) return lb_name[i];
+    static char b[4][8]; static int k; char *o = b[k++ & 3]; snprintf(o, 8, "%06x", rgb & 0xFFFFFF); return o;
 }
 const char *settings_pad_ini(int input) {
     for (int i = 0; i < NPADNAMES; i++) if (padnames[i].id == input) return padnames[i].ini;
@@ -146,6 +159,10 @@ void settings_defaults(Settings *s) {
     s->pad[PB_RIGHT] = 14;
     s->pad[PB_L2] = PAD_LT;
     s->pad[PB_R2] = PAD_RT;
+    s->vibration = VIB_HIGH;     /* the game's vibration as the game made it */
+    s->lightbar = 0x401a00;      /* dim amber */
+    s->deadzone = 18;            /* about 6000 of 32768, as before settings existed */
+    s->touchpad_select = 1;
 }
 
 /* ------------------------------------------------------------------ values as text */
@@ -159,6 +176,10 @@ static void value_of(const Settings *s, const char *key, char *out, size_t n) {
     else if (!strcmp(key, "fullscreen")) snprintf(out, n, "%d", s->fullscreen);
     else if (!strcmp(key, "vsync")) snprintf(out, n, "%s", vsync_name(s->vsync));
     else if (!strcmp(key, "window_scale")) snprintf(out, n, "%d", s->window_scale);
+    else if (!strcmp(key, "vibration")) { snprintf(out, n, "%s", settings_vibration_name(s->vibration)); for (char *c = out; *c; c++) *c = (char)tolower((unsigned char)*c); }
+    else if (!strcmp(key, "lightbar")) { snprintf(out, n, "%s", settings_lightbar_name(s->lightbar)); for (char *c = out; *c; c++) *c = (char)tolower((unsigned char)*c); }
+    else if (!strcmp(key, "deadzone")) snprintf(out, n, "%d", s->deadzone);
+    else if (!strcmp(key, "touchpad_select")) snprintf(out, n, "%d", s->touchpad_select);
     else if (!strncmp(key, "kb.", 3)) {
         for (int i = 0; i < PB_N; i++) if (!strcmp(key + 3, pb_key[i])) snprintf(out, n, "%s", settings_key_name(s->kb[i]));
     } else if (!strncmp(key, "pad.", 4)) {
@@ -198,6 +219,19 @@ static int apply_to(Settings *s, const char *key, const char *v, int swap) {
         return 1;
     }
     if (!strcmp(key, "window_scale")) { const int n = atoi(v); if (n < 1 || n > 8) return 0; s->window_scale = n; return 1; }
+    if (!strcmp(key, "vibration")) {
+        for (int i = 0; i < 4; i++) if (!strcasecmp(v, vib_names[i])) { s->vibration = i; return 1; }
+        if (isdigit((unsigned char)v[0]) && !v[1] && v[0] <= '3') { s->vibration = v[0] - '0'; return 1; }
+        return 0;
+    }
+    if (!strcmp(key, "lightbar")) {
+        for (int i = 0; i < NLB; i++) if (!strcasecmp(v, lb_name[i])) { s->lightbar = lb_rgb[i]; return 1; }
+        char *end; const unsigned long c = strtoul(v[0] == '#' ? v + 1 : v, &end, 16);
+        if (*end || strlen(v[0] == '#' ? v + 1 : v) != 6) return 0;
+        s->lightbar = (uint32_t)c; return 1;
+    }
+    if (!strcmp(key, "deadzone")) { const int n = atoi(v); if (n < 0 || n > 50 || !isdigit((unsigned char)v[0])) return 0; s->deadzone = n; return 1; }
+    if (!strcmp(key, "touchpad_select")) { s->touchpad_select = atoi(v) != 0 || !strcasecmp(v, "on") || !strcasecmp(v, "yes"); return 1; }
     if (!strncmp(key, "kb.", 3)) {
         for (int i = 0; i < PB_N; i++) if (!strcmp(key + 3, pb_key[i])) {
             int sc; if (!key_parse(v, &sc)) return 0;
@@ -214,7 +248,7 @@ static int apply_to(Settings *s, const char *key, const char *v, int swap) {
         }
         return 0;
     }
-    if (!strcmp(key, "padtype")) { const int t = atoi(v); if (t < 0 || t > 2) return 0; pad_type_rec = t; return 1; }
+    if (!strcmp(key, "padtype")) { const int t = atoi(v); if (t < 0 || t > 3) return 0; pad_type_rec = t; return 1; }
     return 0;
 }
 
@@ -300,6 +334,13 @@ void settings_save(void) {
     fprintf(f, "\n# controller: a b x y back guide start leftstick rightstick leftshoulder rightshoulder dpup dpdown dpleft\n");
     fprintf(f, "# dpright misc1 paddle1-4 touchpad lefttrigger righttrigger none\n");
     for (int i = 0; i < PB_BUTTONS; i++) fprintf(f, "pad.%s = %s\n", pb_key[i], settings_pad_ini(file.pad[i]));
+    fprintf(f, "\n# controller extras\n");
+    value_of(&file, "vibration", v, sizeof v);
+    fprintf(f, "vibration = %s      # off | low | medium | high: the game's vibration (its own Vibration option still applies)\n", v);
+    value_of(&file, "lightbar", v, sizeof v);
+    fprintf(f, "lightbar = %s       # amber | red | blue | white | off, or a colour RRGGBB (PlayStation controllers)\n", v);
+    fprintf(f, "deadzone = %d          # the analog sticks' dead zone, percent (0-50)\n", file.deadzone);
+    fprintf(f, "touchpad_select = %d    # 1: clicking the touchpad is Select too (unless pad.<button> = touchpad)\n", file.touchpad_select);
     fclose(f);
     remove(ini_path);
     if (rename(tmp, ini_path)) L("settings: cannot replace %s\n", ini_path);
@@ -310,8 +351,9 @@ static void log_line(const char *what) {
     char res[16];
     if (eff.scale == 0) snprintf(res, sizeof res, "auto"); else if (eff.scale == 1) snprintf(res, sizeof res, "native"); else snprintf(res, sizeof res, "x%d", eff.scale);
     char envs[256] = ""; for (int i = 0; i < NENV; i++) if (env_set[i]) { strcat(envs, " "); strcat(envs, envmap[i].env); }
-    L("settings%s: renderer %s, resolution %s, %d fps, %s, vsync %s, window x%d (file: %s%s; environment:%s)\n", what,
+    L("settings%s: renderer %s, resolution %s, %d fps, %s, vsync %s, window x%d, vibration %s, light bar %s, dead zone %d%% (file: %s%s; environment:%s)\n", what,
       eff.renderer ? "gpu" : "software", res, eff.fps, eff.fullscreen ? "full screen" : "window", vsync_name(eff.vsync), eff.window_scale,
+      settings_vibration_name(eff.vibration), settings_lightbar_name(eff.lightbar), eff.deadzone,
       ini_off ? "off" : ini_path, loaded ? "" : ", none", envs[0] ? envs : " none");
 }
 void settings_init(void) {
@@ -374,20 +416,21 @@ void settings_reset(const char *group, const char *why) {
     settings_defaults(&d);
     if (!strcmp(group, "display")) { t.scale = d.scale; t.fps = d.fps; t.fullscreen = d.fullscreen; t.vsync = d.vsync; }
     else if (!strcmp(group, "keyboard")) memcpy(t.kb, d.kb, sizeof t.kb);
-    else if (!strcmp(group, "controller")) memcpy(t.pad, d.pad, sizeof t.pad);
+    else if (!strcmp(group, "controller")) { memcpy(t.pad, d.pad, sizeof t.pad); t.vibration = d.vibration; t.lightbar = d.lightbar; }
     else return;
     if (!memcmp(&t, &eff, sizeof t)) return;
     eff = t;
     if (!strcmp(group, "display")) { file.scale = d.scale; file.fps = d.fps; file.fullscreen = d.fullscreen; file.vsync = d.vsync; }
     else if (!strcmp(group, "keyboard")) memcpy(file.kb, d.kb, sizeof file.kb);
-    else memcpy(file.pad, d.pad, sizeof file.pad);
+    else { memcpy(file.pad, d.pad, sizeof file.pad); file.vibration = d.vibration; file.lightbar = d.lightbar; }
     L("settings: %s back to the defaults (%s)\n", group, why);
     atomic_fetch_add(&gen, 1);
     settings_save();
 }
 
 /* ------------------------------------------------------------------ recordings */
-static const char *const rec_keys[] = { "renderer", "renderer_next", "resolution", "fps", "fullscreen", "vsync", "window_scale" };
+static const char *const rec_keys[] = { "renderer", "renderer_next", "resolution", "fps", "fullscreen", "vsync", "window_scale",
+                                        "vibration", "lightbar" };   /* (the last two: shown on the controller page) */
 void settings_write_header(FILE *f) {
     char v[64];
     for (size_t i = 0; i < sizeof rec_keys / sizeof rec_keys[0]; i++) { value_of(&eff, rec_keys[i], v, sizeof v); fprintf(f, "# set %s=%s\n", rec_keys[i], v); }
@@ -431,7 +474,7 @@ static void host_change(uint64_t vb, FILE *rec, const char *key, const char *val
     else if (!strcmp(key, "padtype")) {
         if (pad_type_rec == atoi(value)) return;
         apply_to(&eff, key, value, 0); atomic_fetch_add(&gen, 1);
-        L("settings: controller type for the names: %s\n", pad_type_rec == 2 ? "PlayStation" : pad_type_rec == 1 ? "Xbox" : "none");
+        L("settings: controller type for the names: %s\n", pad_type_rec == PADKIND_PS5 ? "DualSense" : pad_type_rec == PADKIND_PS ? "PlayStation" : pad_type_rec == PADKIND_XBOX ? "Xbox" : "none");
     } else {
         settings_set(key, value, "host");
         if (!strncmp(key, "kb.", 3) || !strncmp(key, "pad.", 4)) capture_count++;

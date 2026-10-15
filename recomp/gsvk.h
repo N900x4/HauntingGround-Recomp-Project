@@ -32,9 +32,12 @@ void gsvk_break(void);
 void gsvk_upload(uint32_t word, uint32_t nwords, const uint32_t *src);   /* CPU data into local memory (every copy) */
 void gsvk_download(const uint64_t pages[8], uint32_t *dst);              /* those 8 KB pages to dst (waits) */
 void gsvk_download_copy(int k, const uint64_t pages[8], uint32_t *dst);  /* the same from copy k */
-/* the upscaled display (copies 1..N*N interleaved) into dst, W x H: s->prim 4, fbp/fbw/fpsm and lx0/ly0 = the
-   display buffer and its origin, px1/py1 = W/H, ln = N */
+/* a display picture into dst, W x H, interleaving N x N copies from copy ly1: s->prim 4, fbp/fbw/fpsm and lx0/ly0 =
+   the display buffer and its origin, px1/py1 = W/H, ln = N, ly1 = the first copy */
 int gsvk_compose(const GsVkSprite *s, uint32_t *dst);
+/* where primitives and uploads go: copies [first, first + count) (primitives add first << 20 to their mbase) */
+void gsvk_set_target(uint32_t first, uint32_t count);
+void gsvk_copy_copies(uint32_t dst, uint32_t src, uint32_t count);   /* whole copies, on the GPU, in stream order */
 void gsvk_finish(void);                                                    /* submit and wait */
 void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms);   /* wait: wall ms in submit+wait */
 /* checking: the GPU's memory is set to `now`, then primitives are recorded, then the GPU's memory comes back */

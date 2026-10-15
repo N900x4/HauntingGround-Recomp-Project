@@ -1151,6 +1151,18 @@ static long vkchk_from = -2, vkchk_to; static int vkb_mode;
    every copy, everything the CPU reads comes from copy 0, which stays exact. Hazard analysis is done on copy 0's
    geometry only: the other copies are for the picture. */
 static int vk_scale = 1, vk_ncopy = 1;
+static int vk_interp, vk_replay;   /* HG_GSVK_INTERP (see vi_vblank); replaying a frame into the in-between set */
+/* op 0: a GPU record (k: its copy; prim, w, key, ident: the primitive it came from), 1: an upload, 2: a batch break */
+typedef struct { uint8_t op, prim, alone, k; int32_t clut; uint32_t word, n; size_t off; uint64_t key, ident; uint32_t fbp; int tme, fst, tw, th; Vtx w[3]; GsVkSprite s; } VkLogEnt;
+static const Draw *vi_cd; static const Vtx *vi_cw; static int vi_cprim; static uint64_t vi_ckey, vi_cident; static int vi_cvalid;   /* the primitive being drawn */
+static void vi_log_rec(const GsVkSprite *rec, const uint32_t *clut, int alone); static void vi_log_break(void);
+typedef struct { VkLogEnt *e; size_t n, cap; uint32_t *cl; size_t ncl, capcl; uint32_t *data; size_t nd, capd; int disp; } VkLog;
+static VkLog vlog[2]; static int vlog_i, vlog_prev_ok, vk_have_snap, vi_show; static uint64_t vk_last_done;
+static uint32_t vk_disp_fbp = ~0u;
+static uint64_t vi_r_sub; static double vi_r_wait;
+static double vi_t_match, vi_t_replay, vi_t_compose, vi_t_log, vi_t_present;
+static uint64_t vi_frames, vi_cut, vi_off_cadence, vi_prims, vi_matched, vi_far, vi_carried, vi_st_frames, vi_st_bad; static int vi_selftest;
+static void vi_log_upload(uint32_t word, uint32_t n, const uint32_t *src);
 static uint64_t vk_hr_changes;   /* GPU work recorded since the upscaled picture was last composed */
 /* Pages drawn by the GPU since the CPU last wrote them (render targets). In copy k a render target's pixel t holds
    the scene at t + offset, so a primitive that textures from one reads, in copy k, at its coordinates minus the
@@ -1183,7 +1195,12 @@ static void gsvk_setup(void) {
              if (vk_live) { L("GSVK: HG_GSVKCHECK given: checking, not live\n"); vk_live = 0; } }
     if (vkchk_from < 0 && !vk_live) return;
     static int32_t tabs[GSVK_TABLES]; gsvk_tables(tabs);
-    if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0], tabs, vk_ncopy)) { vkchk_from = -1; vk_live = 0; return; }
+    vk_interp = vk_live && getenv("HG_GSVK_INTERP") ? atoi(getenv("HG_GSVK_INTERP")) : 0;   /* 1: 60 fps, 2: 120 fps */
+    if (vk_interp < 0 || vk_interp > 2) vk_interp = vk_interp > 2 ? 2 : 0;
+    if (!gsvk_init(&xoff32[0][0], &xoff32z[0][0], tabs, vk_interp ? 3 * vk_ncopy : vk_ncopy)) { vkchk_from = -1; vk_live = vk_interp = 0; return; }
+    gsvk_set_target(0, vk_ncopy);
+    if (vk_interp) L("GSVK: frame interpolation on (%d fps from the game's 30)\n", vk_interp == 2 ? 120 : 60);
+    vi_selftest = vk_interp && getenv("HG_VI_SELFTEST") && atoi(getenv("HG_VI_SELFTEST")) > 0;
     if (vk_ncopy > 1) L("GSVK: upscaling x%d: %d copies of local memory\n", vk_scale, vk_ncopy);
     if (vk_live) { memcpy(pg_cpu, all_pages, sizeof pg_cpu); vkb_mode = 1; L("GSVK: live, the GPU draws everything\n"); }
 }
@@ -1201,7 +1218,7 @@ static uint64_t gsvk_diff(const uint32_t *gpu) { uint64_t bad = 0; for (uint32_t
 static void gsvk_batch_close(void) {
     if (!vkb_open) return;
     vkb_open = 0; vkb_nbatch++; if (vkb_curn > vkb_maxn) vkb_maxn = vkb_curn;
-    if (vk_live) { gsvk_break(); return; }
+    if (vk_live) { gsvk_break(); if (vk_interp) vi_log_break(); return; }
     double ms; const uint32_t *gpu = gsvk_check_end(&ms);
     if (!gpu) return;
     vkb_ms += ms;
@@ -1217,7 +1234,9 @@ static void gsvk_live_upload(void) {
     for (uint32_t p = 0; p < 512; ) {
         if (!(pg_cpu[p >> 6] >> (p & 63) & 1)) { p++; continue; }
         uint32_t q = p; while (q < 512 && (pg_cpu[q >> 6] >> (q & 63) & 1)) q++;
-        gsvk_upload(p * 2048, (q - p) * 2048, vm + p * 2048); vk_ul_pages += q - p; vk_hr_changes++; p = q;
+        gsvk_upload(p * 2048, (q - p) * 2048, vm + p * 2048); vk_ul_pages += q - p; vk_hr_changes++;
+        if (vk_interp) vi_log_upload(p * 2048, (q - p) * 2048, vm + p * 2048);
+        p = q;
     }
     memset(pg_cpu, 0, sizeof pg_cpu);
 }
@@ -1260,6 +1279,16 @@ static int gsvk_take(const Draw *d, const GsVkSprite *s, int x0, int y0, int x1,
         if (d->zte && d->ztst != 0) mark_pages(w, d->zbp, d->fbw, d->zpsm, x0, y0, x1, y1);
     }
     if (!alone && vk_tex) mark_pages(r, d->tex.tbp, d->tex.tbw, d->tex.psm, vk_ua, vk_va, vk_ub, vk_vb);
+    if (vk_replay) {   /* into the in-between set: no uploads, no page or picture book-keeping */
+        if (!alone) {
+            if (vkb_open && (memcmp(key, vkb_key, sizeof key) || pages_meet(r, vkb_w) || pages_meet(w, vkb_r))) gsvk_batch_close();
+            if (!vkb_open) { vkb_open = 1; vkb_curn = 0; memcpy(vkb_key, key, sizeof key); memset(vkb_w, 0, sizeof vkb_w); memset(vkb_r, 0, sizeof vkb_r); }
+            gsvk_prim(s, cl, 0);
+            for (int i = 0; i < 8; i++) { vkb_w[i] |= w[i]; vkb_r[i] |= r[i]; }
+        } else { gsvk_batch_close(); gsvk_prim(s, cl, 1); }
+        return 1;
+    }
+    if (vk_interp && d->fbp == vk_disp_fbp) vlog[vlog_i].disp = 1;   /* a frame is being finished */
     if (vk_live) gsvk_live_upload();
     if (!alone && vkb_mode) {
         if (vkb_open && (memcmp(key, vkb_key, sizeof key) || pages_meet(r, vkb_w) || pages_meet(w, vkb_r))) gsvk_batch_close();
@@ -1268,13 +1297,14 @@ static int gsvk_take(const Draw *d, const GsVkSprite *s, int x0, int y0, int x1,
             vkb_open = 1; vkb_curn = 0; memcpy(vkb_key, key, sizeof key); memset(vkb_w, 0, sizeof vkb_w); memset(vkb_r, 0, sizeof vkb_r);
         }
         gsvk_prim(s, cl, 0);
+        if (vk_interp) vi_log_rec(s, cl, 0);
         for (int i = 0; i < 8; i++) { vkb_w[i] |= w[i]; vkb_r[i] |= r[i]; if (vk_live) { pg_gpu[i] |= w[i]; pg_rt[i] |= w[i]; } }
         vkb_nprim++; vkb_curn++; vk_n[kind]++; vk_hr_changes++;
         return vk_live;
     }
     gsvk_batch_close();
     vk_n[kind]++;
-    if (vk_live) { gsvk_prim(s, cl, 1); for (int i = 0; i < 8; i++) { pg_gpu[i] |= w[i]; pg_rt[i] |= w[i]; } vk_hr_changes++; return 1; }
+    if (vk_live) { gsvk_prim(s, cl, 1); if (vk_interp) vi_log_rec(s, cl, 1); for (int i = 0; i < 8; i++) { pg_gpu[i] |= w[i]; pg_rt[i] |= w[i]; } vk_hr_changes++; return 1; }
     gsvk_check_begin(vm); gsvk_prim(s, cl, 1); vk_alone[kind]++;
     vk_pending = kind; vk_box[0] = x0; vk_box[1] = x1; vk_box[2] = y0; vk_box[3] = y1;
     return 0;
@@ -1283,6 +1313,7 @@ static int gsvk_take(const Draw *d, const GsVkSprite *s, int x0, int y0, int x1,
 static void gsvk_copy_prim(const Draw *d, const GsVkSprite *s, int alone) {
     static const uint32_t noclut[256];
     gsvk_prim(s, d->tme && d->tex.clut ? d->tex.clut : noclut, alone);
+    if (vk_interp && !vk_replay) vi_log_rec(s, d->tme && d->tex.clut ? d->tex.clut : noclut, alone);
     vkb_nprim++;
 }
 static void gsvk_after_cpu(const Draw *d) {
@@ -1311,7 +1342,7 @@ static GsVkSprite gsvk_base(const Draw *d) {   /* the draw state every primitive
 static void gsvk_sprite_prim(const Draw *d, const Vtx *a, const Vtx *b) {
     SprGeo g; sprite_geo(d, a, b, &g);
     if (g.px1 <= g.px0 || g.py1 <= g.py0) { if (!vk_live) draw_sprite(d, a, b); return; }   /* draws nothing */
-    if (!gsvk_fpsm_ok(d)) { vk_cpu[0]++; gsvk_cpu_before(); draw_sprite(d, a, b); gsvk_cpu_after(d, g.px0, g.py0, g.px1 - 1, g.py1 - 1); return; }
+    if (!gsvk_fpsm_ok(d)) { if (vk_replay) return; vk_cpu[0]++; gsvk_cpu_before(); draw_sprite(d, a, b); gsvk_cpu_after(d, g.px0, g.py0, g.px1 - 1, g.py1 - 1); return; }
     int serial = !gsvk_sprite_supported(d, &g);
     vk_serial += serial;
     if (serial) vk_tex = 0;
@@ -1344,7 +1375,7 @@ static void gsvk_line_prim(const Draw *d, const Vtx *a, const Vtx *b, int point)
     const TexState *t = &d->tex;
     int tub = t->tw - 1, tvb = t->th - 1;
     if ((t->minu | t->maxu) > tub) tub = t->minu | t->maxu; if ((t->minv | t->maxv) > tvb) tvb = t->minv | t->maxv;
-    if (!gsvk_fpsm_ok(d)) { vk_cpu[2]++; gsvk_cpu_before(); if (point) draw_point(d, a); else draw_line(d, a, b); gsvk_cpu_after(d, bx0, by0, bx1, by1); return; }
+    if (!gsvk_fpsm_ok(d)) { if (vk_replay) return; vk_cpu[2]++; gsvk_cpu_before(); if (point) draw_point(d, a); else draw_line(d, a, b); gsvk_cpu_after(d, bx0, by0, bx1, by1); return; }
     int cx0 = bx0 < 0 ? 0 : bx0, cy0 = by0 < 0 ? 0 : by0, cx1 = bx1 > 2047 ? 2047 : bx1, cy1 = by1 > 2047 ? 2047 : by1;
     int serial = cx1 >= cx0 && cy1 >= cy0 && gsvk_buffers_meet(d, cx0, cy0, cx1, cy1, d->tme, 0, 0, tub, tvb, 0);
     vk_serial += serial;
@@ -1397,7 +1428,7 @@ static void gsvk_triangle_prim(const Draw *d, const Vtx *v0, const Vtx *v1, cons
                 tua = a; tub = b; tva = c; tvb = e; } } }
     int ft_same = d->tme && t->tbp == d->fbp && t->tbw == d->fbw && t->psm == d->fpsm;   /* same buffer: exact rectangles */
     int ft_meet = ft_same && tua <= maxx && minx <= tub && tva <= maxy && miny <= tvb;
-    if (!gsvk_fpsm_ok(d)) { vk_cpu[1]++; gsvk_cpu_before(); draw_triangle_cpu(d, v0, v1, v2); gsvk_cpu_after(d, minx, miny, maxx, maxy); return; }
+    if (!gsvk_fpsm_ok(d)) { if (vk_replay) return; vk_cpu[1]++; gsvk_cpu_before(); draw_triangle_cpu(d, v0, v1, v2); gsvk_cpu_after(d, minx, miny, maxx, maxy); return; }
     /* Texturing from its own frame buffer at its own pixel: same buffer and 32-bit layout, point sampling, and the
        texture coordinates are the pixel position plus an offset in (0.02, 0.98) texel at every vertex (q the same at
        all three), inside the texture without wrapping. Interpolated, u - x is a convex combination of the vertices'
@@ -1446,6 +1477,352 @@ static void gsvk_triangle_prim(const Draw *d, const Vtx *v0, const Vtx *v1, cons
     gsvk_after_cpu(d);
 }
 #endif
+#ifdef HAVE_VULKAN
+/* ---------------------------------------------------------------- 60 fps: frame interpolation
+   HG_GSVK_INTERP=1 (with HG_GSVK=1). The game updates and draws at 30 fps: a frame is drawn in one VBlank interval,
+   ends by copying the picture into the display buffer, and is shown for two VBlanks. Here every frame's GPU work is
+   logged (each primitive's draw state, vertices and CLUT, and every upload of CPU data), and when a frame completes
+   (something was drawn into the display buffer since the last VBlank, two VBlanks after the previous frame) the
+   frame is replayed into a separate set of copies of local memory (set I, starting from a snapshot S of the memory
+   as the frame began), with each primitive's vertices moved halfway towards where they were in the previous frame.
+   That picture is shown at this VBlank and the real one at the next: the in-between picture, then the frame, one
+   VBlank later than before. The game's own memory (set 0) is not touched: what it reads, and the frames dumped for
+   hashing, stay exact.
+   Primitives are matched between the two frames by their draw state (frame, texture, blending, ...): the k-th
+   primitive with a given state in this frame goes with the k-th in the previous one. A pair that moved more than
+   64 pixels is not interpolated (it is drawn as in this frame), and when matched triangles moved 32 pixels on
+   average the frame counts as a camera cut and the real picture is shown twice. Sets: 0 = the real memory and its
+   upscaling copies, I = copies [C, 2C), S = [2C, 3C), C = copies per set. */
+static void *vi_grow(void *p, size_t *cap, size_t need, size_t el) {
+    if (need <= *cap) return p;
+    size_t c = *cap ? *cap : 1024; while (c < need) c *= 2;
+    p = realloc(p, c * el); if (!p) { L("GSVK: out of memory (interpolation log)\n"); exit(1); }
+    *cap = c; return p;
+}
+static uint64_t vi_key(const Draw *d, int prim) {
+    const TexState *t = &d->tex;
+    const uint32_t f[] = { (uint32_t)prim, d->fbp, d->fbw, d->fpsm, d->fbmsk, d->zbp, d->zpsm, d->zmsk, (uint32_t)d->tme, d->tme ? t->tbp : 0, t->tbw, t->psm,
+        t->tw, t->th, t->tcc, t->tfx, (uint32_t)d->abe, (uint32_t)d->a, (uint32_t)d->b, (uint32_t)d->cc, (uint32_t)d->d, (uint32_t)d->fix, (uint32_t)d->ate,
+        (uint32_t)d->atst, (uint32_t)d->aref, (uint32_t)d->afail, (uint32_t)d->zte, (uint32_t)d->ztst, (uint32_t)d->fst, (uint32_t)d->iip, (uint32_t)d->fge,
+        (uint32_t)d->date, (uint32_t)t->bilinear, (uint32_t)t->wms, (uint32_t)t->wmt };
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < sizeof f / sizeof f[0]; i++) { h ^= f[i]; h *= 1099511628211ull; }
+    return h;
+}
+static uint64_t vi_ident_of(uint64_t key, int prim, int tme, int fst, const Vtx *w);
+static void vi_log_rec(const GsVkSprite *rec, const uint32_t *clut, int alone) {
+    if (!vi_cd) return;
+    VkLog *L = &vlog[vlog_i];
+    L->e = vi_grow(L->e, &L->cap, L->n + 1, sizeof *L->e);
+    VkLogEnt *e = &L->e[L->n++];
+    const Draw *d = vi_cd;
+    if (!vi_cvalid) { vi_ckey = vi_key(d, vi_cprim); vi_cident = vi_ident_of(vi_ckey, vi_cprim, d->tme, d->fst, vi_cw); vi_cvalid = 1; }
+    e->op = 0; e->prim = (uint8_t)vi_cprim; e->alone = (uint8_t)alone; e->k = (uint8_t)(rec->mbase >> 20);
+    memcpy(e->w, vi_cw, sizeof e->w); e->key = vi_ckey; e->ident = vi_cident; e->fbp = d->fbp; e->tme = d->tme; e->fst = d->fst;
+    e->tw = (int)d->tex.tw; e->th = (int)d->tex.th; e->s = *rec; e->clut = -1;
+    if (d->tme && clut) {
+        if (!L->ncl || memcmp(L->cl + (L->ncl - 1) * 256, clut, 1024)) {
+            L->cl = vi_grow(L->cl, &L->capcl, (L->ncl + 1) * 256, 4); memcpy(L->cl + L->ncl * 256, clut, 1024); L->ncl++; }
+        e->clut = (int32_t)L->ncl - 1;
+    }
+}
+static void vi_log_break(void) {
+    VkLog *L = &vlog[vlog_i];
+    L->e = vi_grow(L->e, &L->cap, L->n + 1, sizeof *L->e);
+    L->e[L->n++].op = 2;
+}
+static void vi_log_upload(uint32_t word, uint32_t n, const uint32_t *src) {
+    VkLog *L = &vlog[vlog_i];
+    L->data = vi_grow(L->data, &L->capd, L->nd + n, 4); memcpy(L->data + L->nd, src, (size_t)n * 4);
+    L->e = vi_grow(L->e, &L->cap, L->n + 1, sizeof *L->e);
+    VkLogEnt *e = &L->e[L->n++]; e->op = 1; e->word = word; e->n = n; e->off = L->nd; L->nd += n;
+}
+typedef struct { uint64_t key; int idx; } ViK;
+static int vik_cmp(const void *a, const void *b) {
+    const ViK *x = a, *y = b; return x->key < y->key ? -1 : x->key > y->key ? 1 : x->idx - y->idx;
+}
+static int vi_nvtx(int prim) { return prim == 0 ? 1 : prim <= 2 ? 2 : prim <= 5 ? 3 : 2; }
+/* A primitive's identity across frames: its draw state and its vertices' texture coordinates, which come from the
+   model and do not move with the camera (s/q and t/q to 1/1024 for STQ, the texel position for UV). Untextured
+   primitives use their vertex colours instead. */
+static uint64_t vi_ident_of(uint64_t key, int prim, int tme, int fst, const Vtx *w) {
+    uint64_t h = key;
+    const int nv = vi_nvtx(prim);
+    for (int k = 0; k < nv; k++) {
+        const Vtx *v = &w[k]; int64_t a, b;
+        if (!tme) { a = v->rgba; b = 0; }
+        else if (fst) { a = v->u; b = v->v; }
+        else { const float q = v->q != 0 ? v->q : 1.0f; a = llroundf(v->s / q * 1024.0f); b = llroundf(v->t / q * 1024.0f); }
+        h ^= (uint64_t)a * 0x9E3779B97F4A7C15ull; h = (h << 23) | (h >> 41); h ^= (uint64_t)b * 0xC2B2AE3D27D4EB4Full; h *= 1099511628211ull;
+    }
+    return h;
+}
+static uint64_t vi_ident(const VkLogEnt *e) { return e->ident; }
+static int vi_dist(const VkLogEnt *a, const VkLogEnt *b) {
+    const int nv = vi_nvtx(a->prim); int d = 0;
+    for (int k = 0; k < nv; k++) d += abs(a->w[k].x - b->w[k].x) + abs(a->w[k].y - b->w[k].y);
+    return d;
+}
+/* Motion field, per render target: 16-pixel cells holding the average movement (previous frame minus this one, in
+   1/16 pixel) of the vertices of triangles matched without ambiguity; empty cells take their neighbours' value. */
+enum { VIF_N = 64 };
+typedef struct { uint32_t fbp; int used, gn; float gx, gy; float sx[VIF_N][VIF_N], sy[VIF_N][VIF_N]; int n[VIF_N][VIF_N]; } ViField;
+static ViField vif[8];
+static ViField *vif_get(uint32_t fbp, int make) {
+    for (int i = 0; i < 8; i++) if (vif[i].used && vif[i].fbp == fbp) return &vif[i];
+    if (!make) return 0;
+    for (int i = 0; i < 8; i++) if (!vif[i].used) { memset(&vif[i], 0, sizeof vif[i]); vif[i].used = 1; vif[i].fbp = fbp; return &vif[i]; }
+    return 0;
+}
+static int vif_cell(int v) { v >>= 8; return v < 0 ? 0 : v >= VIF_N ? VIF_N - 1 : v; }   /* 1/16 px -> 16 px cells */
+static void vif_add(ViField *f, int x, int y, int dx, int dy) {
+    const int cx = vif_cell(x), cy = vif_cell(y);
+    f->sx[cy][cx] += dx; f->sy[cy][cx] += dy; f->n[cy][cx]++; f->gx += dx; f->gy += dy; f->gn++;
+}
+static void vif_fill(ViField *f) {
+    for (int y = 0; y < VIF_N; y++) for (int x = 0; x < VIF_N; x++) if (f->n[y][x]) { f->sx[y][x] /= f->n[y][x]; f->sy[y][x] /= f->n[y][x]; f->n[y][x] = 1; }
+    for (int pass = 0; pass < 12; pass++) {   /* grow into empty cells from filled neighbours */
+        static float nx[VIF_N][VIF_N], ny[VIF_N][VIF_N]; static int nn[VIF_N][VIF_N];
+        int changed = 0;
+        for (int y = 0; y < VIF_N; y++) for (int x = 0; x < VIF_N; x++) {
+            nn[y][x] = f->n[y][x]; nx[y][x] = f->sx[y][x]; ny[y][x] = f->sy[y][x];
+            if (f->n[y][x]) continue;
+            float ax = 0, ay = 0; int c = 0;
+            for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+                const int u = x + i, v = y + j; if (u < 0 || v < 0 || u >= VIF_N || v >= VIF_N || !f->n[v][u]) continue;
+                ax += f->sx[v][u]; ay += f->sy[v][u]; c++; }
+            if (c) { nx[y][x] = ax / c; ny[y][x] = ay / c; nn[y][x] = 1; changed = 1; }
+        }
+        memcpy(f->sx, nx, sizeof nx); memcpy(f->sy, ny, sizeof ny); memcpy(f->n, nn, sizeof nn);
+        if (!changed) break;
+    }
+    if (f->gn) { f->gx /= f->gn; f->gy /= f->gn; }
+}
+static void vif_at(const ViField *f, int x, int y, int *dx, int *dy) {
+    const int cx = vif_cell(x), cy = vif_cell(y);
+    if (f && f->n[cy][cx]) { *dx = (int)lroundf(f->sx[cy][cx]); *dy = (int)lroundf(f->sy[cy][cx]); }
+    else if (f && f->gn) { *dx = (int)lroundf(f->gx); *dy = (int)lroundf(f->gy); }
+    else { *dx = *dy = 0; }
+}
+/* match[i] for each entry of C: the entry of P that is the same primitive, or -1. First the identities that occur
+   once in each frame (they feed the motion field), then the ambiguous ones: the candidate whose movement agrees
+   best with the field, if within 8 pixels per vertex. */
+static void vi_match(const VkLog *P, const VkLog *C, int *match) {
+    static ViK *kp, *kc; static size_t capp, capc; static uint8_t *used; static size_t capu;
+    kp = vi_grow(kp, &capp, P->n + 1, sizeof *kp); kc = vi_grow(kc, &capc, C->n + 1, sizeof *kc); used = vi_grow(used, &capu, P->n + 1, 1);
+    size_t np = 0, nc = 0;
+    for (size_t i = 0; i < P->n; i++) if (P->e[i].op == 0 && !P->e[i].k) kp[np++] = (ViK){ vi_ident(&P->e[i]), (int)i };
+    for (size_t i = 0; i < C->n; i++) { match[i] = -1; if (C->e[i].op == 0 && !C->e[i].k) kc[nc++] = (ViK){ vi_ident(&C->e[i]), (int)i }; }
+    qsort(kp, np, sizeof *kp, vik_cmp); qsort(kc, nc, sizeof *kc, vik_cmp); memset(used, 0, P->n);
+    for (int i = 0; i < 8; i++) vif[i].used = 0;
+    /* pass 1: unique in both */
+    for (size_t a = 0, b = 0; a < np && b < nc; ) {
+        if (kp[a].key < kc[b].key) { a++; continue; }
+        if (kp[a].key > kc[b].key) { b++; continue; }
+        size_t a2 = a, b2 = b; while (a2 < np && kp[a2].key == kp[a].key) a2++; while (b2 < nc && kc[b2].key == kc[b].key) b2++;
+        if (a2 - a == 1 && b2 - b == 1) {
+            const VkLogEnt *e = &C->e[kc[b].idx], *f = &P->e[kp[a].idx];
+            const int nv = vi_nvtx(e->prim); int far = f->prim != e->prim;
+            for (int k = 0; k < nv && !far; k++) far = abs(e->w[k].x - f->w[k].x) > 64 * 16 || abs(e->w[k].y - f->w[k].y) > 64 * 16;
+            if (!far) {
+                match[kc[b].idx] = kp[a].idx; used[kp[a].idx] = 1;
+                if (e->prim >= 3 && e->prim <= 5) { ViField *F = vif_get(e->fbp, 1);
+                    if (F) for (int k = 0; k < nv; k++) vif_add(F, e->w[k].x, e->w[k].y, f->w[k].x - e->w[k].x, f->w[k].y - e->w[k].y); }
+            }
+        }
+        a = a2; b = b2;
+    }
+    for (int i = 0; i < 8; i++) if (vif[i].used) vif_fill(&vif[i]);
+    /* pass 2: the ambiguous ones, against the field */
+    for (size_t b = 0; b < nc; b++) {
+        const int ci = kc[b].idx; if (match[ci] >= 0) continue;
+        const VkLogEnt *e = &C->e[ci]; const int nv = vi_nvtx(e->prim);
+        const ViField *F = vif_get(e->fbp, 0);
+        int ex[3], ey[3]; for (int k = 0; k < nv; k++) vif_at(F, e->w[k].x, e->w[k].y, &ex[k], &ey[k]);
+        size_t lo = 0, hi = np; while (lo < hi) { size_t m = (lo + hi) / 2; if (kp[m].key < kc[b].key) lo = m + 1; else hi = m; }
+        int best = -1, bd = 1 << 30;
+        for (size_t j = lo; j < np && kp[j].key == kc[b].key; j++) {
+            const int c = kp[j].idx; if (used[c] || P->e[c].prim != e->prim) continue;
+            int dd = 0; for (int k = 0; k < nv; k++) dd += abs(P->e[c].w[k].x - e->w[k].x - ex[k]) + abs(P->e[c].w[k].y - e->w[k].y - ey[k]);
+            if (dd < bd) { bd = dd; best = c; }
+        }
+        if (best >= 0 && bd <= nv * 8 * 16) { match[ci] = best; used[best] = 1; }
+    }
+}
+static int vi_lerpi(int a, int b, float t) { return a + (int)lroundf((float)(b - a) * t); }
+static Vtx vi_lerp(const Vtx *a, const Vtx *b, float t) {   /* a: the previous frame, b: this one */
+    Vtx r = *b;
+    if (t >= 1.0f) return r;
+    r.x = vi_lerpi(a->x, b->x, t); r.y = vi_lerpi(a->y, b->y, t);
+    r.z = (uint32_t)((double)a->z + ((double)b->z - (double)a->z) * t);
+    uint32_t c = 0;
+    for (int s = 0; s < 32; s += 8) c |= (uint32_t)vi_lerpi((a->rgba >> s) & 255, (b->rgba >> s) & 255, t) << s;
+    r.rgba = c;
+    r.s = a->s + (b->s - a->s) * t; r.t = a->t + (b->t - a->t) * t; r.q = a->q + (b->q - a->q) * t;
+    r.u = vi_lerpi(a->u, b->u, t); r.v = vi_lerpi(a->v, b->v, t); r.f = vi_lerpi(a->f, b->f, t);
+    return r;
+}
+/* Motion of unmatched primitives (pieces the game clipped differently in the two frames): a vertex that sits exactly
+   where a matched primitive of the same draw state has one moves like that one; the others move by the average of
+   those found, or else by the average of the matched primitives with that draw state. */
+typedef struct { uint64_t k; int dx, dy; } ViMv;
+static ViMv *vimv; static size_t vimv_cap, vimv_mask;
+static uint64_t vi_vkey(uint64_t key, int x, int y) { uint64_t h = key ^ ((uint64_t)(uint32_t)x << 32 | (uint32_t)y); h ^= h >> 31; h *= 0x9E3779B97F4A7C15ull; return h | 1; }
+static void vimv_put(uint64_t k, int dx, int dy) {
+    for (size_t i = k & vimv_mask; ; i = (i + 1) & vimv_mask) {
+        if (!vimv[i].k) { vimv[i] = (ViMv){ k, dx, dy }; return; }
+        if (vimv[i].k == k) return;
+    }
+}
+static const ViMv *vimv_get(uint64_t k) {
+    for (size_t i = k & vimv_mask; vimv[i].k; i = (i + 1) & vimv_mask) if (vimv[i].k == k) return &vimv[i];
+    return 0;
+}
+/* frame C replayed into set I from snapshot S, at t between the previous frame P (0) and C (1); 0: a camera cut */
+/* a triangle record's geometry from (moved) vertices, as gsvk_triangle_prim() sets it up; 0: it draws nothing */
+static int vi_tri_geom(GsVkSprite *s, const VkLogEnt *e, const Vtx *w) {
+    const float x0 = w[0].x / 16.0f, y0 = w[0].y / 16.0f, x1 = w[1].x / 16.0f, y1 = w[1].y / 16.0f, x2 = w[2].x / 16.0f, y2 = w[2].y / 16.0f;
+    const float area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    int minx = (int)floorf(fminf(x0, fminf(x1, x2))), maxx = (int)ceilf(fmaxf(x0, fmaxf(x1, x2)));
+    int miny = (int)floorf(fminf(y0, fminf(y1, y2))), maxy = (int)ceilf(fmaxf(y0, fmaxf(y1, y2)));
+    if (minx < s->scx0) minx = s->scx0; if (maxx > s->scx1) maxx = s->scx1;
+    if (miny < s->scy0) miny = s->scy0; if (maxy > s->scy1) maxy = s->scy1;
+    if (area == 0 || minx > maxx || miny > maxy) { s->px1 = s->px0; return 0; }
+    s->px0 = minx; s->px1 = maxx + 1; s->py0 = miny; s->py1 = maxy + 1;
+    s->tx0 = x0; s->ty0 = y0; s->tx1 = x1; s->ty1 = y1; s->tx2 = x2; s->ty2 = y2; s->tinv = 1.0f / area;
+    float *tu[3] = { &s->tu0, &s->tu1, &s->tu2 }, *tv[3] = { &s->tv0, &s->tv1, &s->tv2 }, *tq[3] = { &s->tq0, &s->tq1, &s->tq2 };
+    uint32_t *tc[3] = { &s->tc0, &s->tc1, &s->tc2 }, *tz[3] = { &s->tz0, &s->tz1, &s->tz2 }; int32_t *tf[3] = { &s->tf0, &s->tf1, &s->tf2 };
+    for (int i = 0; i < 3; i++) {
+        if (e->tme) {
+            if (e->fst) { *tu[i] = w[i].u; *tv[i] = w[i].v; *tq[i] = 1; }
+            else { *tu[i] = w[i].s * e->tw * 16.0f; *tv[i] = w[i].t * e->th * 16.0f; *tq[i] = w[i].q != 0 ? w[i].q : 1.0f; }
+        }
+        *tc[i] = w[i].rgba; *tz[i] = w[i].z; *tf[i] = w[i].f;
+    }
+    return 1;
+}
+/* frame C replayed into set I from snapshot S, at t between the previous frame P (0) and C (1); 0: a camera cut.
+   The GPU records C produced are submitted again: triangles with their vertices moved (a matched one towards its
+   place in P, an unmatched one with its neighbours), their sub-pixel copies following; the rest as they were. */
+static int vi_replay(const VkLog *P, const VkLog *C, float t) {
+    static int *match; static size_t capm;
+    match = vi_grow(match, &capm, C->n + 1, sizeof *match);
+    double tm0 = host_now();
+    vi_match(P, C, match);
+    vi_t_match += host_now() - tm0; tm0 = host_now();
+    uint64_t sub0, dis0; double g0, w0; gsvk_stats(&sub0, &dis0, &g0, &w0);
+    double moved = 0; uint64_t ntri = 0;   /* camera cut? */
+    for (size_t i = 0; i < C->n; i++) {
+        const VkLogEnt *e = &C->e[i]; if (e->op || e->k || match[i] < 0 || e->prim < 3 || e->prim > 5) continue;
+        const VkLogEnt *f = &P->e[match[i]];
+        for (int k = 0; k < 3; k++) moved += abs(e->w[k].x - f->w[k].x) + abs(e->w[k].y - f->w[k].y);
+        ntri++;
+    }
+    if (ntri && moved / (ntri * 3) > 32 * 16 * 2) return 0;
+    {   size_t need = 1024; while (need < C->n * 6) need *= 2;
+        if (need > vimv_cap) { free(vimv); vimv = malloc(need * sizeof *vimv); vimv_cap = need; }
+        vimv_mask = vimv_cap - 1; memset(vimv, 0, vimv_cap * sizeof *vimv);
+        for (size_t i = 0; i < C->n; i++) {
+            const VkLogEnt *e = &C->e[i]; if (e->op || e->k || match[i] < 0) continue;
+            const VkLogEnt *f = &P->e[match[i]]; const int nv = vi_nvtx(e->prim);
+            for (int k = 0; k < nv; k++) vimv_put(vi_vkey(e->key, e->w[k].x, e->w[k].y), f->w[k].x - e->w[k].x, f->w[k].y - e->w[k].y);
+        }
+    }
+    static const uint32_t noclut[256];
+    gsvk_batch_close();
+    gsvk_copy_copies(vk_ncopy, 2 * vk_ncopy, vk_ncopy);   /* I = S */
+    gsvk_set_target(vk_ncopy, vk_ncopy);
+    const VkLogEnt *rec0 = 0; GsVkSprite cur0; int mod0 = 0;
+    for (size_t i = 0; i < C->n; i++) {
+        const VkLogEnt *e = &C->e[i];
+        if (e->op == 1) { gsvk_upload(e->word, e->n, C->data + e->off); continue; }
+        if (e->op == 2) { gsvk_break(); continue; }
+        GsVkSprite s = e->s;
+        const int tri = e->prim >= 3 && e->prim <= 5;
+        if (!e->k) {
+            rec0 = e; mod0 = 0; vi_prims++;
+            if (tri) {
+                Vtx w[3]; memcpy(w, e->w, sizeof w); int moved_ = 0;
+                if (match[i] >= 0 && P->e[match[i]].prim == e->prim) {
+                    const VkLogEnt *f = &P->e[match[i]]; int far = 0;
+                    for (int k = 0; k < 3; k++) far |= abs(e->w[k].x - f->w[k].x) > 64 * 16 || abs(e->w[k].y - f->w[k].y) > 64 * 16;
+                    if (!far) { for (int k = 0; k < 3; k++) w[k] = vi_lerp(&f->w[k], &e->w[k], t); vi_matched++; moved_ = 1; } else vi_far++;
+                } else {   /* unmatched: moves with the matched vertices it shares, else with the motion field */
+                    const ViField *F = vif_get(e->fbp, 0);
+                    for (int k = 0; k < 3; k++) {
+                        int mx, my; const ViMv *m = vimv_get(vi_vkey(e->key, e->w[k].x, e->w[k].y));
+                        if (m) { mx = m->dx; my = m->dy; } else vif_at(F, e->w[k].x, e->w[k].y, &mx, &my);
+                        w[k].x += (int)lroundf(mx * (1.0f - t)); w[k].y += (int)lroundf(my * (1.0f - t));
+                    }
+                    vi_carried++; moved_ = 1;
+                }
+                if (moved_) { vi_tri_geom(&s, e, w); mod0 = 1; }
+            }
+            cur0 = s;
+        } else if (tri && rec0 && mod0) {   /* a sub-pixel copy: the moved triangle, with this copy's offset */
+            const float ox = rec0->s.tx0 - e->s.tx0, oy = rec0->s.ty0 - e->s.ty0;
+            s.tx0 = cur0.tx0 - ox; s.tx1 = cur0.tx1 - ox; s.tx2 = cur0.tx2 - ox; s.ty0 = cur0.ty0 - oy; s.ty1 = cur0.ty1 - oy; s.ty2 = cur0.ty2 - oy;
+            s.tu0 = cur0.tu0 + (e->s.tu0 - rec0->s.tu0); s.tu1 = cur0.tu1 + (e->s.tu1 - rec0->s.tu1); s.tu2 = cur0.tu2 + (e->s.tu2 - rec0->s.tu2);
+            s.tv0 = cur0.tv0 + (e->s.tv0 - rec0->s.tv0); s.tv1 = cur0.tv1 + (e->s.tv1 - rec0->s.tv1); s.tv2 = cur0.tv2 + (e->s.tv2 - rec0->s.tv2);
+            s.tq0 = cur0.tq0; s.tq1 = cur0.tq1; s.tq2 = cur0.tq2; s.tc0 = cur0.tc0; s.tc1 = cur0.tc1; s.tc2 = cur0.tc2;
+            s.tz0 = cur0.tz0; s.tz1 = cur0.tz1; s.tz2 = cur0.tz2; s.tf0 = cur0.tf0; s.tf1 = cur0.tf1; s.tf2 = cur0.tf2; s.tinv = cur0.tinv;
+            int nx0 = (int)floorf(fminf(s.tx0, fminf(s.tx1, s.tx2))), nx1 = (int)ceilf(fmaxf(s.tx0, fmaxf(s.tx1, s.tx2)));
+            int ny0 = (int)floorf(fminf(s.ty0, fminf(s.ty1, s.ty2))), ny1 = (int)ceilf(fmaxf(s.ty0, fmaxf(s.ty1, s.ty2)));
+            if (nx0 < s.scx0) nx0 = s.scx0; if (nx1 > s.scx1) nx1 = s.scx1;
+            if (ny0 < s.scy0) ny0 = s.scy0; if (ny1 > s.scy1) ny1 = s.scy1;
+            if (cur0.px1 <= cur0.px0 || nx0 > nx1 || ny0 > ny1) { s.px0 = s.px1 = s.py0 = s.py1 = 0; }
+            else { s.px0 = nx0; s.px1 = nx1 + 1; s.py0 = ny0; s.py1 = ny1 + 1; }
+        }
+        gsvk_prim(&s, e->clut >= 0 ? C->cl + (size_t)e->clut * 256 : noclut, e->alone);
+    }
+    gsvk_break();
+    gsvk_set_target(0, vk_ncopy);
+    vi_t_replay += host_now() - tm0;
+    { uint64_t sub1, dis1; double g1, w1; gsvk_stats(&sub1, &dis1, &g1, &w1); vi_r_sub += sub1 - sub0; vi_r_wait += w1 - w0; }
+    return 1;
+}
+static int display_pic(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph, int base, int N);
+static int display_interp(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph);
+static void vi_reset(VkLog *L) { L->n = 0; L->ncl = 0; L->nd = 0; L->disp = 0; }
+/* at each VBlank, before the picture is taken: a frame completed? then the in-between picture is drawn */
+static uint32_t *vi_pic[3]; static int vi_pw[3], vi_ph[3], vi_want;   /* in-between pictures, if anyone looks */
+static void vi_vblank(uint64_t vb, const uint8_t *priv) {
+    vi_show = 0;
+    if (!vk_interp || !vk_live || !priv) return;
+    VkLog *C = &vlog[vlog_i], *P = &vlog[vlog_i ^ 1];
+    uint64_t pmode, dispfb; memcpy(&pmode, priv, 8); const int c2 = (pmode >> 1) & 1; memcpy(&dispfb, priv + (c2 ? 0x90 : 0x70), 8);
+    vk_disp_fbp = BITS(dispfb, 0, 9) * 32;   /* for the next interval */
+    if (!C->disp) return;   /* no new frame */
+    if (vi_selftest && vb - vk_last_done == 2 && vlog_prev_ok && vk_have_snap) {
+        /* HG_VI_SELFTEST=1: replayed with no movement, the frame must come out as the real one, pixel for pixel */
+        static uint32_t *a, *b; if (!a) { a = malloc((size_t)1024 * 1024 * 4); b = malloc((size_t)1024 * 1024 * 4); }
+        int w1, h1, w2, h2;
+        if (vi_replay(P, C, 1.0f) && display_pic(priv, a, 1024, 1024, &w1, &h1, vk_ncopy, 1) && display_pic(priv, b, 1024, 1024, &w2, &h2, 0, 1) && w1 == w2 && h1 == h2) {
+            uint64_t bad = 0; for (int i = 0; i < w1 * h1; i++) bad += a[i] != b[i];
+            vi_st_frames++; if (bad) { vi_st_bad++; static int nl; if (nl++ < 20) L("GSVK selftest: VB %llu: replay differs from the frame in %llu pixels\n", (unsigned long long)vb, (unsigned long long)bad); }
+        }
+    }
+    if (vb - vk_last_done == 2 && vlog_prev_ok && vk_have_snap) {
+        static const float t1[1] = { 0.5f }, t3[3] = { 0.25f, 0.5f, 0.75f };
+        const int n = vk_interp >= 2 ? 3 : 1; const float *ts = n == 3 ? t3 : t1; int ok = 1;
+        for (int j = 0; j < n && ok; j++) {
+            ok = vi_replay(P, C, ts[j]);
+            if (ok && vi_want) {
+                const size_t cap = (size_t)4096 * 4096; if (!vi_pic[j]) vi_pic[j] = malloc(cap * 4);
+                const double tc = host_now();
+                if (!vi_pic[j] || !display_interp(priv, vi_pic[j], 4096, 4096, &vi_pw[j], &vi_ph[j])) vi_pw[j] = 0;
+                vi_t_compose += host_now() - tc;
+            }
+        }
+        if (ok) { vi_show = n == 3 ? 2 : 1; vi_frames++; } else vi_cut++;
+    }
+    else vi_off_cadence++;
+    gsvk_batch_close();
+    gsvk_copy_copies(2 * vk_ncopy, 0, vk_ncopy); vk_have_snap = 1;   /* S = the memory as the next frame begins */
+    vk_last_done = vb; vlog_prev_ok = 1;
+    vlog_i ^= 1; vi_reset(&vlog[vlog_i]);
+}
+#endif
 static void draw_triangle_cpu(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2) {
 #if defined(__x86_64__)
     if (have_avx2) { draw_triangle_avx2(d, v0, v1, v2); return; }
@@ -1457,12 +1834,14 @@ static void rasterize(const Draw *d, int prim, const Vtx *w) {
     const int chk = gsvk_checking();
     if (vkb_open && !vk_live && !chk) gsvk_batch_close();
     if (chk || vk_live) {
+        if (vk_interp) { if (vk_live) gsvk_live_upload(); vi_cd = d; vi_cw = w; vi_cprim = prim; vi_cvalid = 0; }   /* the records it makes are logged */
         switch (prim) {
         case 0: gsvk_line_prim(d, &w[0], &w[0], 1); break;
         case 1: case 2: gsvk_line_prim(d, &w[0], &w[1], 0); break;
         case 3: case 4: case 5: gsvk_triangle_prim(d, &w[0], &w[1], &w[2]); break;
         case 6: gsvk_sprite_prim(d, &w[0], &w[1]); break;
         }
+        vi_cd = 0;
         return;
     }
 #endif
@@ -1932,23 +2311,85 @@ static int display_from(const uint8_t *priv, uint32_t *out, int maxw, int maxh, 
 static int display_from(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph);
 /* HG_FRAMES_HR=dir with HG_GSVK_SCALE: the upscaled picture, interleaved from the sub-pixel copies */
 /* the upscaled display (as display_from(), from the sub-pixel copies, interleaved on the GPU) */
-static int display_hr(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
-    if (!priv || vk_ncopy < 2) return 0;
+/* a display picture composed on the GPU from N x N copies starting at copy `base` */
+static int display_pic(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph, int base, int N) {
+    if (!priv) return 0;
     uint64_t pmode, dispfb, display;
     memcpy(&pmode, priv + 0x00, 8);
     int c2 = (pmode >> 1) & 1;
     memcpy(&dispfb, priv + (c2 ? 0x90 : 0x70), 8); memcpy(&display, priv + (c2 ? 0xa0 : 0x80), 8);
-    const int N = vk_scale;
     int magh = BITS(display, 23, 4) + 1, dw = BITS(display, 32, 12) + 1, dh = BITS(display, 44, 11) + 1;
     int w = dw / magh, h = dh; if (w > 1024) w = 1024; if (h > 1024) h = 1024;
     if (w <= 1 || h <= 1 || w * N > maxw || h * N > maxh) return 0;
     GsVkSprite s = { 0 };
     s.fbp = BITS(dispfb, 0, 9) * 32; s.fbw = BITS(dispfb, 9, 6); s.fpsm = BITS(dispfb, 15, 5); s.lx0 = BITS(dispfb, 32, 11); s.ly0 = BITS(dispfb, 43, 11);
-    s.px1 = w * N; s.py1 = h * N; s.ln = N;
+    s.px1 = w * N; s.py1 = h * N; s.ln = N; s.ly1 = base;
     gsvk_live_upload();
     if (!gsvk_compose(&s, out)) return 0;
-    vk_hr_changes = 0;
     *pw = w * N; *ph = h * N; return 1;
+}
+static int display_hr(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
+    if (vk_ncopy < 2 || !display_pic(priv, out, maxw, maxh, pw, ph, 1, vk_scale)) return 0;
+    vk_hr_changes = 0; return 1;
+}
+/* the in-between picture (set I) */
+static int display_interp(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
+    return display_pic(priv, out, maxw, maxh, pw, ph, vk_ncopy + (vk_ncopy > 1), vk_scale);
+}
+/* HG_FRAMES_SHOWN=dir:FROM:TO: every VBlank in that range, the picture shown (in-between or real) */
+static void fq_push(const uint32_t *pic, int w, int h);
+static uint64_t fq_tag;
+/* HG_FRAMES_SHOWN=dir:FROM:TO[:PERIOD]: the pictures handed to the window in those VBlanks (4 VBlanks every PERIOD) */
+static char shown_dir[512]; static long shown_from = -1, shown_to, shown_period;
+static int shown_wanted(uint64_t vb) {
+    static int init;
+    if (!init) { init = 1; const char *e = getenv("HG_FRAMES_SHOWN"); long v[3] = { -1, -1, -1 }; int n = 0;
+        if (e) { snprintf(shown_dir, sizeof shown_dir, "%s", e); char *c;
+                 while (n < 3 && (c = strrchr(shown_dir, ':')) && c > shown_dir + 2) { for (int k = 2; k > 0; k--) v[k] = v[k - 1]; v[0] = atol(c + 1); *c = 0; n++; }
+                 if (n == 3) { shown_from = v[0]; shown_to = v[1]; shown_period = v[2]; } else if (n == 2) { shown_from = v[0]; shown_to = v[1]; } } }
+    if (shown_from < 0 || (long)vb < shown_from || (long)vb > shown_to) return 0;
+    return !(shown_period > 0 && (vb - shown_from) % shown_period >= 4);
+}
+static void dump_pic(uint64_t vb, int sub, const uint32_t *buf, int w, int h, int interp) {
+    char path[1024]; snprintf(path, sizeof path, "%s/shown_%06llu_%d%s.ppm", shown_dir, (unsigned long long)vb, sub, interp ? "_i" : "");
+    FILE *f = fopen(path, "wb"); if (!f) return;
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
+    uint8_t *row = malloc((size_t)w * 3);
+    for (int y = 0; y < h; y++) { for (int x = 0; x < w; x++) { uint32_t c = buf[(size_t)y * w + x]; row[x * 3] = c; row[x * 3 + 1] = c >> 8; row[x * 3 + 2] = c >> 16; } fwrite(row, 1, (size_t)w * 3, f); }
+    free(row); fclose(f);
+}
+static void emit_pic(uint64_t vb, int sub, const uint32_t *pic, int w, int h, int interp, int window, int dump) {
+    fq_tag = vb << 2 | (uint64_t)sub << 1 | (uint64_t)interp;
+    if (window) fq_push(pic, w, h);
+    if (dump) dump_pic(vb, sub, pic, w, h, interp);
+}
+/* the real picture of this VBlank (upscaled or native); unchanged since the last one: kept */
+static int real_pic(const uint8_t *priv, uint32_t **out, int *pw, int *ph) {
+    static uint32_t *buf; static int w, h, have; static uint8_t last[0xB0];
+    if (!buf) buf = malloc((size_t)4096 * 4096 * 4);
+    *out = buf;
+    if (vk_ncopy > 1) {
+        if (have && !vk_hr_changes && !memcmp(last, priv, 0xB0)) { *pw = w; *ph = h; return 1; }
+        memcpy(last, priv, 0xB0);
+        if (display_hr(priv, buf, 4096, 4096, &w, &h)) { have = 1; *pw = w; *ph = h; return 1; }
+    }
+    gsvk_live_need(all_pages); have = 0;
+    if (!display_from(priv, buf, 1024, 1024, &w, &h)) return 0;
+    *pw = w; *ph = h; return 1;
+}
+static int vi_pending;   /* 120 fps: the 3/4 picture waits for the next VBlank */
+static void vi_present(uint64_t vb, const uint8_t *priv, int window) {
+    const int dump = shown_wanted(vb), k = vk_interp >= 2 ? 2 : 1;
+    if (!window && !dump) { vi_pending = 0; return; }
+    uint32_t *rp; int rw, rh;
+    if (vi_show == 1 && vi_pw[0]) emit_pic(vb, 0, vi_pic[0], vi_pw[0], vi_ph[0], 1, window, dump);
+    else if (vi_show == 2 && vi_pw[0] && vi_pw[1]) { emit_pic(vb, 0, vi_pic[0], vi_pw[0], vi_ph[0], 1, window, dump); emit_pic(vb, 1, vi_pic[1], vi_pw[1], vi_ph[1], 1, window, dump); vi_pending = 1; }
+    else if (vi_pending && vi_pw[2]) {
+        emit_pic(vb, 0, vi_pic[2], vi_pw[2], vi_ph[2], 1, window, dump);
+        if (real_pic(priv, &rp, &rw, &rh)) emit_pic(vb, 1, rp, rw, rh, 0, window, dump);
+        vi_pending = 0;
+    } else if (real_pic(priv, &rp, &rw, &rh)) for (int j = 0; j < k; j++) emit_pic(vb, j, rp, rw, rh, 0, window, dump);
+    if (vi_show != 2) vi_pending = 0;
 }
 static void dump_frame_hr(uint64_t vb, const uint8_t *priv) {
     const char *dir = getenv("HG_FRAMES_HR"); if (!dir || vk_ncopy < 2) return;
@@ -1999,7 +2440,21 @@ static pthread_mutex_t gs_mx = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t 
 static _Atomic int cons_sleeping, prod_sleeping; static _Atomic uint64_t vb_sent, vb_done;
 static uint8_t priv_snap[4][0xB0];
 static GifPath shadow[4];                                        /* producer-side packet tracking */
-static uint32_t *front; static int front_w, front_h, front_ok;   /* up to 4096 x 4096 (upscaled) */ static pthread_mutex_t front_mx = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t *front; static int front_w, front_h, front_ok;   /* the picture last handed to the window (up to 4096 x 4096) */
+static pthread_mutex_t front_mx = PTHREAD_MUTEX_INITIALIZER;
+/* Pictures go to the window through a short queue, one per VBlank of the GS thread, so that none is skipped or shown
+   twice when the GS thread runs a VBlank or two behind and catches up (it matters with the in-between pictures). */
+enum { FQ = 4 };
+static struct { uint32_t *p; size_t cap; int w, h; uint64_t tag; } fq[FQ]; static int fq_head, fq_n;   /* under front_mx */
+static uint64_t front_tag;   /* fq_tag: next push: VBlank << 2 | sub << 1 | in-between (HG_PRESENTLOG) */
+static void fq_push(const uint32_t *pic, int w, int h) {
+    pthread_mutex_lock(&front_mx);
+    if (fq_n == FQ) { fq_head = (fq_head + 1) % FQ; fq_n--; }   /* the window fell behind: drop the oldest */
+    const int i = (fq_head + fq_n) % FQ; const size_t n = (size_t)w * h;
+    if (fq[i].cap < n) { free(fq[i].p); fq[i].p = malloc(n * 4); fq[i].cap = fq[i].p ? n : 0; }
+    if (fq[i].p) { memcpy(fq[i].p, pic, n * 4); fq[i].w = w; fq[i].h = h; fq[i].tag = fq_tag; fq_n++; }
+    pthread_mutex_unlock(&front_mx);
+}
 static int want_front;
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv);
 static void *gs_main(void *arg) {
@@ -2030,12 +2485,16 @@ static void wake_consumer(void) {
     if (atomic_load(&cons_sleeping)) { pthread_mutex_lock(&gs_mx); pthread_cond_signal(&gs_cv_data); pthread_mutex_unlock(&gs_mx); }
 }
 /* wait until cond() holds, sleeping on the space condition (signalled by the consumer as it makes progress) */
+static double pw_t[3]; static uint64_t pw_n[3];   /* producer waits: ring full, drain, lag (statistics) */
+static int ring_has_space(void); static int ring_empty(void); static int lag_ok(void);
 static void prod_wait(int (*cond)(void)) {
+    const int k = cond == ring_has_space ? 0 : cond == ring_empty ? 1 : 2; const double t0 = host_now(); pw_n[k]++;
     wake_consumer();
     pthread_mutex_lock(&gs_mx); atomic_store(&prod_sleeping, 1);
     while (!cond()) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 1000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
         pthread_cond_timedwait(&gs_cv_space, &gs_mx, &ts); }
     atomic_store(&prod_sleeping, 0); pthread_mutex_unlock(&gs_mx);
+    pw_t[k] += host_now() - t0;
 }
 static int ring_has_space(void) { return atomic_load(&r_head) - atomic_load(&r_tail) < RING - 1; }
 static int ring_empty(void) { return atomic_load(&r_head) == atomic_load(&r_tail); }
@@ -2063,6 +2522,7 @@ void gif_qword(int path, const uint64_t q[2]) {
     if (!mtgs) { gif_qword_exec(path, q); return; }
     shadow_qword(path, q); push((uint64_t)(path & 3), q);
 }
+uint64_t gs_display_tag(void) { return front_tag; }   /* the picture gs_display() last returned */
 int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
     if (!mtgs) {
         gsw_drain();
@@ -2073,6 +2533,12 @@ int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
     }
     want_front = 1;
     pthread_mutex_lock(&front_mx);
+    if (!front) front = malloc((size_t)4096 * 4096 * 4);
+    while (fq_n > 2) { fq_head = (fq_head + 1) % FQ; fq_n--; }   /* keep the delay short: at most two waiting */
+    if (fq_n) {   /* the next picture in order; with none waiting, the last one again */
+        const int i = fq_head; fq_head = (fq_head + 1) % FQ; fq_n--;
+        if (front && (size_t)fq[i].w * fq[i].h <= (size_t)4096 * 4096) { memcpy(front, fq[i].p, (size_t)fq[i].w * fq[i].h * 4); front_w = fq[i].w; front_h = fq[i].h; front_ok = 1; front_tag = fq[i].tag; }
+    }
     int ok = front_ok && front_w <= maxw && front_h <= maxh;
     if (ok) { for (int y = 0; y < front_h; y++) memcpy(out + y * front_w, front + y * front_w, (size_t)front_w * 4); *pw = front_w; *ph = front_h; }
     pthread_mutex_unlock(&front_mx);
@@ -2092,28 +2558,25 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
     static int hr_window = -1; if (hr_window < 0) hr_window = vk_ncopy > 1 && !getenv("HG_FRAMES");
     if (vk_live && !(hr_window && mtgs)) gsvk_live_need(all_pages);
 #endif
+#ifdef HAVE_VULKAN
+    vi_want = (mtgs && want_front) || shown_wanted(vb);
+    vi_vblank(vb, priv);
+    if (vk_live) { const double tp = host_now(); vi_present(vb, priv, mtgs && want_front); vi_t_present += host_now() - tp; }
+#endif
     gs_nodraw = gs_draw_from < 0 || (uint64_t)gs_draw_from > vb;
     cur_vb = vb;
     { static int init; if (!init) { init = 1; const char *p = getenv("HG_PIXWATCH"); if (p) sscanf(p, "%d,%d,%ld", &watch_x, &watch_y, &watch_vb); } }
-    if (mtgs && want_front) {
-        static uint32_t *tmp; if (!tmp) tmp = malloc((size_t)4096 * 4096 * 4);
-        int w, h, ok = 0;
+    if (mtgs && want_front
 #ifdef HAVE_VULKAN
-        if (vk_ncopy > 1) {   /* nothing drawn or uploaded since the last picture, same display registers: keep it */
-            static uint8_t last[0xB0]; static int have;
-            if (have && !vk_hr_changes && !memcmp(last, priv, 0xB0) && front_ok) goto front_done;
-            memcpy(last, priv, 0xB0); have = 1;
-            ok = display_hr(priv, tmp, 4096, 4096, &w, &h);
-            if (!ok) gsvk_live_need(all_pages);   /* the native picture instead */
-        }
+        && !vk_live
 #endif
-        if (!ok) ok = display_from(priv, tmp, 1024, 1024, &w, &h);
+       ) {
+        static uint32_t *tmp; if (!tmp) tmp = malloc((size_t)1024 * 1024 * 4);
+        int w, h;
         if (!front) front = malloc((size_t)4096 * 4096 * 4);
-        pthread_mutex_lock(&front_mx); front_ok = ok; if (ok) { memcpy(front, tmp, (size_t)w * h * 4); front_w = w; front_h = h; } pthread_mutex_unlock(&front_mx);
+        if (display_from(priv, tmp, 1024, 1024, &w, &h)) fq_push(tmp, w, h);
     }
-#ifdef HAVE_VULKAN
-front_done: ;
-#endif
+
     static long every = -1; if (every < 0) every = getenv("HG_FRAME_EVERY") ? atol(getenv("HG_FRAME_EVERY")) : 60;
     if (every > 0 && vb % every == 0) dump_frame(vb, priv);
     static uint64_t last_log; if (vb - last_log >= 600) { last_log = vb; L("GS: VBlank %llu: %llu prims, %llu pixels, %llu GIF tags, %llu image qwords so far\n",
@@ -2151,6 +2614,7 @@ void gs_init(uint8_t *priv) {
 }
 void gs_dump_stats(void) {
     gs_sync();
+    L("GS producer waits: ring full %llu (%.1f s), drain %llu (%.1f s), lag %llu (%.1f s)\n", (unsigned long long)pw_n[0], pw_t[0], (unsigned long long)pw_n[1], pw_t[1], (unsigned long long)pw_n[2], pw_t[2]);
 #ifdef HAVE_VULKAN
     if (vkb_open) gsvk_batch_close();
     if (vk_live) {
@@ -2160,6 +2624,10 @@ void gs_dump_stats(void) {
           (unsigned long long)vk_serial, (unsigned long long)(vk_cpu[0] + vk_cpu[1] + vk_cpu[2]), (unsigned long long)vkb_nbatch, (unsigned long long)dis,
           (unsigned long long)sub, gms, wms, (unsigned long long)vk_downloads, (unsigned long long)vk_dl_pages, (unsigned long long)vk_ul_pages);
     }
+    if (vi_selftest) L("GSVK selftest: %llu frames replayed with no movement, %llu differ from the real frame\n", (unsigned long long)vi_st_frames, (unsigned long long)vi_st_bad);
+    if (vk_interp) L("GSVK interpolation time: match %.1f s, replay %.1f s, compose %.1f s, logging %.1f s, presenting %.1f s; %llu submissions during replays, waiting %.1f s\n", vi_t_match, vi_t_replay, vi_t_compose, vi_t_log, vi_t_present, (unsigned long long)vi_r_sub, vi_r_wait / 1000.0);
+    if (vk_interp) L("GSVK interpolation: %llu in-between pictures, %llu camera cuts, %llu frames off the 30 Hz cadence; %llu primitives replayed, %llu moved halfway, %llu too far, %llu carried along by neighbours\n",
+        (unsigned long long)vi_frames, (unsigned long long)vi_cut, (unsigned long long)vi_off_cadence, (unsigned long long)vi_prims, (unsigned long long)vi_matched, (unsigned long long)vi_far, (unsigned long long)vi_carried);
     if (vkchk_from >= 0) {
         static const char *nm[3] = { "sprites", "triangles", "lines/points" };
         for (int k = 0; k < 3; k++) L("GSVKCHECK: %llu %s on the GPU; of them %llu checked one at a time: %llu identical, %llu differing words; %llu left to the CPU\n",

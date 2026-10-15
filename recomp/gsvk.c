@@ -29,6 +29,7 @@ static int open_, bound; static VkPipeline cur_pipe; static uint32_t nprim, nclu
 static uint32_t bfirst, bn; static int bx0, by0, bx1, by1;   /* the batch being collected */
 static int vfresh = 1;   /* the mirror does not hold the GPU's memory */
 static uint32_t ncopy = 1;   /* copies of local memory in dvram, 4 MB apart */
+static uint32_t mbase_add, up_first, up_count = 1;   /* gsvk_set_target() */
 static uint64_t n_submits, n_dispatch; static double gpu_ms_all, wait_ms_all;
 
 /* mode: 0 host coherent, 1 + cached, 2 device local, 3 device local and host visible (else host coherent) */
@@ -78,7 +79,7 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *ta
     vkGetDeviceQueue(dev, qfam, 0, &queue);
     const VkBufferUsageFlags xfer = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, sto = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     const VkDeviceSize vbytes = ((1u << 20) + 4) * 4;
-    ncopy = ncopies < 1 ? 1 : (uint32_t)ncopies;
+    ncopy = ncopies < 1 ? 1 : (uint32_t)ncopies; up_first = 0; up_count = ncopy;
     outbase = (VkDeviceSize)ncopy * (1u << 22) + 16;
     if (!mkbuf_(&vram, vbytes, xfer, 1)) { vkDestroyBuffer(dev, vram.b, 0); vram.b = 0; L("GSVK: no host-cached memory, mirror uncached\n"); }
     if ((!vram.p && !mkbuf(&vram, vbytes, xfer)) || !mkbuf_(&dvram, (VkDeviceSize)ncopy * (1u << 22) + 16 + (outbytes = ncopy > 1 ? (VkDeviceSize)(ncopy - 1) * 1024 * 1024 * 4 : 0), sto | xfer, 2) ||
@@ -150,9 +151,9 @@ static void close_batch(void) {
     int x0 = bx0 < 0 ? 0 : bx0, y0 = by0 < 0 ? 0 : by0, x1 = bx1 > 2048 ? 2048 : bx1, y1 = by1 > 2048 ? 2048 : by1;
     if (x1 > x0 && y1 > y0) {
         rec_open(); barrier(); use(pipeb);
-        int32_t pc[5] = { (int32_t)bn, x0, y0, (int32_t)bfirst, (int32_t)ncopy };
+        int32_t pc[5] = { (int32_t)bn, x0, y0, (int32_t)bfirst, (int32_t)up_count };   /* a primitive has a copy per copy of the set */
         vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
-        vkCmdDispatch(cmd, (uint32_t)(x1 - x0 + 7) / 8, (uint32_t)(y1 - y0 + 7) / 8, ncopy);   /* z: the copy */
+        vkCmdDispatch(cmd, (uint32_t)(x1 - x0 + 7) / 8, (uint32_t)(y1 - y0 + 7) / 8, up_count);   /* z: the copy */
         n_dispatch++;
     }
     bn = 0;
@@ -181,18 +182,19 @@ void gsvk_upload(uint32_t w, uint32_t n, const uint32_t *src) {
     if (upoff + n * 4 > UP_BYTES) gsvk_finish();
     memcpy((uint8_t *)upb.p + upoff, src, (size_t)n * 4);
     rec_open(); barrier();
-    VkBufferCopy c[65];
-    for (uint32_t k = 0; k < ncopy && k < 65; k++) c[k] = (VkBufferCopy){ upoff, (VkDeviceSize)k * (1u << 22) + (VkDeviceSize)w * 4, (VkDeviceSize)n * 4 };
-    vkCmdCopyBuffer(cmd, upb.b, dvram.b, ncopy < 65 ? ncopy : 65, c);
+    VkBufferCopy c[65]; uint32_t nc = up_count < 65 ? up_count : 65;
+    for (uint32_t k = 0; k < nc; k++) c[k] = (VkBufferCopy){ upoff, (VkDeviceSize)(up_first + k) * (1u << 22) + (VkDeviceSize)w * 4, (VkDeviceSize)n * 4 };
+    vkCmdCopyBuffer(cmd, upb.b, dvram.b, nc, c);
     upoff += (n * 4 + 255) & ~255u;
 }
 /* one primitive: alone (lines, serial ones) or added to the batch being collected */
 void gsvk_prim(const GsVkSprite *s, const uint32_t *clut, int alone) {
     if (state <= 0) return;
-    if (s->mbase == 0 && (nprim + ncopy > PRIM_MAX || nclut == CLUT_MAX)) gsvk_finish();   /* a primitive's copies stay together */
+    if (s->mbase == 0 && (nprim + up_count > PRIM_MAX || nclut == CLUT_MAX)) gsvk_finish();   /* a primitive's copies stay together */
     static uint32_t last[256];   /* the ring may be video memory mapped over the bus: never read it back */
     if (!nclut || memcmp(last, clut, 1024)) { memcpy(last, clut, 1024); memcpy((uint32_t *)clutb.p + nclut++ * 256, clut, 1024); }
-    GsVkSprite *d = (GsVkSprite *)primb.p + nprim; *d = *s; d->clutoff = (nclut - 1) * 256;
+    GsVkSprite r = *s; r.clutoff = (nclut - 1) * 256; r.mbase += mbase_add;
+    ((GsVkSprite *)primb.p)[nprim] = r;   /* written once: the ring may be video memory over the bus, never read it */
     if (alone) {
         close_batch(); rec_open(); barrier(); use(pipe1);
         int32_t pc[5] = { (int32_t)nprim, 0, 0, 0, (int32_t)ncopy };
@@ -229,14 +231,27 @@ void gsvk_download_copy(int k, const uint64_t pages[8], uint32_t *dst) {
     for (uint32_t i = 0; i < nc; i++) memcpy((uint8_t *)dst + c[i].srcOffset, (uint8_t *)vram.p + c[i].srcOffset, c[i].size);
     vfresh = 1;   /* the mirror no longer holds the whole of the GPU's memory */
 }
+void gsvk_set_target(uint32_t first, uint32_t count) {
+    if (state <= 0) return;
+    close_batch();   /* a batch draws into one set */
+    if (first + count > ncopy) return;
+    mbase_add = first << 20; up_first = first; up_count = count;
+}
+void gsvk_copy_copies(uint32_t dst, uint32_t src, uint32_t count) {
+    if (state <= 0 || dst + count > ncopy || src + count > ncopy || !count) return;
+    close_batch(); rec_open(); barrier();
+    VkBufferCopy c = { (VkDeviceSize)src << 22, (VkDeviceSize)dst << 22, (VkDeviceSize)count << 22 };
+    vkCmdCopyBuffer(cmd, dvram.b, dvram.b, 1, &c);
+}
 int gsvk_compose(const GsVkSprite *s0, uint32_t *dst) {
     if (state <= 0 || !outbytes) return 0;
     GsVkSprite s = *s0;
     const VkDeviceSize n = (VkDeviceSize)s.px1 * s.py1 * 4;
     if (n > outbytes || s.px1 <= 0 || s.py1 <= 0) return 0;
-    s.prim = 4; s.px0 = s.py0 = 0; s.serial = 0; s.z = (uint32_t)(outbase / 4);
+    s.prim = 4; s.px0 = s.py0 = 0; s.serial = 0; s.z = (uint32_t)(outbase / 4); s.mbase = 0;
+    const uint32_t keep = mbase_add; mbase_add = 0;   /* the compose primitive reads copies by itself */
     static const uint32_t noclut[256];
-    gsvk_prim(&s, noclut, 1);
+    gsvk_prim(&s, noclut, 1); mbase_add = keep;
     rec_open(); barrier();
     VkBufferCopy c = { outbase, 0, n };
     vkCmdCopyBuffer(cmd, dvram.b, hrb.b, 1, &c);

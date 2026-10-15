@@ -1,6 +1,8 @@
-/* Host window and input (SDL2). Called once per VBlank from hle.c: polls keyboard/gamepad into the
-   emulated DualShock 2 (iop_pad_mc.c) and shows the GS display picture. Without SDL (or with HG_WINDOW=0,
-   or no display) everything here is a no-op and the runtime stays headless.
+/* Host window and input (SDL2). A UI thread owns the window: it polls keyboard/gamepad and shows the GS pictures,
+   one every 1/59.94 s (1/119.88 s with HG_GSVK_INTERP=2), from the queue the GS thread fills (gs.c). Once per
+   VBlank hle.c calls host_vblank() on the game thread, which keeps emulated time at real-time pace and hands the
+   latest input to the emulated DualShock 2 (iop_pad_mc.c). Without SDL (or with HG_WINDOW=0, or no display)
+   everything here is a no-op and the runtime stays headless.
 
    Keyboard: arrows = D-pad, X = Cross, C = Circle, Z = Square, S = Triangle, Enter = Start, Right Shift = Select,
              Q/E = L1/R1, 1/3 = L2/R2, I/J/K/L = left stick, F11 = fullscreen, Esc = quit.
@@ -13,6 +15,7 @@
 #include "hle.h"
 
 int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph);
+uint64_t gs_display_tag(void);
 double host_idle;   /* seconds slept to pace the window to real time (HG_SPEEDLOG leaves them out) */
 
 #ifdef HAVE_SDL
@@ -23,6 +26,7 @@ enum { B_SELECT = 0, B_L3, B_R3, B_START, B_UP, B_RIGHT, B_DOWN, B_LEFT, B_L2, B
 static SDL_Window *win; static SDL_Renderer *ren; static SDL_Texture *tex;
 static SDL_GameController *pad;
 static int tex_w, tex_h, active = -1;
+static SDL_atomic_t ui_ready, ui_quit, in_held, in_an;   /* UI thread -> game thread */
 static uint32_t frame[4096 * 4096];   /* up to 4096 x 4096: the upscaled picture (HG_GSVK_SCALE) */
 
 static const struct { SDL_Scancode sc; int bit; } keymap[] = {
@@ -50,9 +54,7 @@ static void open_pad(int idx) {
     pad = SDL_GameControllerOpen(idx);
     if (pad) L("host: gamepad \"%s\" connected\n", SDL_GameControllerName(pad));
 }
-static int host_init(void) {
-    if (!host_window_wanted()) return 0;
-    SDL_SetMainReady();
+static int host_init(void) {   /* on the UI thread */
     SDL_SetHint("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2");   /* a sharp window on scaled displays, not one Windows stretches */
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) { L("host: SDL_Init failed: %s (running headless)\n", SDL_GetError()); return 0; }
     int scale = getenv("HG_SCALE") ? atoi(getenv("HG_SCALE")) : 2; if (scale < 1) scale = 1;
@@ -86,9 +88,9 @@ static void ov_text(uint32_t *fb, int w, int h, int x, int y, const char *s) {
             if ((g[r / 2] >> (2 - c / 2)) & 1 && x + c < w && y + r < h) fb[(y + r) * w + x + c] = 0x00FFFFFF;
     }
 }
-static int overlay = -1;
-static void ov_draw(uint32_t *fb, int w, int h) {
-    static double t0, idle0, worst, last, last_idle; static uint64_t n; static char line[3][40];
+static int overlay = -1; static char ov_line[3][40];   /* written on the game thread, painted on the UI thread */
+static void ov_stats(void) {
+    static double t0, idle0, worst, last, last_idle; static uint64_t n; char (*line)[40] = ov_line;
     const double now = host_now();
     if (last) { const double work = (now - last) - (host_idle - last_idle); if (work > worst) worst = work; }
     last = now; last_idle = host_idle; n++;
@@ -100,37 +102,19 @@ static void ov_draw(uint32_t *fb, int w, int h) {
         snprintf(line[2], sizeof line[2], "AUDIO %.0f MS", adev ? SDL_GetQueuedAudioSize(adev) / 192.0 : 0.0);
         t0 = now; idle0 = host_idle; n = 0; worst = 0;
     }
-    if (!overlay) return;
-    for (int y = 4; y < 46 && y < h; y++) for (int x = 4; x < 180 && x < w; x++) fb[y * w + x] = (fb[y * w + x] >> 2) & 0x003F3F3F;   /* dim box */
-    for (int i = 0; i < 3; i++) ov_text(fb, w, h, 8, 8 + 12 * i, line[i]);
+}
+static void ov_paint(uint32_t *fb, int w, int h) {
+    if (overlay <= 0) return;
+    const int s = w >= 1280 ? w / 640 : 1;   /* about the same size on upscaled pictures */
+    for (int y = 4 * s; y < 46 * s && y < h; y++) for (int x = 4 * s; x < 180 * s && x < w; x++) fb[y * w + x] = (fb[y * w + x] >> 2) & 0x003F3F3F;   /* dim box */
+    if (s == 1) { for (int i = 0; i < 3; i++) ov_text(fb, w, h, 8, 8 + 12 * i, ov_line[i]); return; }
+    static uint32_t small[46 * 180];   /* drawn at 1x, then scaled */
+    for (int i = 0; i < 46 * 180; i++) small[i] = 0;
+    for (int i = 0; i < 3; i++) ov_text(small, 180, 46, 8, 8 + 12 * i, ov_line[i]);
+    for (int y = 0; y < 46 * s && y < h; y++) for (int x = 0; x < 180 * s && x < w; x++) if (small[(y / s) * 180 + x / s]) fb[y * w + x] = 0x00FFFFFF;
 }
 static uint8_t axis8(Sint16 v) { int a = (v + 32768) >> 8; return a < 0 ? 0 : a > 255 ? 255 : a; }
-void host_vblank(uint64_t vb) {
-    if (active < 0) active = host_init();
-    if (!active) return;
-    {   /* keep emulated time at real-time pace while a window is open (emulated VBlanks are 1/59.94 s) */
-        extern int timing_wall; static Uint64 t0; static uint64_t vb0;
-        if (!timing_wall) {
-            Uint64 now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
-            if (!t0 || vb < vb0) { t0 = now; vb0 = vb; }
-            double due = (double)(vb - vb0) / 59.94, el = (double)(now - t0) / f;
-            if (due > el + 0.002) { const double s0 = host_now(); SDL_Delay((Uint32)((due - el) * 1000)); host_idle += host_now() - s0; }
-            else if (el - due > 0.25) { t0 = now; vb0 = vb; }     /* running slow: do not try to catch up */
-        }
-    }
-    SDL_Event e;
-    while (SDL_PollEvent(&e)) {
-        if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) stop("window closed");
-        if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F3 && !e.key.repeat) overlay = !overlay;
-        if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
-            int fs = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP; SDL_SetWindowFullscreen(win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
-        }
-        if (e.type == SDL_CONTROLLERDEVICEADDED) open_pad(e.cdevice.which);
-        if (e.type == SDL_CONTROLLERDEVICEREMOVED && pad && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad))) {
-            SDL_GameControllerClose(pad); pad = 0; L("host: gamepad disconnected\n");
-        }
-    }
-    /* input */
+static void ui_input(void) {
     uint16_t held = 0; uint8_t an[4] = { 0x80, 0x80, 0x80, 0x80 };   /* rx ry lx ly */
     const Uint8 *ks = SDL_GetKeyboardState(0);
     for (size_t i = 0; i < sizeof keymap / sizeof keymap[0]; i++) if (ks[keymap[i].sc]) held |= 1u << keymap[i].bit;
@@ -145,8 +129,23 @@ void host_vblank(uint64_t vb) {
         if (abs(lx) > 6000 || abs(ly) > 6000) { an[2] = axis8(lx); an[3] = axis8(ly); }
         if (abs(rx) > 6000 || abs(ry) > 6000) { an[0] = axis8(rx); an[1] = axis8(ry); }
     }
-    pad_set_input(held, an);
-    /* picture */
+    SDL_AtomicSet(&in_held, held); SDL_AtomicSet(&in_an, (int)((uint32_t)an[0] | (uint32_t)an[1] << 8 | (uint32_t)an[2] << 16 | (uint32_t)an[3] << 24));
+}
+static void ui_events(void) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) SDL_AtomicSet(&ui_quit, 1);
+        if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F3 && !e.key.repeat) overlay = !(overlay > 0);
+        if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
+            int fs = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN_DESKTOP; SDL_SetWindowFullscreen(win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+        }
+        if (e.type == SDL_CONTROLLERDEVICEADDED) open_pad(e.cdevice.which);
+        if (e.type == SDL_CONTROLLERDEVICEREMOVED && pad && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad))) {
+            SDL_GameControllerClose(pad); pad = 0; L("host: gamepad disconnected\n");
+        }
+    }
+}
+static void ui_present(void) {
     int w, h;
     if (!gs_display(frame, 4096, 4096, &w, &h)) { SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren); SDL_RenderPresent(ren); return; }
     if (!tex || w != tex_w || h != tex_h) {
@@ -154,11 +153,63 @@ void host_vblank(uint64_t vb) {
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XBGR8888, SDL_TEXTUREACCESS_STREAMING, w, h); tex_w = w; tex_h = h;
         SDL_RenderSetLogicalSize(ren, 640, 448);    /* 4:3 output; the PS2 picture is stretched to the TV like the console did */
     }
-    if (overlay < 0) overlay = getenv("HG_OVERLAY") && atoi(getenv("HG_OVERLAY"));
-    ov_draw(frame, w, h);
+    ov_paint(frame, w, h);
     SDL_UpdateTexture(tex, 0, frame, w * 4);
     SDL_RenderClear(ren); SDL_RenderCopy(ren, tex, 0, 0); SDL_RenderPresent(ren);
-    (void)vb;
+}
+/* HG_PRESENTLOG=S: the time and picture (VBlank, sub-picture, in-between) of 600 presents from S seconds on, to check
+   the pacing (host log) */
+static int ui_main(void *arg) {
+    (void)arg;
+    const int ok = host_init();
+    SDL_AtomicSet(&ui_ready, ok ? 1 : -1);
+    if (!ok) return 0;
+    const char *ip = getenv("HG_GSVK_INTERP");
+    const double rate = 59.94 * (ip && atoi(ip) >= 2 ? 2 : 1), period = 1.0 / rate;
+    const Uint64 f = SDL_GetPerformanceFrequency();
+    double next = (double)SDL_GetPerformanceCounter() / f;
+    static int plog = -1; if (plog < 0) plog = getenv("HG_PRESENTLOG") ? 600 : 0;
+    const double plog_from = getenv("HG_PRESENTLOG") ? atof(getenv("HG_PRESENTLOG")) : 0, t_start = next;
+    L("host: presenting at %.2f Hz\n", rate);
+    for (;;) {
+        ui_events(); ui_input();
+        ui_present();
+        if (plog > 0 && (double)SDL_GetPerformanceCounter() / f - t_start >= plog_from) { plog--; const uint64_t tg = gs_display_tag();
+            L("PRESENT %.3f ms vb %llu.%d%s\n", (double)SDL_GetPerformanceCounter() / f * 1000.0, (unsigned long long)(tg >> 2), (int)(tg >> 1 & 1), tg & 1 ? " i" : ""); }
+        next += period;
+        double now = (double)SDL_GetPerformanceCounter() / f;
+        if (now > next + 0.1) next = now;   /* far behind (a stall): start again from here */
+        if (next - now > 0.002) SDL_Delay((Uint32)((next - now - 0.0015) * 1000));
+        while ((double)SDL_GetPerformanceCounter() / f < next) { }   /* the last moment, precisely */
+    }
+    return 0;
+}
+void host_vblank(uint64_t vb) {
+    if (active < 0) {
+        if (!host_window_wanted()) active = 0;
+        else {   /* the UI thread creates the window; wait for it */
+            SDL_SetMainReady(); SDL_AtomicSet(&in_an, (int)0x80808080u);   /* sticks centred until the first poll */
+            SDL_Thread *t = SDL_CreateThread(ui_main, "hg-ui", 0);
+            if (!t) active = 0;
+            else { SDL_DetachThread(t); while (!SDL_AtomicGet(&ui_ready)) SDL_Delay(1); active = SDL_AtomicGet(&ui_ready) > 0; }
+        }
+    }
+    if (!active) return;
+    {   /* keep emulated time at real-time pace while a window is open (emulated VBlanks are 1/59.94 s) */
+        extern int timing_wall; static Uint64 t0; static uint64_t vb0;
+        if (!timing_wall) {
+            Uint64 now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
+            if (!t0 || vb < vb0) { t0 = now; vb0 = vb; }
+            double due = (double)(vb - vb0) / 59.94, el = (double)(now - t0) / f;
+            if (due > el + 0.002) { const double s0 = host_now(); SDL_Delay((Uint32)((due - el) * 1000)); host_idle += host_now() - s0; }
+            else if (el - due > 0.25) { t0 = now; vb0 = vb; }     /* running slow: do not try to catch up */
+        }
+    }
+    if (SDL_AtomicGet(&ui_quit)) stop("window closed");
+    const uint32_t an = (uint32_t)SDL_AtomicGet(&in_an); const uint8_t a4[4] = { (uint8_t)an, (uint8_t)(an >> 8), (uint8_t)(an >> 16), (uint8_t)(an >> 24) };
+    pad_set_input((uint16_t)SDL_AtomicGet(&in_held), a4);
+    if (overlay < 0) overlay = getenv("HG_OVERLAY") && atoi(getenv("HG_OVERLAY"));
+    ov_stats();
 }
 void host_audio_push(const int16_t *s, int frames) {
     if (!audio_state) {

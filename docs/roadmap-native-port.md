@@ -392,3 +392,6 @@ The user answered the questions in section 4 as follows; these decisions bind th
   is pushed before that); **Reddit posts** to recruit playtesters (drafted for the user, who posts them); scope =
   the current batch + saving verified + a known-issues list. The repository itself still never contains game-derived
   data (generated C, ISO contents); the executable is a release asset only.
+- **Revised (same day): distribution option (a)**: no game code in any download. A simple launcher (ISO pick and
+  check, extraction, recompilation, compilation with a bundled compiler and embedded Python, cached build, progress
+  display) ships in 0.1; players only supply their own ISO. Replaces the ready-made executable decision above.

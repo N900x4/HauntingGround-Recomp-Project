@@ -1,0 +1,4 @@
+# scripts and reference hash lists are compared and run byte for byte: keep LF everywhere
+*.sh text eol=lf
+*.py text eol=lf
+tools/verify/ref/* text eol=lf

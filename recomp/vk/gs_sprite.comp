@@ -265,25 +265,44 @@ void apply_copy(int z) {
     p.px0 = px0; p.px1 = px1; p.py0 = py0; p.py1 = py1; p.x0 = x0; p.y0 = y0; p.u0 = u0; p.v0 = v0;
     if (p.rt != 0) { p.u0 -= float(oxi); p.v0 -= float(oyi); }
 }
+// Does copy z of triangle i cover pixel (x, y)? Decided from its few geometry fields, so the whole primitive (about 120
+// words) is loaded only for the triangles of a tile's list that do (about 7 % of the copies' time). The test is
+// draw_at()'s with a looser bound (no `precise` here), so a pixel it keeps may still be dropped there, never the reverse.
+bool covers(int i, int z, int x, int y) {
+    if (prims[i].prim != 1) return true;
+    int N = prims[i].cn, ci = (z - 1) % N, cj = (z - 1) / N;
+    float ox = float(2 * ci + 1) * 0.5 / float(N) - 0.5, oy = float(2 * cj + 1) * 0.5 / float(N) - 0.5;
+    float tx0 = prims[i].tx0 - ox, tx1 = prims[i].tx1 - ox, tx2 = prims[i].tx2 - ox, ty0 = prims[i].ty0 - oy, ty1 = prims[i].ty1 - oy, ty2 = prims[i].ty2 - oy;
+    float px = float(x), py = float(y), tinv = prims[i].tinv;
+    float w0 = ((tx1 - px) * (ty2 - py) - (tx2 - px) * (ty1 - py)) * tinv;
+    float w1 = ((tx2 - px) * (ty0 - py) - (tx0 - px) * (ty2 - py)) * tinv;
+    return w0 >= -1e-5 && w1 >= -1e-5 && 1.0 - w0 - w1 >= -1e-5;
+}
 #endif
-// Workgroup z: the copy of local memory (upscaling), so each invocation draws one copy's pixel. A batch holds each
-// primitive once; the GPU derives its copies (apply_copy).
+// A batch holds each primitive once; the GPU derives its copies (apply_copy). The exact build: a workgroup is an 8x8
+// tile of local memory. The copies build: an 8x8 tile of the upscaled picture, invocation (X, Y) drawing copy
+// 1 + X%N + (Y%N)*N at pixel (X/N, Y/N), so the invocations of a workgroup draw the copies of one small area: a
+// triangle that covers a pixel covers it in most copies, which keeps them busy together (one tile per copy, as
+// before, left most invocations idle on the small triangles of 3D scenes).
 void main() {
     uint lid = gl_LocalInvocationIndex;
-#ifdef COPIES   // workgroup z + 1: the copy
-    const int zc = int(gl_WorkGroupID.z) + 1, nper = pc.n;
+#ifdef COPIES
+    const int N = int(sqrt(float(pc.ncopy - 1)) + 0.5), nper = pc.n;
+    const int X = int(gl_GlobalInvocationID.x), Y = int(gl_GlobalInvocationID.y), HX = int(gl_WorkGroupID.x) * 8, HY = int(gl_WorkGroupID.y) * 8;
+    const int zc = 1 + X % N + (Y % N) * N, x = pc.bx0 + X / N, y = pc.by0 + Y / N;
+    const int tx0 = pc.bx0 + HX / N, tx1 = pc.bx0 + (HX + 7) / N + 1, ty0 = pc.by0 + HY / N, ty1 = pc.by0 + (HY + 7) / N + 1;   // the tile's pixels
 #else
     const int zc = 0, nper = pc.n;
-#endif
     int x = pc.bx0 + int(gl_GlobalInvocationID.x), y = pc.by0 + int(gl_GlobalInvocationID.y);
-    int tx0 = pc.bx0 + int(gl_WorkGroupID.x) * 8, ty0 = pc.by0 + int(gl_WorkGroupID.y) * 8;
+    int tx0 = pc.bx0 + int(gl_WorkGroupID.x) * 8, ty0 = pc.by0 + int(gl_WorkGroupID.y) * 8, tx1 = tx0 + 8, ty1 = ty0 + 8;
+#endif
     for (int base = 0; base < nper; base += 256) {
         if (lid < 8u) hits[lid] = 0u;
         barrier();
         for (int k = 0; k < 4; k++) {
             int j = int(lid) * 4 + k, i = base + j, q = pc.first + i;
             int mg = zc > 0 ? 2 : 0;   /* a copy moves by less than a pixel */
-            if (i < nper && (zc == 0 || prims[q].gcopy != 0) && prims[q].px0 - mg < tx0 + 8 && prims[q].px1 + mg > tx0 && prims[q].py0 - mg < ty0 + 8 && prims[q].py1 + mg > ty0)
+            if (i < nper && (zc == 0 || prims[q].gcopy != 0) && prims[q].px0 - mg < tx1 && prims[q].px1 + mg > tx0 && prims[q].py0 - mg < ty1 && prims[q].py1 + mg > ty0)
                 atomicOr(hits[j >> 5], 1u << (j & 31));
         }
         barrier();
@@ -291,6 +310,9 @@ void main() {
             uint m = hits[w];
             while (m != 0u) {
                 int i = pc.first + base + w * 32 + findLSB(m); m &= m - 1u;
+#ifdef COPIES
+                if (!covers(i, zc, x, y)) continue;
+#endif
                 p = prims[i];
 #ifdef COPIES
                 apply_copy(zc);

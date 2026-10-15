@@ -878,6 +878,21 @@ static void mark_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int
     for (int py = y0 / ph; py <= y1 / ph; py++) for (int px = x0 / pw; px <= x1 / pw; px++)
         for (uint32_t k = 0; k <= extra; k++) { uint32_t p = (base + (uint32_t)py * stride + (uint32_t)px + k) & 511; pages[p >> 6] |= 1ull << (p & 63); }
 }
+/* the 8 KB pages a rectangle [x0, x1) x [y0, y1) of a buffer covers completely, in a format whose pixels fill their
+   words (an upload there replaces all of each such page) */
+static void full_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int x0, int y0, int x1, int y1) {
+    int pw, ph; uint32_t stride;
+    switch (psm) {
+    case CT32: case Z32: pw = 64; ph = 32; stride = bw; break;
+    case CT16: case CT16S: case Z16: case Z16S: pw = 64; ph = 64; stride = bw; break;
+    case T8: pw = 128; ph = 64; stride = (bw + 1) >> 1; break;
+    case T4: pw = 128; ph = 128; stride = (bw + 1) >> 1; break;
+    default: return;
+    }
+    if ((bp & 31) || x0 < 0 || y0 < 0 || x1 > 2048 || y1 > 2048 || x1 > (int)stride * pw) return;
+    for (int py = (y0 + ph - 1) / ph; (py + 1) * ph <= y1; py++) for (int px = (x0 + pw - 1) / pw; (px + 1) * pw <= x1; px++) {
+        const uint32_t p = ((bp >> 5) + (uint32_t)py * stride + (uint32_t)px) & 511; pages[p >> 6] |= 1ull << (p & 63); }
+}
 static int pages_meet(const uint64_t a[8], const uint64_t b[8]) { for (int i = 0; i < 8; i++) if (a[i] & b[i]) return 1; return 0; }
 /* texel range [*a,*b] after wrap(): exact for the clamp modes; returns 0 (use the whole texture) for repeat modes */
 static int clamp_range(int *a, int *b, int size, int mode, int mn, int mx) {
@@ -1251,12 +1266,16 @@ static void gsvk_live_need(const uint64_t pages[8]) {
     for (int i = 0; i < 8; i++) { pg_gpu[i] &= ~m[i]; vk_dl_pages += (uint64_t)__builtin_popcountll(m[i]); }
 }
 static void gsvk_live_wrote(const uint64_t pages[8]) { if (vk_live) for (int i = 0; i < 8; i++) { pg_cpu[i] |= pages[i]; pg_rt[i] &= ~pages[i]; } }
-/* image data is about to be written into local memory (pages xfer_pg, set when the transfer starts) */
-static uint64_t xfer_pg[8];
+/* image data is about to be written into local memory (pages xfer_pg, set when the transfer starts). Pages it covers
+   completely (xfer_full) need not come back from the GPU first: the game streams textures into pages its effect
+   passes drew in, and each such read-back made the GS thread wait for all the GPU's work. */
+static uint64_t xfer_pg[8], xfer_full[8];
 static void gsvk_xfer_touch(void) {
     if (vkb_open && !vk_live) { gsvk_batch_close(); return; }
     if (!vk_live) return;
-    gsvk_live_need(xfer_pg); gsvk_live_wrote(xfer_pg);
+    uint64_t need[8]; for (int i = 0; i < 8; i++) need[i] = xfer_pg[i] & ~xfer_full[i];
+    gsvk_live_need(need); gsvk_live_wrote(xfer_pg);
+    for (int i = 0; i < 8; i++) pg_gpu[i] &= ~xfer_full[i];   /* (the GPU's version of those is dropped) */
 }
 /* the CPU draws a primitive the GPU cannot (an unknown frame format) */
 static void gsvk_cpu_before(void) { if (vk_live) gsvk_live_need(all_pages); else gsvk_batch_close(); }
@@ -2166,8 +2185,9 @@ static void trxdir_write(uint64_t v) {
             uint64_t pg[8] = {0}; mark_pages(pg, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1); gsw_access(pg, 1);
         }
 #ifdef HAVE_VULKAN
-        memset(xfer_pg, 0, sizeof xfer_pg);
-        if (xfer.active) mark_pages(xfer_pg, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1);
+        memset(xfer_pg, 0, sizeof xfer_pg); memset(xfer_full, 0, sizeof xfer_full);
+        if (xfer.active) { mark_pages(xfer_pg, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1);
+                           full_pages(xfer_full, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w, xfer.sy + xfer.h); }
 #endif
     } else if (xdir == 2) {        /* local -> local */
         gsw_drain();
@@ -2489,6 +2509,9 @@ static void *gs_main(void *arg) {
     for (;;) {
         uint64_t t = atomic_load_explicit(&r_tail, memory_order_relaxed), h = atomic_load_explicit(&r_head, memory_order_acquire);
         if (t == h) {
+#ifdef HAVE_VULKAN
+            if (vk_live) gsvk_submit();   /* nothing more to record for now: the GPU gets what is recorded */
+#endif
             pthread_mutex_lock(&gs_mx); atomic_store(&cons_sleeping, 1);
             while (atomic_load(&r_tail) == atomic_load(&r_head)) pthread_cond_wait(&gs_cv_data, &gs_mx);
             atomic_store(&cons_sleeping, 0); pthread_mutex_unlock(&gs_mx);
@@ -2585,7 +2608,8 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
     gsw_drain();   /* the display and frame dumps read local memory */
 #ifdef HAVE_VULKAN
     /* upscaled window: the picture comes from the copies, composed on the GPU; copy 0 is read only for frame dumps */
-    static int hr_window = -1; if (hr_window < 0) hr_window = vk_ncopy > 1 && !getenv("HG_FRAMES");
+    static int frames_env = -1; if (frames_env < 0) frames_env = getenv("HG_FRAMES") != 0;
+    const int hr_window = vk_ncopy > 1 && !frames_env;   /* (vk_ncopy is known once the GPU is set up, at the first primitive) */
     if (vk_live && !(hr_window && mtgs)) gsvk_live_need(all_pages);
 #endif
 #ifdef HAVE_VULKAN

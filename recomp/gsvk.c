@@ -19,8 +19,11 @@
 
 static VkInstance inst; static VkPhysicalDevice phys; static VkDevice dev; static VkQueue queue; static uint32_t qfam;
 static VkDescriptorSetLayout dsl; static VkPipelineLayout pl; static VkPipeline pipe1, pipeb, pipebc; static VkDescriptorPool dpool; static VkDescriptorSet dset;
-/* command buffers in rotation: one is recorded while earlier ones may still run (gsvk_submit); gsvk_finish waits for all */
-enum { NCMD = 4 };
+/* command buffers in rotation: one is recorded while earlier ones may still run (gsvk_submit); gsvk_finish waits for all.
+   A buffer is submitted every few batches (HG_GSVK_EAGER, default 2) so that the GPU works while the GS thread records
+   the rest; otherwise it would sit idle until the next read-back and the GS thread would then wait for all of it. */
+enum { NCMD = 32 };
+static int eager = -1, nb_open;
 static VkCommandPool cpool; static VkCommandBuffer cmds[NCMD]; static VkFence fences[NCMD]; static int busy[NCMD]; static uint64_t sub_id[NCMD], n_sub_id; static int ci;
 #define cmd (cmds[ci])
 static VkQueryPool qpool; static float tsperiod;
@@ -33,7 +36,11 @@ static int tim_on, cur_ph; static int qcnt[NCMD]; static int8_t qseg[NCMD][QPER]
 typedef struct { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceSize n; } Buf;
 static Buf vram, dvram, xoffb, tabb, primb, clutb, upb, hrb;   /* hrb: the upscaled display read back */
 static VkDeviceSize outbase, outbytes;   /* in dvram, after the copies */
-enum { PRIM_MAX = 32768, CLUT_MAX = 4096, UP_BYTES = 32 << 20 };
+enum { PRIM_MAX = 65536, CLUT_MAX = 8192, UP_BYTES = 64 << 20 };
+/* The primitive, CLUT and upload rings are used in two halves: when the current half is full the work recorded so far
+   is submitted and recording goes on in the other half once the GPU is done with that half's last submission (a full
+   wait, as before, left the GPU idle while the GS thread recorded the next work). */
+static int rh, clut_ok; static uint64_t half_id[2];
 static int state;   /* 0 untried, 1 ready, -1 unavailable */
 /* recording */
 static int open_, bound; static VkPipeline cur_pipe; static uint32_t nprim, nclut, upoff;
@@ -168,7 +175,7 @@ static void rec_open(void) {
     vkCmdResetQueryPool(cmd, qpool, QPER * ci, tim_on ? QPER : 2);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool, QPER * ci);
     qcnt[ci] = 1; qseg[ci][0] = -1; cur_ph = -1;
-    open_ = 1; bound = 0; cur_pipe = VK_NULL_HANDLE;
+    open_ = 1; bound = 0; cur_pipe = VK_NULL_HANDLE; nb_open = 0;
 }
 static void phase(int ph) {   /* HG_GSVK_TIMING: what is recorded next (see above) */
     if (!tim_on) return;
@@ -181,6 +188,7 @@ static void use(VkPipeline p) {
     if (!bound) { vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &dset, 0, 0); bound = 1; }
     if (cur_pipe != p) { vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p); cur_pipe = p; }
 }
+static uint64_t submit(int wait);
 static void close_batch(void) {
     if (!bn) return;
     int x0 = bx0 < 0 ? 0 : bx0, y0 = by0 < 0 ? 0 : by0, x1 = bx1 > 2048 ? 2048 : bx1, y1 = by1 > 2048 ? 2048 : by1;
@@ -196,11 +204,14 @@ static void close_batch(void) {
             phase(PH_COPIES); use(pipebc);
             int32_t pcc[5] = { (int32_t)bn, cx0, cy0, (int32_t)bfirst, (int32_t)up_count };
             vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pcc, pcc);
-            vkCmdDispatch(cmd, (uint32_t)(cx1 - cx0 + 7) / 8, (uint32_t)(cy1 - cy0 + 7) / 8, up_count - 1);   /* z + 1: the copy */
+            uint32_t N = 1; while ((N + 1) * (N + 1) <= up_count - 1) N++;
+            vkCmdDispatch(cmd, ((uint32_t)(cx1 - cx0) * N + 7) / 8, ((uint32_t)(cy1 - cy0) * N + 7) / 8, 1);   /* tiles of the upscaled picture */
             n_dispatch++;
         }
     }
     bn = 0;
+    if (eager < 0) eager = getenv("HG_GSVK_EAGER") ? atoi(getenv("HG_GSVK_EAGER")) : 2;
+    if (open_ && eager > 0 && ++nb_open >= eager) submit(0);
 }
 void gsvk_break(void) { if (state > 0) close_batch(); }
 /* submit what is recorded; with wait, wait for everything submitted, and the rings start over. Returns the
@@ -217,17 +228,23 @@ static uint64_t submit(int wait) {
         if (vkQueueSubmit(queue, 1, &si, fences[ci])) { L("GSVK: submit failed\n"); state = -1; return 0; }
         busy[ci] = 1; sub_id[ci] = id = ++n_sub_id; n_submits++;
     }
-    if (wait) { for (int k = 0; k < NCMD; k++) slot_wait(k); nprim = nclut = 0; upoff = 0; }
+    if (wait) { for (int k = 0; k < NCMD; k++) slot_wait(k); nprim = nclut = 0; upoff = 0; rh = 0; clut_ok = 0; }
     return id;
+}
+static void ring_switch(void) {
+    submit(0); half_id[rh] = n_sub_id; rh ^= 1;
+    gsvk_wait(half_id[rh]);
+    nprim = rh * (PRIM_MAX / 2); nclut = rh * (CLUT_MAX / 2); upoff = rh * (UP_BYTES / 2); clut_ok = 0;
 }
 void gsvk_finish(void) { submit(1); }
 uint64_t gsvk_submit(void) { return submit(0); }
 void gsvk_wait(uint64_t id) { for (int k = 0; k < NCMD; k++) if (busy[k] && sub_id[k] <= id) slot_wait(k); }
+static void ring_switch(void);
 /* local memory words [w, w+n) from src, at this point of the stream */
 void gsvk_upload(uint32_t w, uint32_t n, const uint32_t *src) {
     if (state <= 0 || !n) return;
     close_batch();
-    if (upoff + n * 4 > UP_BYTES) gsvk_finish();
+    if (upoff + n * 4 > (uint32_t)(rh + 1) * (UP_BYTES / 2)) ring_switch();
     memcpy((uint8_t *)upb.p + upoff, src, (size_t)n * 4);
     rec_open(); barrier(); phase(PH_XFER);
     VkBufferCopy c0 = { upoff, (VkDeviceSize)up_first * (1u << 22) + (VkDeviceSize)w * 4, (VkDeviceSize)n * 4 };
@@ -244,9 +261,9 @@ void gsvk_upload(uint32_t w, uint32_t n, const uint32_t *src) {
 /* one primitive: alone (lines, serial ones) or added to the batch being collected */
 void gsvk_prim(const GsVkSprite *s, const uint32_t *clut, int alone) {
     if (state <= 0) return;
-    if (s->mbase == 0 && (nprim + up_count > PRIM_MAX || nclut == CLUT_MAX)) gsvk_finish();   /* a primitive's copies stay together */
+    if (s->mbase == 0 && (nprim + up_count > (uint32_t)(rh + 1) * (PRIM_MAX / 2) || nclut == (uint32_t)(rh + 1) * (CLUT_MAX / 2))) ring_switch();   /* a primitive's copies stay together */
     static uint32_t last[256];   /* the ring may be video memory mapped over the bus: never read it back */
-    if (!nclut || memcmp(last, clut, 1024)) { memcpy(last, clut, 1024); memcpy((uint32_t *)clutb.p + nclut++ * 256, clut, 1024); }
+    if (!clut_ok || memcmp(last, clut, 1024)) { memcpy(last, clut, 1024); memcpy((uint32_t *)clutb.p + nclut++ * 256, clut, 1024); clut_ok = 1; }
     GsVkSprite r = *s; r.clutoff = (nclut - 1) * 256; r.mbase += mbase_add;
     ((GsVkSprite *)primb.p)[nprim] = r;   /* written once: the ring may be video memory over the bus, never read it */
     if (alone) {

@@ -11,7 +11,7 @@ Castle Suite. The GS thread is the limit.
 
 | Area | Status | Doc |
 |---|---|---|
-| Boot, pad, memory-card HLE | Done. LOAD GAME works: a save made on PCSX2 (extracted with `tools/verify/ps2mc.py`) loads into the Castle Suite (`ST_021`) at the saved position. Saving from our build is untested. | `phase1-runtime-notes.md` |
+| Boot, pad, memory-card HLE | Done. LOAD GAME works: a save made on PCSX2 (extracted with `tools/verify/ps2mc.py`) loads into the Castle Suite (`ST_021`) at the saved position. Saving from our build verified (`tools/verify/savetest.sh`: new slot, empty card, overwrite; reloads identical). | `phase1-runtime-notes.md` |
 | VU1, VIF1, GIF, software GS | Done; checked against PCSX2: stage 1 has 99.7% of pixels within 8 levels, the Castle Suite matches | `renderer-performance.md`, below |
 | IOP and sound | The game's own IOP modules run on an emulated IOP plus SPU2. SFX, ADX streams and BGM .SQ are verified. | `phase2-audio-notes.md` |
 | Movies | The IPU is emulated, and the game's own Sofdec player runs. Movie audio is bit-exact. | `movies-ipu.md` |
@@ -21,6 +21,20 @@ Castle Suite. The GS thread is the limit.
 | Controllers | DualSense / DualShock 4 / Xbox through SDL (USB and Bluetooth); the game's vibration on the motors (strength setting); static light bar; touchpad = Select; first to press is player 1. Hardware checklist pending with the user | `controller.md` |
 
 Last commit before this doc: `bf60152`.
+
+### 2026-10-15 (night): release 0.1, saving verified
+
+- `tools/verify/savetest.sh` (headless, about 90 s): LOAD GAME of the user's save 02 from a copy of the card, Circle at
+  the Castle Suite clock (the save point), "Save current game?" YES, slot 03; the same onto a card whose save directory is
+  deleted while Fiona stands in the room (the game asks "Create new data file?" and writes the directory, `icon.sys`,
+  `icon00.ico` and the save file); an overwrite of slot 03 ("Game data already present", YES); then LOAD GAME from each
+  card and from the user's own card. Result: every in-room frame after loading each new save identical to loading save
+  02, same stage and position as at the save, `icon.sys`/`icon00.ico` byte-identical to the ones PCSX2 wrote, card
+  files deterministic (`ref/save.md5`). The saved slot differs from save 02 in 9 bytes (checksum, play time, a timer).
+- `HG_CLOCK=SECONDS` (`iop_pad_mc.c`, tests): the game's clock is that fixed start plus emulated time without recording,
+  so saves and their dates repeat. Unset, nothing changes.
+- The New Game route to the first clock is not scripted (it needs the opening rooms' story steps); the save path the
+  test exercises is the same game code.
 
 ### 2026-10-15 (late): roadmap phase 4, native DualSense (`docs/controller.md`)
 

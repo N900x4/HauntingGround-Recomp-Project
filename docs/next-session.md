@@ -30,7 +30,7 @@ identical frames). A full decompilation was judged a multi-year job; readable C 
 
 | Area | State |
 |---|---|
-| Recompiled game | Boots, menus, movies (emulated IPU), stage 1, Castle Suite, many rooms; LOAD GAME works; saving untested. 20,600-VBlank recorded session replays deterministically. |
+| Recompiled game | Boots, menus, movies (emulated IPU), stage 1, Castle Suite, many rooms; LOAD GAME works; **saving verified** (`tools/verify/savetest.sh`, 2026-10-15). 20,600-VBlank recorded session replays deterministically. |
 | Sound | Game's own IOP modules on an emulated IOP + SPU2; beeps fixed (audio queue cushion). |
 | CPU side (Phase 4, roadmap phase 2) | VIF unpack fast path done (-12 % EE thread). **VU1 compiled as whole programs with the timing proven at build time** (`recomp/vu1timing.py`, `vu1gen.py` v2, 2026-10-15): VU1 7.3 -> 2.8 ms per VBlank in stage 1, 6.9 -> 2.7 in the Castle Suite; EE thread 9.8 -> 5.3 and 9.0 -> 4.8 ms (`HG_GSDRAW=0`). **VU1 thread: deferred** (EE thread at about a third of its budget; design in `docs/renderer-performance.md`). |
 | Software GS | Exact reference renderer, 4 worker threads, full speed at native resolution. |

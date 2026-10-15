@@ -7,6 +7,7 @@ the oracle. They are md5 sums of our own frame dumps (PPM files written by `HG_F
 |---|---|---|---|
 | `ref/hashA.md5` | New Game on an empty card to VB 4000, a frame every 5 VBlanks (702 frames), software GS | `da1c36f` (Windows port, 2026-10-13), confirmed by every later speed-up | `runhash.sh ./hgboot.exe OUT.md5 4000` |
 | `ref/cs.md5` | LOAD GAME from `../memcards` into the Castle Suite to VB 4200 (742 frames), software GS (`cs0.md5` in scratch; `cs4.md5`, the GS workers, identical) | `0d641d9` (GS workers, 2026-10-13) | `HG_ROUTE=cs runhash.sh ./hgboot.exe OUT.md5 4200` |
+| `ref/save.md5` | The card files `savetest.sh` writes (save into a new slot, onto an emptied card, overwrite), with the game's clock fixed (`HG_CLOCK`) | 2026-10-15 (release 0.1) | `savetest.sh TAG` |
 | `ref/soak.md5` | The user's session `recordings/20261014-200745` replayed to VB 20600, a frame every 20 VBlanks (1,005 frames), software GS; GPU x4 identical | `14bd3e3` (2026-10-15) | `soak.sh TAG [env]` |
 
 The New Game route uses `HG_MOVIES=skip` and a fixed `HG_PAD` timeline; LOAD GAME needs the user's card in
@@ -25,6 +26,7 @@ All take outputs into `$HG_SCRATCH` (default `D:/ps2-work/scratch`) and run from
 | G7 | `wintest.sh TAG [env]` (window, muted, Castle Suite), then `pacing.py $HG_SCRATCH/win_TAG.log` | speed 1.00x, median 16.68 ms (8.34 at 120 fps), no repeats, none out of order |
 | G10 | `picgate.sh TAG [env]` (pictures shown, stage 1 and the Castle Suite), then `piccmp.py REF_DIR NEW_DIR` | copy-0 pictures identical; upscaled and in-between ones within 1 level in at most 0.01 % of pixels |
 | Options (phase 3) | `optionstest.sh TAG [env]`: the Options menu's extra rows driven by a script (every row changed, both mapping pages, Reset Defaults, live resolution and frame-rate switches); add `HG_PADREC=DIR` to record it, `HG_PADPLAY=DIR` to replay | two runs identical (frames every 5 VBlanks); the recording's replay identical too |
+| Saving (0.1) | `savetest.sh TAG`: LOAD GAME (the user's save 02), Circle at the Castle Suite clock, save into slot 03; the same onto a card whose save directory is deleted in the meantime (Create new data file); overwrite slot 03; then LOAD GAME from each card and from the user's own card | every in-room frame after loading identical to loading save 02, positions equal, `icon.sys`/`icon00.ico` identical to the user's card, card files identical to `ref/save.md5`; prints PASS |
 | Rumble (phase 4) | `rumbletest.sh TAG [env...]`: the game's Vibration test from the Options menu (Off, On) and the controller page's Vibration and Light bar entries, headless, with `HG_RUMBLELOG=1`; `HG_PADREC=DIR` / `HG_PADPLAY=DIR` record and replay it. Also: `soak.sh TAG HG_RUMBLELOG=1` (the session vibrates: 7 `rumble:` lines) | the `rumble: VBlank N small S big B` lines identical in every run and replay |
 
 Timing (G8): `abba.py BIN_A BIN_B [MAXVB [FROM_VB]]` from `recomp/` (EE thread and VU1 ms per VBlank, A-B-B-A with

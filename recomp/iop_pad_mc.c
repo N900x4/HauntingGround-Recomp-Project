@@ -80,8 +80,15 @@ typedef struct { uint64_t vb; uint16_t held; uint8_t an[4]; } RrEv;
 static RrEv *rr_ev; static size_t rr_n, rr_i;
 static uint16_t rr_held; static uint8_t rr_an[4] = { 0x80, 0x80, 0x80, 0x80 };
 extern uint64_t hle_vblank_count(void);
-time_t rr_clock(void) { return rr_mode ? rr_base + (time_t)((double)hle_vblank_count() / 59.94) : time(0); }
-static void rr_touch(const char *path) { if (rr_mode) { struct utimbuf t = { rr_clock(), rr_clock() }; utime(path, &t); } }
+/* HG_CLOCK=SECONDS (tests, e.g. tools/verify/savetest.sh): without recording or replaying, the game's clock is that
+   fixed start time (seconds since 1970, UTC) plus emulated time, as in a recording, so saves and their dates repeat. */
+static int rr_fixed(void) {
+    static int f = -1;
+    if (f < 0) { const char *e = getenv("HG_CLOCK"); f = e && *e ? 1 : 0; if (f && !rr_mode) rr_base = (time_t)strtoll(e, 0, 10); }
+    return f;
+}
+time_t rr_clock(void) { return rr_mode || rr_fixed() ? rr_base + (time_t)((double)hle_vblank_count() / 59.94) : time(0); }
+static void rr_touch(const char *path) { if (rr_mode || rr_fixed()) { struct utimbuf t = { rr_clock(), rr_clock() }; utime(path, &t); } }
 static void rr_touch_parent(const char *path) {
     char p[1100]; snprintf(p, sizeof p, "%s", path); char *sl = strrchr(p, '/'); if (sl) { *sl = 0; rr_touch(p); }
 }

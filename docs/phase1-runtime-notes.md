@@ -46,7 +46,7 @@ HG_PAD=600:cross,900:cross,1200:cross,1500:cross,2300:start,2700:cross,2900:cros
 - Init (0xfe) requires MCSERV ≥ 0x20a in recv[1] and MCMAN > 0x20d in recv[2]. Otherwise libmc disables itself, which was the old boot stop #12.
 - GetInfo end callback 0x111450: `*type = end[0]`, `*free = end[1]`, `*format = end[0x24]` (byte offset 0x90). Read end callback 0x111048 copies unaligned head/tail bytes. The HLE writes all data directly and reports zero head/tail.
 - Implemented: GetInfo, Open/Mkdir (mode 0x40), Close, Seek, Read, Write, Flush, ChDir, GetDir (wildcards, `.`/`..` inside directories), SetFileInfo (rename only), Delete, Format/Unformat, GetEntSpace.
-- [UNK] Save writes are untested. The run has not reached a save point.
+- [OBS] Saving works (2026-10-15, `tools/verify/savetest.sh`): at the Castle Suite clock the game saves into a new slot, overwrites a slot, and on an empty card creates the directory, `icon.sys`, `icon00.ico` (both byte-identical to the files PCSX2 wrote) and the 77,168-byte save file. A slot saved right after loading save 02 differs from save 02 in 9 bytes only (offsets 0x0-0x1, 0x894-0x897 play time, 0x100d-0x100f); loading any of these saves gives frames identical to loading save 02. The card file is the game's: a 0x170-byte header (slot table) and 12 slots of 0x1900 bytes from 0x170.
 - The boot memory-card step is 0x2bf2f0 (state machine on the mc object `*(0x44ff00)`): it lists `/BASLUS-21075HG/*` and checksums the save header.
 
 ## Movies (`recomp/overrides.c`)

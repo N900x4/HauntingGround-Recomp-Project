@@ -31,12 +31,18 @@ welcome, especially with a recording (see the README, "Reporting bugs").
   by moving each triangle halfway between two real frames. Fast camera moves, objects appearing or vanishing, and
   repeated textures (floor tiles) can show small glitches in the in-between pictures. After a camera cut the real
   picture is shown twice instead. 60 and 120 fps add about 17 ms of input delay.
-- **Speed limits at high settings** (measured on an RTX 5090): x5 (about 4K) with 60 fps runs at full speed; x6 with 60
-  fps (77 %) and x5 with 120 fps (55 %) do not. 120 fps is offered at native resolution only. Slower GPUs will reach
+- **Speed limits at high settings** (measured on an RTX 5090): x4 with 60 fps has room to spare in every room tested
+  (7-10 ms of GPU work per 16.7 ms); x5 (about 4K) with 60 fps needs up to 14.7 ms in the heaviest rooms, where some
+  in-between pictures are left out (the F3 overlay's SKIP); x6 with 60 fps (77 %) and x5 with 120 fps (55 %) are too
+  slow. 120 fps is offered at native resolution only. Slower GPUs will reach
   full speed at lower factors; pick a lower resolution if the F3 overlay shows less than 100 %.
 - **Upscaling renders more pixels, not new textures.** Textures, effects and 2D art stay at the original resolution.
-- **The picture is paced to 59.94 Hz**, the PS2's rate, not to the display: on a 60 Hz screen one picture is repeated
-  about every 17 seconds; variable refresh rate (G-Sync/FreeSync) is not used.
+- **Pacing.** With V-Sync "On (smooth)" (the default) the game follows the display when its refresh rate is a
+  multiple of 60 Hz (60, 120, 240): every picture stays up for the same number of refreshes, the game runs up to
+  0.5 % faster than a PS2 (0.1 % at 60/120 Hz) and the sound is resampled to match. About 1 picture in 300 is still held
+  one refresh longer (the driver). 144 and 165 Hz displays have no whole multiple: pictures follow the PS2's 59.94 Hz
+  and some stay up one refresh longer than others (choose 120 Hz in Windows for the smoothest picture). "Exact
+  59.94 Hz" is the PS2's rate on the host clock. Variable refresh rate (G-Sync/FreeSync) is not used.
 
 ## Settings and controls
 
@@ -67,5 +73,5 @@ welcome, especially with a recording (see the README, "Reporting bugs").
 ## Not in 0.1
 
 Texture replacement and higher-resolution textures, Hewie's voice replacement, mod loading, effect passes rewritten as
-native 4K shaders, a lock to the display's refresh rate, and the Linux release are planned for later versions
+native 4K shaders, and the Linux release are planned for later versions
 (`docs/roadmap-native-port.md`).

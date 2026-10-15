@@ -127,7 +127,7 @@ sounds and footer:
  [+]  Resolution        x5  3200 x 2240       Native, x2 ... x6, Auto (this display); GPU renderer only
  [~]  Frame rate        60 fps                30 | 60 | 120 (120 only at native resolution); GPU renderer only
  [+]  Display           Window                Window | Full screen
- [~]  V-Sync            Fast (no tearing)     Fast (no tearing) | On | Off (may tear)
+ [~]  V-Sync            On (smooth)           On (smooth) | Exact 59.94 Hz | Off (may tear)
  [pad] Keyboard         Change                -> the keyboard page
  [pad] Controller       PlayStation           -> the controller page (the value: the kind connected)
       (a note when the renderer differs from the running one, or when the software renderer runs)
@@ -251,7 +251,8 @@ HG_GSVK=1`). Then:
 4. Frame rate: 60 fps, Cross: smoother at once. 120 fps is offered only at Native; with it, the F3 overlay should
    still say 100 %. Choosing x5 while at 120 drops to 60.
 5. Display: Full screen / Window; F11 toggles too, and the row follows it.
-6. V-Sync: Fast (no tearing), On, Off: look for tearing or stutter in each.
+6. V-Sync: On (smooth: locked to the display, the default since 2026-10-15 night), Exact 59.94 Hz (the old mailbox
+   pacing), Off: look for tearing or stutter in each.
 7. Keyboard: Cross on a button (e.g. Cross), press a key (e.g. Space): it shows at once and works in the menus. Esc
    cancels a "Press a key". A key already used moves to the button that had the new one. Square, Left (YES), Cross:
    the defaults return.

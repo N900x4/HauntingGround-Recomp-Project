@@ -116,8 +116,10 @@ static int key_parse(const char *s, int *out) {
 void settings_defaults(Settings *s) {
     memset(s, 0, sizeof *s);
     s->renderer = 0;        /* the software GS, as without settings (HG_GSVK=1 or renderer = gpu for the GPU) */
-    s->scale = 1;
-    s->fps = 30;
+    s->scale = 0;           /* auto (from the display, at most x4) and 60 fps: with the GPU renderer the 0.1 defaults (2026-10-16:
+                               x4 + 60 fps leaves a third of the frame's time to spare in the heaviest rooms tested on an
+                               RTX 5090, x5 + 60 does not); the software renderer draws at native 30 fps whatever these say */
+    s->fps = 60;
     s->fullscreen = 0;
     s->vsync = VSYNC_ON;    /* display-locked (host_sdl.c, pacing): every picture held the same number of refreshes */
     s->window_scale = 2;
@@ -381,7 +383,8 @@ int settings_gs_scale(void) {
 int settings_gs_interp(void) { return !eff.renderer ? 0 : eff.fps == 120 ? 2 : eff.fps == 60 ? 1 : 0; }
 int settings_ui_display_rate_x2(void) { return settings_gs_interp() == 2; }
 void settings_ui_auto_scale(int h) {
-    int n = 1; while (n < 6 && 448 * n < h) n++;   /* the smallest factor that fills the display's height (at most 6) */
+    int n = 1; while (n < 4 && 448 * n < h) n++;   /* the smallest factor that fills the display's height, at most 4 (a 4K display: x4,
+                                                       2560 x 1792 stretched to 2880 x 2160; x5 and up by hand) */
     if (atomic_exchange(&auto_scale, n) != n) atomic_fetch_add(&gen, 1);
 }
 uint32_t settings_generation(void) { return atomic_load(&gen); }

@@ -55,6 +55,44 @@ Last commit before this doc: `bf60152`.
   `HG_ADMAWAV`). Listen for: no tone under the guest room's ambience, notes that end, clean Hewie/Fiona samples;
   reverb is still inaudible (EVOL 0, as before).
 
+### 2026-10-16 (night): smooth 60 fps (pacing, GPU cost, the dark lines, camera cuts)
+
+The user's first real playtest (x5 + 60, full screen, 4K **120 Hz**): "60 fps is not smooth", sound beeps (fixed
+separately by the audio work, `a0ece7d`), thin dark vertical lines, texture pop-in. Smooth 60 on any fixed-refresh
+display is a 0.1 requirement (no G-Sync/VRR). Test route from now on: the user's recordings `20261015-184308` (x4)
+and `20261015-181554` (x5) replayed from **scratch copies** (a replay writes `replay_card` into the folder).
+
+- **Pacing** (`c578752`, `docs/frame-timing.md` "Pacing the window"): V-Sync "On (smooth)" is the default: FIFO, a
+  present at every refresh (present wait), lock when refresh / N is within 0.5 % of 59.94 Hz, each picture held exactly
+  N refreshes, the game thread's VBlanks follow the display's ticks, a phase controller keeps the queue short; sound
+  resampled (32-tap sinc, step from the ring's level). GS work on an async compute queue at low global priority.
+  Measured with the driver's scanout times (`VK_EXT_present_timing`, `HG_PRESENTLOG` `SCAN` lines,
+  `tools/verify/cadence.py`): x4 + 60, full screen, 120 Hz: **99.6-99.7 % held exactly 2 refreshes, 0.3-0.4 % 3**,
+  none dropped or out of order. The rest is the driver (also at native, with RTSS/OBS layers off; deeper queues did
+  not help). Next: `HG_PRESENT_TIMED=1` (each picture once at a target time), a scanout-timed run of the old mailbox
+  for the before numbers, windowed, a 20-minute muted soak (the monitor went to sleep at 22:01: no scanout, no valid
+  window tests overnight). Note: RTSS (Afterburner) with its OSD on injects into the process; worth a test without it.
+- **GPU cost** (`c578752`, `docs/gpu-renderer.md` "Speed, stage 2"): copies read fields from the ring (exact SPIR-V
+  unchanged), bins for big batches, partial texture transfers merged on the GPU instead of read back, adaptive "behind"
+  two VBlanks back. 184308 x4 + 60: 6.8-10.3 -> 6.7-9.5 ms per VBlank; 181554 x5 + 60: 10.4-15.6 -> 10.4-14.7;
+  read-backs -55/-64 %.
+- **The thin dark vertical lines** (`53c8d59`): the channel-shuffle passes (16-bit views, 8-pixel strips with gaps)
+  were moved by under a pixel in the copies; 1:1 render-target passes are no longer moved, and sprites at the
+  scissor's edge reach it in every copy. Fountain region: 79 dark columns -> 0; G10 x5 pictures re-frozen
+  (`D:\ps2-work\scratch\pic_ref_x5i`, the old set `pic_ref_x5i_20261015`).
+- **Pop-in**: copy 0 is exact; the upscaled real frames match the native ones (no block differing by more than 16
+  levels in 381 frames of 184308) and the in-between pictures show no flashes in static areas except at camera cuts,
+  where Fiona was drawn halfway between unrelated positions. Cuts are now detected by matched share (`53c8d59`,
+  2 -> 28 in 184308). The game has no mipmapping in our GS (neither renderer), and no other pop-in source was found:
+  ask the user where they saw it (a recording time).
+- **0.1 defaults** (`settings.c`): GPU renderer (the launcher), resolution auto **at most x4**, 60 fps, V-Sync on.
+- Gates (headless, scratch copies of cards and recordings): G1/G1g 702/702 x4, G2 742/742 x4, G3 soak x4 with
+  `HG_VU1CHECK` identical (17.6 M runs, 0 mismatches), G5 0 batches differ, G6 0 differ, G10 native 60 identical, x5
+  changed where the strips were (checked side by side).
+- Scripts in `D:\ps2-work\scratch\smooth`: `rwin.sh` (window replay), `hrun.sh` (headless replay), `gates.sh`,
+  `cadence.py` (now `tools/verify`). Builds from the Bash tool fail ("Cannot create temporary file in C:\WINDOWS"):
+  build through PowerShell + `C:\msys64\usr\bin\bash.exe -lc`.
+
 ### 2026-10-15 (evening, playtest 2): adaptive interpolation, gentler sound underruns
 
 - The user played at x5 + 60 fps, full screen, DualSense (RTX 5090). Their rooms needed 15-19 ms of GPU per VBlank

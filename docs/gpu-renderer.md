@@ -36,7 +36,19 @@ The build finds Vulkan through `pkg-config vulkan` (MSYS2 packages `mingw-w64-uc
 | `HG_GSVK_SCALE=N` | With `HG_GSVK=1`: N = 2..8 times the resolution (see Upscaling; up to x5 at full speed with 60 fps). The SDL path (`HG_PRESENT=sdl`) takes up to 4096 pixels, N <= 6. |
 | `HG_GSVK_INTERP=1` | With `HG_GSVK=1`: 60 fps (see 60 fps). `2`: 120 fps (full speed at native resolution, x5 55 %). |
 | `HG_PRESENT=sdl` | With `HG_GSVK=1`: the old window path (pictures read back and copied into an SDL texture). |
-| `HG_VSYNC=1` / `0` | The swapchain's present mode: default mailbox (no tearing, never blocks); `1` FIFO (stalled 60-200 ms at a time in a window on the 120 Hz screen); `0` immediate (may tear). |
+| `HG_VSYNC=1` / `2` / `0` | `1` (default since 2026-10-15 night, setting `vsync = on`): display-locked, FIFO, a present at every refresh, the game following the display (`docs/frame-timing.md`, "Pacing the window"); `2` (or `mailbox`): the old mailbox at an exact 59.94 Hz of the host clock; `0` immediate (may tear). |
+| `HG_PRESENT_DEPTH=N` | Display-locked: presents in flight ahead of the screen (default 1; 2-3 add a refresh of delay each). |
+| `HG_PRESENT_TIMED=1` | Display-locked: each picture presented once with a target time (`VK_EXT_present_timing`, relative), taken `HG_PRESENT_SLACK` ms (10) before it is due. Opt-in, not measured long enough. |
+| `HG_LOCK=0` | Display-locked mode without the lock: FIFO, pictures on the 59.94 Hz host clock. |
+| `HG_PACEDBG=1` | Log every late present: time in events, the take, each step of the present call, the wait (and the blit's GPU timing, calibrated timestamps). |
+| `HG_PRESENTWAIT=0`, `HG_PRESENTTIMING=0`, `HG_PRESENTREL=0` | Leave out `VK_KHR_present_wait`, `VK_EXT_present_timing`, its relative presents. |
+| `HG_GSVK_QUEUE=graphics` | The GS's work on the graphics queue family too (default: an async compute family when there is one). |
+| `HG_GSVK_UIPRIO=0`, `HG_UIPRIO=0/2` | Do not lower the GS queue's global priority; the UI thread's priority (default high, 2 time-critical, 0 normal). |
+| `HG_GSVK_BINS=0` | No bins for the copies of big batches (see "Speed, stage 2"). |
+| `HG_GSVK_XMASK=0` | Read pages back before a partial image transfer into them, as before (see "Speed, stage 2"). |
+| `HG_GSVK_DPROF=1` | With `HG_GSVK_TIMING=1`: GPU time of every copies dispatch, summed by batch kind and size, at the end. |
+| `HG_VI_BEHIND=N` | Adaptive interpolation: an in-between picture is left out when the GPU has not finished what was submitted N VBlanks ago (default 2; 1 was the rule before). |
+| `HG_VI_CUTLOG=1` | Log, per interpolated frame, the share of triangles matched and their movement (camera-cut checks). |
 | `HG_GSVK_TIMING=1` | GPU time per phase (exact batches, copies, single primitives, compose, transfers; the replays apart), per VBlank every 600 VBlanks and at the end. Serializes the exact and copies dispatches, so the total grows a little. |
 | `HG_GSVK_EAGER=N` | Submit the command buffer every N batches (default 2; 0: only when a result is needed, as before). |
 | `HG_GSVK_LAG=N` | The GS thread waits at each VBlank until the GPU has finished the work of N VBlanks ago (default 2). |
@@ -44,7 +56,7 @@ The build finds Vulkan through `pkg-config vulkan` (MSYS2 packages `mingw-w64-uc
 | `HG_VI_ADAPT=0` / `1` | Adaptive interpolation (in-between pictures left out when the GPU is short of time, see 60 fps): default on with the window, off headless; `0` always off (every frame interpolated, the old behaviour), `1` on headless too. |
 | `HG_VI_BUDGET=MS` | Adaptive interpolation: GPU ms per VBlank, with interpolation, above which the in-between pictures stop (default 14.5; back below MS - 1). |
 | `HG_FRAMES_SHOWN=dir:FROM:TO[:PERIOD]` | Dump the pictures handed to the window in those VBlanks (4 every PERIOD). |
-| `HG_PRESENTLOG=S` | Log the time and picture of 600 presents from S seconds on (pacing checks; `tools/verify/pacing.py`). |
+| `HG_PRESENTLOG=S[:N]` | Log the time and picture of N (600) presents from S seconds on: `PRESENT`, `SHOWN` (present wait), `SCAN` (first pixel out, present timing); `tools/verify/cadence.py`, `pacing.py`. |
 | `HG_FRAMES_HR=dir` | With `HG_GSVK_SCALE`: dump the upscaled picture (`hr_VVVVVV.ppm`, every `HG_FRAME_EVERY` VBlanks). |
 
 Do not combine `HG_HOSTPROF=1` with the GPU modes: a run with both hung during boot (the sampler suspends threads,
@@ -144,6 +156,13 @@ exact (N = 2, 4 or 8). Interleaving the copies gives a picture N times larger in
   for all copies (no gain: the per-tile scan was not the cost), float instead of double Z in the copies (no gain).
 - The copies are for the picture only. Their order analysis uses copy 0's geometry, and they are not
   bit-reproducible between runs: 18 of 4.6M pixels differed by one level at x4.
+- **Render targets copied one texel per pixel are not moved** (2026-10-15 night, `apply_copy` and `gsvk_sprite_prim`):
+  such a pass is a memory operation, not a scene. The game shuffles colour channels through 16-bit views of its
+  32-bit buffers with 8-pixel strips that leave gaps; moved by under a pixel, a strip left a column undrawn at one
+  edge and drew one too many at the other, in the copies of one half: thin dark lines every 16 buffer pixels (20 on the
+  screen), fixed on the screen, visible in the fountain and on walls in the field (the user's report). Unmoved, every
+  copy does the same operation on its own memory. Also: a sprite that reaches the scissor's edge in copy 0 reaches it
+  in every copy (the leftmost column of half the copies stayed black: a dark line at the picture's border).
 
 Speed (Castle Suite, windowed, F3 overlay): x2 (1280x896), x4 (2560x1792) and x5 (3200x2240) 100 %; x6 (3840x2688)
 78 %, limited by the GPU. With 60 fps: x4 and x5 100 %, x6 77 % (phase 1, below). On a 4K screen (F11) the 4:3 picture is shown at 2880x2160, so x5 is slightly more than
@@ -190,6 +209,13 @@ shown for two VBlanks (`docs/frame-timing.md`). With `HG_GSVK_INTERP=1`:
   (`gsvk_poll`, never waits), that frame's picture is left out. Counted in the GSVK line every 600 VBlanks, at
   exit, and as `SKIP n` (pictures left out in the last second) in the F3 overlay. On by default when the window
   shows the pictures; off headless, with `HG_VI_SELFTEST` and with picture dumps, so the gates are unaffected.
+- **Behind, revised (2026-10-15 night).** "Behind" now means the GPU has not finished what was submitted *two* VBlanks
+  ago (`HG_VI_BEHIND`): one VBlank behind is the normal pipeline, and the old rule left out 326 in-between pictures in
+  the user's 200 s at x4 with the GPU at 7-10 of 16.7 ms.
+- **Camera cuts, revised.** Besides a big move, a frame in which fewer than 40 % of the triangles have a partner in the
+  previous one is a cut (the new view's background is all new, and the few that match, Fiona, were drawn halfway
+  between two unrelated screen positions over it: a visible jump in 13 of 4,350 frames of the user's session). In the
+  user's 184308: 2 -> 28 cuts; normal frames match 86 % or more (1st percentile).
 
 Found on the way: `gsvk_prim` read back the primitive ring, which lives in video memory over PCIe (microseconds per
 primitive); without that read, normal GPU rendering went from 9.5 to 8.4 ms per VBlank.
@@ -209,6 +235,8 @@ With the GPU renderer the window's pictures never leave video memory:
   picture into the largest 640:448 rectangle (as `SDL_RenderSetLogicalSize(640, 448)` did), blits the F3 overlay
   (a 176 x 42 image), and presents. A picture image is free again when the UI thread has moved on and its blits are
   done, or when the picture was dropped unseen.
+- (Since 2026-10-15 night the default is FIFO, display-locked, a present at every refresh: `docs/frame-timing.md`,
+  "Pacing the window"; what follows is phase 1's mailbox, now V-Sync "Exact 59.94 Hz".)
 - Present mode mailbox (no tearing, never blocks; the UI thread's 59.94 Hz clock decides when). FIFO blocked the UI
   thread's submissions for 60-200 ms at a time in a window on the 120 Hz screen, even at native resolution.
 - The window is created without an SDL renderer when `HG_GSVK=1`; the UI thread sets up the swapchain once the GPU
@@ -253,6 +281,42 @@ Window, Castle Suite (LOAD GAME), muted, `tools/verify/wintest.sh` + `pacing.py`
 The present times are logged after the present call, so they include its own variance (about +-0.3 ms); with mailbox
 on the 120 Hz screen the picture is shown at the next refresh anyway. x6 + 60 and x5 + 120 are limited by the GPU
 (budget 16.7 ms per VBlank); headless, x5 + 60 runs at 1.07x and x5 at 1.25x.
+
+## Speed, stage 2 (2026-10-15, night: the user's rooms)
+
+Measured headless on the user's recordings (`20261015-184308`: New Game, the field, the guest room; `20261015-181554`:
+the same and the rooms after), `HG_GSVK_TIMING=1`, `HG_GSVK_DPROF=1`. The copies were 85 % of the GPU's time, half the
+real frames' and half the replays'; inside them the sprites (effect passes) about 55 % and the big triangle batches
+about 30 %. Changes (copy 0 untouched: the exact builds of the shader compile to the same SPIR-V, byte for byte):
+
+- **The copies read a primitive's fields from the ring** instead of a private copy of the whole primitive (about 130
+  words) per invocation and primitive: `PF(field)` in `vk/gs_sprite.comp` is `p.field` in the exact builds and
+  `prims[pi].field` in the copies build, apart from the fields a copy changes (`c_` variables, `apply_copy`). Sprites
+  -30 %.
+- **Bins for big batches** (48 primitives or more): for 16 x 16 pixel squares of the batch's area the CPU marks which
+  primitives come near (`brect` in `gsvk.c`, made from the rectangles `gsvk_prim` keeps; the ring is never read back),
+  and a tile of the copies dispatch tests only those. Triangle batches of more than 256: -29 %.
+- **No read-back before partial image transfers** (`xm_flush` in `gs.c`): the game streams textures into pages its
+  effect passes drew in, covering them only in part; each such transfer read the pages back first (a wait for all the
+  GPU's work). Now the CPU records which bits the transfer wrote (`mask_px`, the same addressing as `write_px`) and
+  sends them as (word, value, mask) triples that a single-primitive dispatch (`prim 5`, binding 6) merges into every
+  copy; the pages stay the GPU's. Logged for the replays of interpolation too (op 3). Read-backs per VBlank 2.3 -> 1.0
+  (x4, 184308) and 3.0 -> 1.1 (x5, 181554); what is left are CLUT loads from pages the GPU drew.
+- Tried and dropped: a build of the copies without the triangle code (fewer registers: no gain), one tile per copy for
+  sprite batches (coalesced writes: 25 % slower), the CLUT bits a transfer wrote counted as the CPU's (fewer read-backs
+  but 12 times more merges: slower).
+- In `dprof` experiments a sprite with neither texture nor pixel pipeline still cost 70 % of a full one: what is left
+  is the frame of each dispatch (tile marking, barriers, the copy's geometry), not the GS's per-pixel work.
+
+GPU ms per VBlank, headless, every 600 VBlanks (no `HG_GSVK_TIMING`), before (HEAD `7686b74`) and after:
+
+| Recording, mode | Before | After | Read-backs before / after | GS thread waits (s) before / after |
+|---|---|---|---|---|
+| 184308, x4 + 60 (field, guest room) | 6.8-10.3 | 6.7-9.5 | 27,904 / 12,703 | 40.5 / 24.6 |
+| 181554, x5 + 60 (all rooms) | 10.4-15.6 | 10.4-14.7 | 60,770 / 21,830 | 140.9 / 58.8 |
+
+So x4 + 60 fps has a third of the 16.7 ms to spare in the user's heaviest rooms; x5 + 60 fps does not (14.7 ms in the
+worst stretch, where the adaptive interpolation leaves in-between pictures out).
 
 ## Checking
 
@@ -299,7 +363,7 @@ GPU time per frame from timestamps, batch dispatches only, at native resolution:
 1. **GPU cost** for x6 + 60 and 120 fps with upscaling: the full-screen effect passes are about 60 % of the copies'
    time (each drawn N x N times); the exact copy is 10 % (one dispatch per batch, `precise`, fp64 Z). Serial
    primitives (none in the test ranges, but other rooms may have some) in a wavefront order.
-2. **Display rate**: lock the emulated VBlank to the display's refresh within 0.5 % (the user's choice, roadmap Q14),
-   exact 59.94 as a setting; not done (the UI thread still runs its own 59.94 Hz clock and presents with mailbox).
+2. **Display rate**: done 2026-10-15 night (display-locked, `docs/frame-timing.md`); left: the last 1 in 300 holds of 3
+   refreshes (timed presents, `HG_PRESENT_TIMED`), a 20-minute window soak, 144/165 Hz displays.
 3. **Upscaling**: check the effect passes room by room (any that sample render targets at another scale may need
    their own offset rule); texture replacement.

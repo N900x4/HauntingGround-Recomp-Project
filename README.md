@@ -63,10 +63,12 @@ In the game: **Options**, then press Down past *Screen Position* to reach the ex
 
 - **Renderer**: GPU (Vulkan) or Software. Takes effect at the next start. The launcher picks GPU when your PC has a
   working Vulkan graphics card.
-- **Resolution**: native (640x448), x2 to x6, or auto (fills your screen). x5 is about 4K. Changes at once.
-- **Frame rate**: 30 (the original), 60 or 120 (120 at native resolution only). 60 and 120 add about 17 ms of delay.
-- **Display**: window or full screen; **V-Sync**: Fast (no tearing, the default), On (waits for the display), or Off
-  (may tear).
+- **Resolution**: native (640x448), x2 to x6, or auto (the default: fills your screen, at most x4; x4 is 2560x1792,
+  stretched to a 4K screen's height; x5 is about 4K). Changes at once.
+- **Frame rate**: 30 (the original), 60 (the default with the GPU renderer) or 120 (120 at native resolution only).
+  60 and 120 add about 17 ms of delay.
+- **Display**: window or full screen; **V-Sync**: On (smooth, the default: locked to your display, every picture stays
+  up equally long on 60/120/240 Hz screens), Exact 59.94 Hz (the PS2's own rate), or Off (may tear).
 - **Keyboard** and **Controller**: remap every button (press the key or button you want). The controller page also
   sets the vibration strength and the light bar colour.
 

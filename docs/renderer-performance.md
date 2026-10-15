@@ -203,3 +203,9 @@ Design for later (from roadmap step 2.2, with what phase 2 learned):
 Left for later (exact but not done): clean-value tracking per VF field so that inputs known to be clamped skip
 `vclamp` (ITOF/FMAC results; LQ'd matrices stay unclamped, so the gain is the broadcast operands, maybe 10-15 % of
 VU1); a cheaper GS ring entry for XGKICK traffic (part of the remaining VU1 time).
+
+## GPU renderer cost in the user's rooms (2026-10-16)
+
+See `docs/gpu-renderer.md`, "Speed, stage 2": the copies dominate (85 % of the GPU's time at x4/x5 + 60 fps), half
+of it the replays of interpolation; the frame of each dispatch (tile marking, barriers, the copy's geometry) costs more
+than the GS's per-pixel work. `HG_GSVK_DPROF=1` with `HG_GSVK_TIMING=1` prints the time per batch kind and size.

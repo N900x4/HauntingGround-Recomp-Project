@@ -356,3 +356,24 @@ Each question has options and a recommended default. Answers decide scope before
 18. **Unattended runs and installs.** May Opus run muted window tests unattended (as before, at night or when you say the PC is free), and install `mingw-w64-ucrt-x86_64-vulkan-validation-layers` for phase 1? Default: yes to both, with the window tests muted and no window while you are using the PC unless you say so.
 19. **Saving test.** May a scripted run save at the Castle Suite clock into `memcards/port0` (your current saves are copied first)? Or do you prefer to do the first save yourself during the playtest? Default: scripted, after a backup of the card folder.
 20. **Linux/Steam Deck.** In scope at all this year? Default: keep it building, no feature work.
+
+## 5. The user's answers (2026-10-15)
+
+The user answered the questions in section 4 as follows; these decisions bind the work.
+
+- **Q6 Settings UI:** follow the original: the new settings are **extra rows in the game's own Options menu**, in the
+  game's own style (option (i), extending the native Options list). Where the menu code makes a row impossible to add
+  natively, report back before falling back to anything else.
+- **Q8 Frame-rate note:** yes, one line in the menu saying 60/120 fps add about one frame (17 ms) of delay.
+- **All other questions: the recommended defaults**, i.e.: strict order for code changes with overlap allowed for
+  analysis and references (Q1); VU1 compile first, re-measure, then decide on the thread (Q2); playtest after phase 1
+  (Q3); PCSX2 comparison in phase 8 plus one early Castle Suite spot check (Q4); door specks: the user saves a PCSX2
+  state (Q5, waits for the user); settings list as proposed, `hg.ini` next to the executable, env vars override (Q7);
+  modding order f, a, b, c, e, Lua only if asked (Q9); runtime refactor after phase 1, before phase 3 (Q10);
+  decompilation order as listed (Q11); GPL-3.0, bundled toolchain, mod licence later (Q12); the user's machine is the
+  speed gate, a minimum documented (Q13); lock the emulated VBlank to the display within 0.5 %, exact 59.94 as a
+  setting (Q14); 16:9 out of scope (Q15); DualSense: rumble yes, static light bar (panic-linked later), no adaptive
+  triggers, touchpad click = Select, no gyro/speaker, USB and Bluetooth, first controller to press wins (Q16);
+  recordings may be regression inputs, not committed (Q17); muted unattended window tests allowed when the PC is free,
+  and installing mingw-w64-ucrt-x86_64-vulkan-validation-layers is allowed (Q18); scripted save test after backing up
+  memcards/ (Q19); Linux kept building, no feature work (Q20).

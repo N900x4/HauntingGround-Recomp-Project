@@ -33,6 +33,7 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *ta
 void gsvk_prim(const GsVkSprite *s, const uint32_t *clut, int alone);
 void gsvk_break(void);
 void gsvk_upload(uint32_t word, uint32_t nwords, const uint32_t *src);   /* CPU data into local memory (every copy) */
+void gsvk_upload_masked(const uint32_t *trip, uint32_t n);              /* n (word, value, mask): those bits of those words, every copy */
 void gsvk_download(const uint64_t pages[8], uint32_t *dst);              /* those 8 KB pages to dst (waits) */
 void gsvk_download_copy(int k, const uint64_t pages[8], uint32_t *dst);  /* the same from copy k */
 /* a display picture into dst, W x H, interleaving N x N copies from copy ly1: s->prim 4, fbp/fbw/fpsm and lx0/ly0 =
@@ -63,9 +64,17 @@ int gsvk_present_ready(void);                            /* any thread: gsvk_pre
 int gsvk_pic(const GsVkSprite *s, uint64_t *id);         /* GS thread: as gsvk_compose, into a picture image: its index (or -1), the submission */
 void gsvk_pic_release(int k);                            /* any thread: picture image k is not needed (dropped unseen) */
 int gsvk_present_init(void *hinstance, void *hwnd);      /* UI thread: a swapchain on the window; 0: not possible */
-void gsvk_present(int k, uint64_t id, const uint32_t *ov);   /* UI thread: show picture k (k < 0: the last again), overlay 176 x 42 or 0 */
-void gsvk_present_shutdown(void);
-void gsvk_present_mode(int v);   /* any thread: 0 mailbox (default), 1 FIFO (vsync), 2 immediate; applied at the next present */                        /* UI thread, before the process ends */
+uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, uint64_t rel_ns);   /* UI thread: show picture k (k < 0: the last again), overlay 176 x 42 or 0,
+                                                         rel_ns (if gsvk_present_timed()): ns after the previous one; the present's id (0: not presented) */
+int gsvk_present_timed(void);                            /* UI thread: presents can be timed (VK_EXT_present_timing, relative) */
+double gsvk_present_refresh(void);                       /* UI thread: the refresh period the swapchain reports, s (0: unknown) */
+int gsvk_present_wait(uint64_t pid, uint64_t timeout_ns);   /* UI thread: present pid on the screen? 1 yes, 0 timeout, -1 cannot tell */
+int gsvk_present_can_wait(void);                         /* VK_KHR_present_wait is in use */
+int gsvk_present_scanout(uint64_t *pid, double *t, int max);   /* UI thread: when presents went out to the screen (VK_EXT_present_timing); the count */
+int gsvk_present_gen(void);                              /* swapchains made so far */
+int gsvk_present_fifo(void);                             /* UI thread: the swapchain is FIFO (waits for the display) */
+void gsvk_present_shutdown(void);                        /* UI thread, before the process ends */
+void gsvk_present_mode(int v);   /* any thread: 0 mailbox, 1 FIFO (vsync), 2 immediate; applied at the next present */
 /* checking: the GPU's memory is set to `now`, then primitives are recorded, then the GPU's memory comes back */
 void gsvk_check_begin(const uint32_t *now);
 const uint32_t *gsvk_check_end(double *ms);

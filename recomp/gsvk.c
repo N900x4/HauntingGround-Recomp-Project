@@ -19,7 +19,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
-static VkInstance inst; static VkPhysicalDevice phys; static VkDevice dev; static VkQueue queue; static uint32_t qfam;
+static VkInstance inst; static VkPhysicalDevice phys; static VkDevice dev; static VkQueue queue; static uint32_t qfam, ufam;   /* the GS's queue family, the window's */
 static VkDescriptorSetLayout dsl; static VkPipelineLayout pl; static VkPipeline pipe1, pipeb, pipebc; static VkDescriptorPool dpool; static VkDescriptorSet dset;
 /* command buffers in rotation: one is recorded while earlier ones may still run (gsvk_submit); gsvk_finish waits for all.
    A buffer is submitted every few batches (HG_GSVK_EAGER, default 2) so that the GPU works while the GS thread records
@@ -39,9 +39,9 @@ static int tim_on, cur_ph; static int qcnt[NCMD]; static int8_t qseg[NCMD][QPER]
    replays and snapshot, for the adaptive policy in gs.c) */
 static int tag_cur, tag_of[NCMD]; static double gpu_ms_tag;
 typedef struct { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceSize n; } Buf;
-static Buf vram, dvram, xoffb, tabb, primb, clutb, upb, hrb;   /* hrb: the upscaled display read back */
+static Buf vram, dvram, xoffb, tabb, primb, clutb, upb, hrb, binb, auxb;   /* auxb: masked uploads (word, value, mask) */   /* hrb: the upscaled display read back; binb: bins of the copies' batches */
 static VkDeviceSize outbase, outbytes;   /* in dvram, after the copies */
-enum { PRIM_MAX = 65536, CLUT_MAX = 8192, UP_BYTES = 64 << 20 };
+enum { PRIM_MAX = 65536, CLUT_MAX = 8192, UP_BYTES = 64 << 20, AUX_MAX = 4 << 20, BIN_MAX = 8 << 20, BIN = 16, BIN_MIN = 48 };
 /* The primitive, CLUT and upload rings are used in two halves: when the current half is full the work recorded so far
    is submitted and recording goes on in the other half once the GPU is done with that half's last submission (a full
    wait, as before, left the GPU idle while the GS thread recorded the next work). */
@@ -50,10 +50,30 @@ static int state;   /* 0 untried, 1 ready, -1 unavailable */
 /* presenting from video memory (the end of this file): the UI thread's queue (the family's second, or the same one
    under qmx), the timeline semaphore every GS submission signals with its id */
 static VkQueue uqueue; static int shared_q, can_present; static pthread_mutex_t qmx = PTHREAD_MUTEX_INITIALIZER; static VkSemaphore tl;
+static int can_wait, ui_prio; static PFN_vkWaitForPresentKHR wait_present;
+static int have_caps2, can_ptim, can_prel, sc_ptim, sc_prel; static uint64_t pt_dom; static int pt_qpc;   /* (can_prel, sc_prel: presents at a time relative to the previous one) */
+static PFN_vkGetSwapchainTimingPropertiesEXT pt_props;
+/* HG_PACEDBG: the window's blits timed on the GPU (calibrated to the host clock): when they started and ended */
+static int use_cal; static PFN_vkGetCalibratedTimestampsKHR get_cal; static VkQueryPool uqp; static double cal_off, cal_t;
+static struct { uint64_t pid; double sub, beg, end; } ugt[64]; static uint64_t upid[8];   /* VK_EXT_present_timing: on, on this swapchain, its QPC time domain */
+static PFN_vkSetSwapchainPresentTimingQueueSizeEXT pt_qsize; static PFN_vkGetSwapchainTimeDomainPropertiesEXT pt_domains; static PFN_vkGetPastPresentationTimingEXT pt_past;
+static struct { uint64_t pid; double t; } pt_ring[256]; static int pt_n;   /* scanout times collected, not yet taken (gsvk_present_scanout) */   /* VK_KHR_present_wait (gsvk_present_wait) */
 static int skip_exact;   /* gsvk_skip_exact() */
 /* recording */
 static int open_, bound; static VkPipeline cur_pipe; static uint32_t nprim, nclut, upoff;
 static uint32_t bfirst, bn; static int bx0, by0, bx1, by1;   /* the batch being collected */
+/* Bins (the copies of big batches): for 16 x 16 pixel squares of the batch's area, which of its primitives come near
+   (a bit each), so that a tile of the copies dispatch tests only those instead of every primitive (most of the time
+   of a batch of a thousand small triangles went into that scan). Made on the CPU from the rectangles gsvk_prim()
+   kept (the ring is never read back), in a ring like the primitives'. */
+static uint32_t naux; static int16_t (*brect)[4]; static uint32_t nbin, *bscratch; static size_t bscratch_n; static uint64_t n_binned;
+/* HG_GSVK_DPROF=1 (with HG_GSVK_TIMING): GPU time of every copies dispatch, summed by the kind of batch (sprites only,
+   triangles only, both) and the number of primitives, printed at the end (gsvk_dprof_print) */
+static int dprof = -1; static uint32_t bspr, btri; static int32_t qinfo[NCMD][QPER];
+enum { DP_K = 3, DP_B = 6 };   /* kinds; size classes 1, 2-4, 5-16, 17-64, 65-256, more */
+static struct { uint64_t n; double ms, mpix, prims; } dp[2][DP_K][DP_B];   /* [replay?][kind][size] */
+static int dp_cls(uint32_t n) { return n <= 1 ? 0 : n <= 4 ? 1 : n <= 16 ? 2 : n <= 64 ? 3 : n <= 256 ? 4 : 5; }
+static struct { uint8_t r, k, c; uint32_t n; double mpix; } dpi[1 << 16]; static uint32_t dpi_n;
 static int vfresh = 1;   /* the mirror does not hold the GPU's memory */
 static uint32_t ncopy = 1;   /* copies of local memory in dvram, 4 MB apart */
 static uint32_t mbase_add, up_first, up_count = 1;   /* gsvk_set_target() */
@@ -106,13 +126,14 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *ta
 static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *tables, int ncopies) {
     state = -1;
     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "hgboot", .apiVersion = VK_API_VERSION_1_2 };
-    const char *iext[2] = { "VK_KHR_surface", "VK_KHR_win32_surface" }; uint32_t niext = 0;   /* for the window (gsvk_present_init) */
+    const char *iext[3] = { "VK_KHR_surface", "VK_KHR_win32_surface", "VK_KHR_get_surface_capabilities2" }; uint32_t niext = 0;   /* for the window (gsvk_present_init) */
 #ifdef _WIN32
     { uint32_t ne = 0; vkEnumerateInstanceExtensionProperties(0, &ne, 0); VkExtensionProperties *ep = calloc(ne + 1, sizeof *ep);
       if (ep) {
           vkEnumerateInstanceExtensionProperties(0, &ne, ep); int h = 0;
-          for (uint32_t i = 0; i < ne; i++) h |= (strcmp(ep[i].extensionName, iext[0]) ? 0 : 1) | (strcmp(ep[i].extensionName, iext[1]) ? 0 : 2);
-          if (h == 3) niext = 2;
+          for (uint32_t i = 0; i < ne; i++) h |= (strcmp(ep[i].extensionName, iext[0]) ? 0 : 1) | (strcmp(ep[i].extensionName, iext[1]) ? 0 : 2) | (strcmp(ep[i].extensionName, iext[2]) ? 0 : 4);
+          if ((h & 3) == 3) niext = 2;
+          if (h == 7) { niext = 3; have_caps2 = 1; }
           free(ep);
       } }
 #endif
@@ -128,24 +149,75 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     VkQueueFamilyProperties qf[16]; if (nq > 16) nq = 16; vkGetPhysicalDeviceQueueFamilyProperties(phys, &nq, qf);
     qfam = UINT32_MAX; for (uint32_t i = 0; i < nq; i++) if (qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { qfam = i; break; }
     if (qfam == UINT32_MAX) { L("GSVK: no compute queue\n"); return 0; }
+    ufam = qfam;
+    /* The window's blits need a graphics queue; the GS's work goes to a compute-only family when there is one (the
+       "async compute" queues), so the window's few blits at each refresh are not held up behind long GS dispatches
+       (with both on the graphics family a present missed its refresh about once in 300 at x4 + 60 fps). HG_GSVK_QUEUE=
+       graphics keeps both on the graphics family. */
+    if (qf[qfam].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+        const char *qe = getenv("HG_GSVK_QUEUE");
+        for (uint32_t i = 0; i < nq && !(qe && !strcmp(qe, "graphics")); i++)
+            if ((qf[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && !(qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && qf[i].timestampValidBits >= 36) { qfam = i; break; }
+    }
     /* presenting needs the swapchain extension and timeline semaphores (Vulkan 1.2) */
     VkPhysicalDeviceTimelineSemaphoreFeatures tsf = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES };
     VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &tsf }; vkGetPhysicalDeviceFeatures2(phys, &f2);
+    int has_pid = 0, has_pwait = 0, has_gprio = 0, has_ptim = 0, has_cal = 0;
     { uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(phys, 0, &ne, 0); VkExtensionProperties *ep = calloc(ne + 1, sizeof *ep); int sw = 0;
-      if (ep) { vkEnumerateDeviceExtensionProperties(phys, 0, &ne, ep); for (uint32_t i = 0; i < ne; i++) sw |= !strcmp(ep[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME); free(ep); }
-      can_present = niext == 2 && sw && tsf.timelineSemaphore && pr.apiVersion >= VK_API_VERSION_1_2; }
+      if (ep) { vkEnumerateDeviceExtensionProperties(phys, 0, &ne, ep);
+                for (uint32_t i = 0; i < ne; i++) { sw |= !strcmp(ep[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+                    has_pid |= !strcmp(ep[i].extensionName, "VK_KHR_present_id"); has_pwait |= !strcmp(ep[i].extensionName, "VK_KHR_present_wait");
+                    has_gprio |= !strcmp(ep[i].extensionName, "VK_EXT_global_priority");
+                    has_ptim |= !strcmp(ep[i].extensionName, "VK_EXT_present_timing");
+                    has_cal |= !strcmp(ep[i].extensionName, "VK_KHR_calibrated_timestamps"); }
+                free(ep); }
+      can_present = niext >= 2 && sw && tsf.timelineSemaphore && pr.apiVersion >= VK_API_VERSION_1_2; }
+    /* the display's timing (display-locked pacing, host_sdl.c): VK_KHR_present_wait tells when each present reached the
+       screen; without it the swapchain's own blocking (FIFO) still paces the window */
+    VkPhysicalDevicePresentTimingFeaturesEXT ptf = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_TIMING_FEATURES_EXT };
+    VkPhysicalDevicePresentWaitFeaturesKHR pwf = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR, .pNext = has_ptim ? &ptf : 0 };
+    VkPhysicalDevicePresentIdFeaturesKHR pif = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR, .pNext = &pwf };
+    if (can_present && has_pid && has_pwait && !(getenv("HG_PRESENTWAIT") && !atoi(getenv("HG_PRESENTWAIT")))) {
+        VkPhysicalDeviceFeatures2 g2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &pif }; vkGetPhysicalDeviceFeatures2(phys, &g2);
+        can_wait = pif.presentId && pwf.presentWait;
+        /* VK_EXT_present_timing: when each present's first pixel went out to the screen (the true cadence, HG_PRESENTLOG) */
+        can_ptim = can_wait && has_ptim && ptf.presentTiming && have_caps2 && !(getenv("HG_PRESENTTIMING") && !atoi(getenv("HG_PRESENTTIMING")));
+    }
     const float prio[2] = { 0.5f, 1.0f };   /* the window's few blits go before the GS's work */
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = qfam, .queueCount = can_present && qf[qfam].queueCount >= 2 ? 2 : 1, .pQueuePriorities = prio };
+    VkDeviceQueueCreateInfo qcis[2] = { qci, { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = ufam, .queueCount = 1, .pQueuePriorities = &prio[1] } };
+    if (ufam != qfam) { if (!can_present) ufam = qfam; else qcis[0].queueCount = 1; }
     VkPhysicalDeviceFeatures have, want = { 0 }; vkGetPhysicalDeviceFeatures(phys, &have);
     if (!have.shaderFloat64) { L("GSVK: no 64-bit floats in shaders (triangle Z)\n"); return 0; }
     want.shaderFloat64 = VK_TRUE;
     VkPhysicalDeviceTimelineSemaphoreFeatures tsw = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES, .timelineSemaphore = VK_TRUE };
-    const char *dext[1] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
-    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = can_present ? &tsw : 0, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
-                               .enabledExtensionCount = can_present ? 1 : 0, .ppEnabledExtensionNames = dext, .pEnabledFeatures = &want };
+    const char *dext[6] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_present_id", "VK_KHR_present_wait", "VK_EXT_present_timing", "VK_EXT_global_priority", "VK_KHR_calibrated_timestamps" };
+    if (can_wait) { pif.presentId = VK_TRUE; pwf.presentWait = VK_TRUE; pwf.pNext = 0; tsw.pNext = &pif; }
+    if (can_ptim) { can_prel = ptf.presentAtRelativeTime && !(getenv("HG_PRESENTREL") && !atoi(getenv("HG_PRESENTREL"))); ptf.presentAtAbsoluteTime = VK_FALSE; ptf.presentAtRelativeTime = can_prel ? VK_TRUE : VK_FALSE; ptf.pNext = 0; pwf.pNext = &ptf; }
+    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = can_present ? &tsw : 0, .queueCreateInfoCount = ufam != qfam ? 2 : 1, .pQueueCreateInfos = qcis,
+                               .enabledExtensionCount = can_present ? (can_wait ? (can_ptim ? 4 : 3) : 1) : 0, .ppEnabledExtensionNames = dext, .pEnabledFeatures = &want };
+    /* the GS's queue at a low global priority (VK_EXT_global_priority; lowering needs no privileges), so the system's
+       GPU scheduler runs the window's blits ahead of the GS's long dispatches (HG_GSVK_UIPRIO=0: not) */
+    VkDeviceQueueGlobalPriorityCreateInfoKHR gp = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR, .globalPriority = VK_QUEUE_GLOBAL_PRIORITY_LOW_KHR };
+    const char *upe = getenv("HG_GSVK_UIPRIO");
+    if (has_gprio && can_present && ufam != qfam && !(upe && !atoi(upe))) {
+        dext[dci.enabledExtensionCount] = "VK_EXT_global_priority"; dci.enabledExtensionCount++;
+        qcis[0].pNext = &gp; ui_prio = 1;
+    }
+    if (has_cal && can_present && getenv("HG_PACEDBG")) { dext[dci.enabledExtensionCount] = "VK_KHR_calibrated_timestamps"; dci.enabledExtensionCount++; use_cal = 1; }
     if (vkCreateDevice(phys, &dci, 0, &dev)) { L("GSVK: no device\n"); return 0; }
+    if (use_cal && !(get_cal = (PFN_vkGetCalibratedTimestampsKHR)vkGetDeviceProcAddr(dev, "vkGetCalibratedTimestampsKHR"))) use_cal = 0;
+    if (can_wait && !(wait_present = (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(dev, "vkWaitForPresentKHR"))) can_wait = 0;
+    if (can_ptim) {
+        pt_qsize = (PFN_vkSetSwapchainPresentTimingQueueSizeEXT)vkGetDeviceProcAddr(dev, "vkSetSwapchainPresentTimingQueueSizeEXT");
+        pt_domains = (PFN_vkGetSwapchainTimeDomainPropertiesEXT)vkGetDeviceProcAddr(dev, "vkGetSwapchainTimeDomainPropertiesEXT");
+        pt_past = (PFN_vkGetPastPresentationTimingEXT)vkGetDeviceProcAddr(dev, "vkGetPastPresentationTimingEXT");
+        pt_props = (PFN_vkGetSwapchainTimingPropertiesEXT)vkGetDeviceProcAddr(dev, "vkGetSwapchainTimingPropertiesEXT");
+        if (!pt_qsize || !pt_domains || !pt_past) can_ptim = 0;
+    }
     vkGetDeviceQueue(dev, qfam, 0, &queue);
-    if (qci.queueCount == 2) vkGetDeviceQueue(dev, qfam, 1, &uqueue); else { uqueue = queue; shared_q = 1; }
+    if (ufam != qfam) vkGetDeviceQueue(dev, ufam, 0, &uqueue);
+    else if (qcis[0].queueCount == 2) vkGetDeviceQueue(dev, qfam, 1, &uqueue); else { uqueue = queue; shared_q = 1; }
     if (can_present) {
         VkSemaphoreTypeCreateInfo sti = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE };
         VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &sti };
@@ -156,15 +228,15 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     if (!mkbuf_(&vram, vbytes, xfer, 1)) { vkDestroyBuffer(dev, vram.b, 0); vram.b = 0; L("GSVK: no host-cached memory, mirror uncached\n"); }
     if ((!vram.p && !mkbuf(&vram, vbytes, xfer)) || !mk_local(ncopies) || !mkbuf(&xoffb, 66u * 2048 * 4, sto) ||
         !mkbuf(&tabb, GSVK_TABLES * 4, sto) || !mkbuf_(&primb, (VkDeviceSize)PRIM_MAX * sizeof(GsVkSprite), sto, 3) ||
-        !mkbuf_(&clutb, (VkDeviceSize)CLUT_MAX * 1024, sto, 3) || !mkbuf(&upb, UP_BYTES, xfer)) { L("GSVK: buffers failed\n"); return 0; }
+        !mkbuf_(&clutb, (VkDeviceSize)CLUT_MAX * 1024, sto, 3) || !mkbuf(&upb, UP_BYTES, xfer) || !mkbuf_(&binb, (VkDeviceSize)BIN_MAX * 4, sto, 3) || !mkbuf_(&auxb, (VkDeviceSize)AUX_MAX * 4, sto, 3)) { L("GSVK: buffers failed\n"); return 0; }
     memcpy(xoffb.p, xoff32, 33u * 2048 * 4); memcpy((uint32_t *)xoffb.p + 33u * 2048, xoff32z, 33u * 2048 * 4); memcpy(tabb.p, tables, GSVK_TABLES * 4);
     /* one layout for both pipelines: 0 local memory, 1 32-bit address tables, 2 CLUTs, 3 primitives, 4 other tables;
        push constants: n, bx0, by0, first (batch) or the primitive's index (one primitive) */
-    VkDescriptorSetLayoutBinding bd[5];
-    for (int i = 0; i < 5; i++) bd[i] = (VkDescriptorSetLayoutBinding){ .binding = (uint32_t)i, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    VkDescriptorSetLayoutBinding bd[7];
+    for (int i = 0; i < 7; i++) bd[i] = (VkDescriptorSetLayoutBinding){ .binding = (uint32_t)i, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                                                          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT };
-    VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 5, .pBindings = bd };
-    VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 20 };
+    VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 7, .pBindings = bd };
+    VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 32 };
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
     if (vkCreateDescriptorSetLayout(dev, &dli, 0, &dsl) || vkCreatePipelineLayout(dev, &pli, 0, &pl)) { L("GSVK: pipeline layout failed\n"); return 0; }
     for (int k = 0; k < 3; k++) {   /* one primitive; a batch; a batch's upscaling copies */
@@ -176,16 +248,16 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
             .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" } };
         if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, 0, k == 2 ? &pipebc : k ? &pipeb : &pipe1)) { L("GSVK: pipeline failed\n"); return 0; }
     }
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 };
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 };
     VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps };
     VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = 1, .pSetLayouts = &dsl };
     if (vkCreateDescriptorPool(dev, &dpi, 0, &dpool)) return 0;
     dai.descriptorPool = dpool; if (vkAllocateDescriptorSets(dev, &dai, &dset)) return 0;
-    VkDescriptorBufferInfo bi[5] = { { dvram.b, 0, VK_WHOLE_SIZE }, { xoffb.b, 0, VK_WHOLE_SIZE }, { clutb.b, 0, VK_WHOLE_SIZE }, { primb.b, 0, VK_WHOLE_SIZE }, { tabb.b, 0, VK_WHOLE_SIZE } };
-    VkWriteDescriptorSet wr[5];
-    for (int i = 0; i < 5; i++) wr[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = dset, .dstBinding = (uint32_t)i, .descriptorCount = 1,
+    VkDescriptorBufferInfo bi[7] = { { dvram.b, 0, VK_WHOLE_SIZE }, { xoffb.b, 0, VK_WHOLE_SIZE }, { clutb.b, 0, VK_WHOLE_SIZE }, { primb.b, 0, VK_WHOLE_SIZE }, { tabb.b, 0, VK_WHOLE_SIZE }, { binb.b, 0, VK_WHOLE_SIZE }, { auxb.b, 0, VK_WHOLE_SIZE } };
+    VkWriteDescriptorSet wr[7];
+    for (int i = 0; i < 7; i++) wr[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = dset, .dstBinding = (uint32_t)i, .descriptorCount = 1,
                                                                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[i] };
-    vkUpdateDescriptorSets(dev, 5, wr, 0, 0);
+    vkUpdateDescriptorSets(dev, 7, wr, 0, 0);
     VkCommandPoolCreateInfo cpci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qfam };
     VkCommandBufferAllocateInfo cbai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = NCMD };
     VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
@@ -197,7 +269,8 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     tim_on = getenv("HG_GSVK_TIMING") && atoi(getenv("HG_GSVK_TIMING")) > 0;
     if (vkCreateQueryPool(dev, &qpi, 0, &qpool)) return 0;
     tsperiod = pr.limits.timestampPeriod;
-    L("GSVK: Vulkan compute on %s%s\n", pr.deviceName, can_present ? (shared_q ? " (can present the window from video memory; one queue)" : " (can present the window from video memory)") : "");
+    L("GSVK: Vulkan compute on %s%s%s%s\n", pr.deviceName, can_present ? (shared_q ? " (can present the window from video memory; one queue)" : " (can present the window from video memory)") : "",
+      can_wait ? " (present wait: yes)" : "", ufam != qfam ? (ui_prio ? " (GS on an async compute queue; the window's at high priority)" : " (GS on an async compute queue)") : "");
     state = 1; return 1;
 }
 
@@ -217,7 +290,11 @@ static void slot_wait(int k) {   /* the submission in command buffer k is done; 
     if (nq >= 2 && !vkGetQueryPoolResults(dev, qpool, QPER * k, (uint32_t)nq, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT)) {
         gpu_ms_all += (double)(ts[nq - 1] - ts[0]) * tsperiod / 1e6;
         if (tag_of[k]) gpu_ms_tag += (double)(ts[nq - 1] - ts[0]) * tsperiod / 1e6;
-        for (int i = 0; i + 1 < nq; i++) if (qseg[k][i] >= 0) ph_ms[qseg[k][i]] += (double)(ts[i + 1] - ts[i]) * tsperiod / 1e6;
+        for (int i = 0; i + 1 < nq; i++) if (qseg[k][i] >= 0) {
+            const double ms = (double)(ts[i + 1] - ts[i]) * tsperiod / 1e6;
+            ph_ms[qseg[k][i]] += ms;
+            if (dprof > 0 && qinfo[k][i] >= 0) { const uint32_t j = (uint32_t)qinfo[k][i]; dp[dpi[j].r][dpi[j].k][dpi[j].c].n++; dp[dpi[j].r][dpi[j].k][dpi[j].c].ms += ms; dp[dpi[j].r][dpi[j].k][dpi[j].c].mpix += dpi[j].mpix; dp[dpi[j].r][dpi[j].k][dpi[j].c].prims += dpi[j].n; }
+        }
     }
     busy[k] = 0;
 }
@@ -228,7 +305,7 @@ static void rec_open(void) {
     vkResetCommandBuffer(cmd, 0); vkBeginCommandBuffer(cmd, &cbi);
     vkCmdResetQueryPool(cmd, qpool, QPER * ci, tim_on ? QPER : 2);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool, QPER * ci);
-    qcnt[ci] = 1; qseg[ci][0] = -1; cur_ph = -1; tag_of[ci] = tag_cur;
+    qcnt[ci] = 1; qseg[ci][0] = -1; qinfo[ci][0] = -1; cur_ph = -1; tag_of[ci] = tag_cur;
     open_ = 1; bound = 0; cur_pipe = VK_NULL_HANDLE; nb_open = 0;
 }
 static void phase(int ph) {   /* HG_GSVK_TIMING: what is recorded next (see above) */
@@ -236,7 +313,7 @@ static void phase(int ph) {   /* HG_GSVK_TIMING: what is recorded next (see abov
     ph += up_first ? PH_N : 0;
     if (ph == cur_ph || qcnt[ci] >= QPER - 1) return;
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, QPER * ci + (uint32_t)qcnt[ci]);
-    qseg[ci][qcnt[ci]++] = (int8_t)ph; cur_ph = ph;
+    qinfo[ci][qcnt[ci]] = -1; qseg[ci][qcnt[ci]++] = (int8_t)ph; cur_ph = ph;
 }
 static void use(VkPipeline p) {
     if (!bound) { vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0, 1, &dset, 0, 0); bound = 1; }
@@ -259,10 +336,41 @@ static void close_batch(void) {
             const int cx0 = x0 >= 2 ? x0 - 2 : 0, cy0 = y0 >= 2 ? y0 - 2 : 0, cx1 = x1 + 2 > 2048 ? 2048 : x1 + 2, cy1 = y1 + 2 > 2048 ? 2048 : y1 + 2;
             if (tim_on) barrier();
             phase(PH_COPIES); use(pipebc);
-            int32_t pcc[5] = { (int32_t)bn, cx0, cy0, (int32_t)bfirst, (int32_t)up_count };
+            int32_t pcc[8] = { (int32_t)bn, cx0, cy0, (int32_t)bfirst, (int32_t)up_count, -1, 0, 0 };
+            static int nobin = -1; if (nobin < 0) nobin = getenv("HG_GSVK_BINS") && !atoi(getenv("HG_GSVK_BINS"));
+            if (bn >= BIN_MIN && brect && !nobin) {   /* the bins (see brect) */
+                const int bw = (cx1 - cx0 + BIN - 1) / BIN, bh = (cy1 - cy0 + BIN - 1) / BIN; const uint32_t nw = (bn + 31) / 32, words = (uint32_t)(bw * bh) * nw;
+                if (words <= BIN_MAX / 4) {
+                    if (nbin + words <= (uint32_t)(rh + 1) * (BIN_MAX / 2)) {
+                        if (bscratch_n < words) { free(bscratch); bscratch = malloc((size_t)words * 4); bscratch_n = bscratch ? words : 0; }
+                        if (bscratch) {
+                            memset(bscratch, 0, (size_t)words * 4);
+                            for (uint32_t j = 0; j < bn; j++) {   /* a tile spans up to 5 pixels from its bin's start; copies move by up to 2 */
+                                if (brect[j][1] <= brect[j][0] || brect[j][3] <= brect[j][2]) continue;
+                                int a0 = (brect[j][0] - 24 - cx0) / BIN, a1 = (brect[j][1] + 2 - cx0) / BIN, b0 = (brect[j][2] - 24 - cy0) / BIN, b1 = (brect[j][3] + 2 - cy0) / BIN;
+                                if (a0 < 0 || brect[j][0] - 24 - cx0 < 0) a0 = 0; if (b0 < 0 || brect[j][2] - 24 - cy0 < 0) b0 = 0; if (a1 < 0 || b1 < 0) continue;
+                                if (a1 >= bw) a1 = bw - 1; if (b1 >= bh) b1 = bh - 1;
+                                for (int y = b0; y <= b1; y++) for (int x = a0; x <= a1; x++) bscratch[(uint32_t)(y * bw + x) * nw + (j >> 5)] |= 1u << (j & 31);
+                            }
+                            memcpy((uint32_t *)binb.p + nbin, bscratch, (size_t)words * 4);
+                            pcc[5] = (int32_t)nbin; pcc[6] = bw; pcc[7] = bh; nbin += words; n_binned++;
+                        }
+                    }
+                }
+            }
             vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pcc, pcc);
             uint32_t N = 1; while ((N + 1) * (N + 1) <= up_count - 1) N++;
+            if (dprof < 0) dprof = tim_on && getenv("HG_GSVK_DPROF") && atoi(getenv("HG_GSVK_DPROF"));
+            const int dpo = dprof && qcnt[ci] < QPER - 2;
+            if (dpo) {   /* a timestamp on each side of this dispatch, its segment pointing at its description */
+                const uint32_t j = dpi_n++ & 0xFFFF;
+                dpi[j].r = up_first != 0; dpi[j].k = bspr && btri ? 2 : btri ? 1 : 0; dpi[j].c = (uint8_t)dp_cls(bn); dpi[j].n = bn;
+                dpi[j].mpix = (double)(cx1 - cx0) * N * (cy1 - cy0) * N / 1e6;
+                vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, QPER * ci + (uint32_t)qcnt[ci]);
+                qseg[ci][qcnt[ci]] = (int8_t)(PH_COPIES + (up_first ? PH_N : 0)); qinfo[ci][qcnt[ci]] = (int32_t)j; qcnt[ci]++;
+            }
             vkCmdDispatch(cmd, ((uint32_t)(cx1 - cx0) * N + 7) / 8, ((uint32_t)(cy1 - cy0) * N + 7) / 8, 1);   /* tiles of the upscaled picture */
+            if (dpo) { barrier(); vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, QPER * ci + (uint32_t)qcnt[ci]); qseg[ci][qcnt[ci]] = (int8_t)(PH_COPIES + (up_first ? PH_N : 0)); qinfo[ci][qcnt[ci]] = -1; qcnt[ci]++; cur_ph = -1; }
             n_dispatch++;
         }
     }
@@ -291,13 +399,13 @@ static uint64_t submit(int wait) {
         if (r) { L("GSVK: submit failed\n"); state = -1; return 0; }
         busy[ci] = 1; sub_id[ci] = id; n_sub_id = id; n_submits++;
     }
-    if (wait) { for (int k = 0; k < NCMD; k++) slot_wait(k); nprim = nclut = 0; upoff = 0; rh = 0; clut_ok = 0; }
+    if (wait) { for (int k = 0; k < NCMD; k++) slot_wait(k); nprim = nclut = 0; upoff = 0; nbin = 0; naux = 0; rh = 0; clut_ok = 0; }
     return id;
 }
 static void ring_switch(void) {
     submit(0); half_id[rh] = n_sub_id; rh ^= 1;
     gsvk_wait(half_id[rh]);
-    nprim = rh * (PRIM_MAX / 2); nclut = rh * (CLUT_MAX / 2); upoff = rh * (UP_BYTES / 2); clut_ok = 0;
+    nprim = rh * (PRIM_MAX / 2); nclut = rh * (CLUT_MAX / 2); upoff = rh * (UP_BYTES / 2); nbin = (uint32_t)rh * (BIN_MAX / 2); naux = (uint32_t)rh * (AUX_MAX / 2); clut_ok = 0;
 }
 void gsvk_finish(void) { submit(1); }
 uint64_t gsvk_submit(void) { return submit(0); }
@@ -329,6 +437,25 @@ void gsvk_upload(uint32_t w, uint32_t n, const uint32_t *src) {
     }
     upoff += (n * 4 + 255) & ~255u;
 }
+/* n (word, value, mask) triples: those bits of those words become the values', in each copy of the set (gs.c xm_flush) */
+void gsvk_upload_masked(const uint32_t *trip, uint32_t n) {
+    if (state <= 0 || !n) return;
+    close_batch();
+    const uint32_t words = (n * 3 + 63) & ~63u;
+    if (words > AUX_MAX / 2) {   /* (more than a half: in parts) */
+        const uint32_t part = (AUX_MAX / 2) / 3 - 64;
+        for (uint32_t i = 0; i < n; i += part) gsvk_upload_masked(trip + (size_t)i * 3, n - i < part ? n - i : part);
+        return;
+    }
+    if (naux + words > (uint32_t)(rh + 1) * (AUX_MAX / 2)) ring_switch();
+    memcpy((uint32_t *)auxb.p + naux, trip, (size_t)n * 12);
+    GsVkSprite s; memset(&s, 0, sizeof s);
+    s.prim = 5; s.px0 = 0; s.px1 = 1024; s.py0 = 0; s.py1 = (int32_t)((n + 1023) / 1024); s.z = naux; s.ly1 = (int32_t)n; s.lx0 = (int32_t)up_first; s.ln = (int32_t)up_count;
+    naux += words;
+    const uint32_t keep = mbase_add; mbase_add = 0;
+    static const uint32_t noclut[256];
+    gsvk_prim(&s, noclut, 1); mbase_add = keep;
+}
 /* one primitive: alone (lines, serial ones) or added to the batch being collected */
 void gsvk_prim(const GsVkSprite *s, const uint32_t *clut, int alone) {
     if (state <= 0) return;
@@ -337,17 +464,19 @@ void gsvk_prim(const GsVkSprite *s, const uint32_t *clut, int alone) {
     if (!clut_ok || memcmp(last, clut, 1024)) { memcpy(last, clut, 1024); memcpy((uint32_t *)clutb.p + nclut++ * 256, clut, 1024); clut_ok = 1; }
     GsVkSprite r = *s; r.clutoff = (nclut - 1) * 256; r.mbase += mbase_add;
     ((GsVkSprite *)primb.p)[nprim] = r;   /* written once: the ring may be video memory over the bus, never read it */
-    if (alone && skip_exact && !(s->mbase >> 20) && s->prim != 4) { nprim++; return; }   /* the set's exact copy is not drawn */
+    if (alone && skip_exact && !(s->mbase >> 20) && s->prim < 4) { nprim++; return; }   /* the set's exact copy is not drawn */
     if (alone) {
-        close_batch(); rec_open(); barrier(); phase(s->prim == 4 ? PH_COMPOSE : PH_SINGLE); use(pipe1);
+        close_batch(); rec_open(); barrier(); phase(s->prim == 4 ? PH_COMPOSE : s->prim == 5 ? PH_XFER : PH_SINGLE); use(pipe1);
         int32_t pc[5] = { (int32_t)nprim, 0, 0, 0, (int32_t)ncopy };
         vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
         if (s->serial) vkCmdDispatch(cmd, 1, 1, 1);
         else vkCmdDispatch(cmd, (uint32_t)(s->px1 - s->px0 + 7) / 8, (uint32_t)(s->py1 - s->py0 + 7) / 8, 1);
         n_dispatch++;
     } else {
-        if (!bn) { bfirst = nprim; bx0 = by0 = 1 << 30; bx1 = by1 = -(1 << 30); }
+        if (!bn) { bfirst = nprim; bx0 = by0 = 1 << 30; bx1 = by1 = -(1 << 30); bspr = btri = 0; }
+        if (s->prim == 1) btri++; else bspr++;
         bn++;
+        if (brect || (brect = malloc(sizeof *brect * PRIM_MAX))) { const uint32_t j = bn - 1; if (j < PRIM_MAX) { brect[j][0] = (int16_t)s->px0; brect[j][1] = (int16_t)s->px1; brect[j][2] = (int16_t)s->py0; brect[j][3] = (int16_t)s->py1; } }
         if (s->px1 > s->px0 && s->py1 > s->py0) {   /* (a copy's empty place holder adds nothing) */
             if (s->px0 < bx0) bx0 = s->px0; if (s->py0 < by0) by0 = s->py0; if (s->px1 > bx1) bx1 = s->px1; if (s->py1 > by1) by1 = s->py1; }
     }
@@ -436,6 +565,13 @@ int gsvk_compose(const GsVkSprite *s0, uint32_t *dst) {
     return 1;
 }
 void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms) { *submits = n_submits; *dispatches = n_dispatch; *gpu_ms = gpu_ms_all; *wait_ms = wait_ms_all; }
+void gsvk_dprof_print(void) {
+    if (dprof <= 0) return;
+    static const char *kn[DP_K] = { "sprites", "triangles", "both" }, *cn[DP_B] = { "1", "2-4", "5-16", "17-64", "65-256", ">256" };
+    for (int r = 0; r < 2; r++) for (int k = 0; k < DP_K; k++) for (int c = 0; c < DP_B; c++) if (dp[r][k][c].n)
+        L("GSVK dprof %s %-9s %6s prims: %7llu dispatches, %9.1f ms, %8.1f Mpix (%.2f ns per pixel-copy), %.0f prims\n", r ? "replay" : "real  ", kn[k], cn[c],
+          (unsigned long long)dp[r][k][c].n, dp[r][k][c].ms, dp[r][k][c].mpix, dp[r][k][c].mpix > 0 ? dp[r][k][c].ms * 1e3 / dp[r][k][c].mpix : 0, dp[r][k][c].prims);
+}
 void gsvk_phase_stats(double ms[10]) { for (int i = 0; i < 2 * PH_N; i++) ms[i] = ph_ms[i]; }
 
 /* ------------------------------------------------------------------ checking against the CPU */
@@ -489,6 +625,8 @@ static int mkimg(VkImage *img, VkDeviceMemory *mem, int w, int h) {   /* RGBA, d
     VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
         .extent = { (uint32_t)w, (uint32_t)h, 1 }, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    const uint32_t fams[2] = { qfam, ufam };   /* written by the GS's queue, blitted by the window's */
+    if (ufam != qfam) { ii.sharingMode = VK_SHARING_MODE_CONCURRENT; ii.queueFamilyIndexCount = 2; ii.pQueueFamilyIndices = fams; }
     if (vkCreateImage(dev, &ii, 0, img)) return 0;
     VkMemoryRequirements mr; vkGetImageMemoryRequirements(dev, *img, &mr);
     VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = memtype(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
@@ -552,6 +690,7 @@ static VkPresentModeKHR pick_mode(int v) {
 }
 static const char *mode_name(VkPresentModeKHR m) { return m == VK_PRESENT_MODE_FIFO_KHR ? "vsync" : m == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "immediate"; }
 static uint32_t scn; static VkImage scimg[8]; static VkSemaphore scdone[8]; static int sc_stale;
+static uint64_t pres_id; static _Atomic int sc_gen; double gsvk_present_ms[5];   /* the last present's steps (debugging): fence, acquire, record, submit, present */   /* present ids (VK_KHR_present_id, increasing over all swapchains); swapchains made */
 static VkCommandPool upool; static VkCommandBuffer ucb[NFR]; static VkFence ufence[NFR]; static VkSemaphore uacq[NFR]; static int ufr, usub[NFR], uslot[NFR];
 static int ucur = -1, uref[NPIC]; static uint64_t ucur_id;
 static Buf ovbuf; static VkImage ovimg; static VkDeviceMemory ovmem;
@@ -563,17 +702,40 @@ static int mk_swapchain(void) {
     if (shared_q) pthread_mutex_lock(&qmx);
     vkQueueWaitIdle(uqueue);   /* the old swapchain's images and semaphores are no longer in use */
     if (shared_q) pthread_mutex_unlock(&qmx);
-    uint32_t n = cap.minImageCount + 1; if (cap.maxImageCount && n > cap.maxImageCount) n = cap.maxImageCount;
+    uint32_t n = cap.minImageCount + (getenv("HG_SCIMAGES") ? (uint32_t)atoi(getenv("HG_SCIMAGES")) : 1); if (cap.maxImageCount && n > cap.maxImageCount) n = cap.maxImageCount;
     VkCompositeAlphaFlagBitsKHR ca = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     if (!(cap.supportedCompositeAlpha & ca)) for (uint32_t b = 1; b; b <<= 1) if (cap.supportedCompositeAlpha & b) { ca = (VkCompositeAlphaFlagBitsKHR)b; break; }
     VkSwapchainCreateInfoKHR ci = { .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = surf, .minImageCount = n, .imageFormat = scfmt, .imageColorSpace = sccs,
         .imageExtent = cap.currentExtent, .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT, .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .preTransform = cap.currentTransform, .compositeAlpha = ca, .presentMode = pmode, .clipped = VK_TRUE, .oldSwapchain = sc };
+    int ptim = 0;
+    if (can_ptim) {   /* does this surface report present timing? */
+        VkPresentTimingSurfaceCapabilitiesEXT ptc = { .sType = VK_STRUCTURE_TYPE_PRESENT_TIMING_SURFACE_CAPABILITIES_EXT };
+        VkSurfaceCapabilities2KHR c2 = { .sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR, .pNext = &ptc };
+        VkPhysicalDeviceSurfaceInfo2KHR si = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR, .surface = surf };
+        PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR g = (PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR)vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceSurfaceCapabilities2KHR");
+        ptim = g && !g(phys, &si, &c2) && ptc.presentTimingSupported && (ptc.presentStageQueries & VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT);
+        sc_prel = ptim && can_prel && ptc.presentAtRelativeTimeSupported;
+        if (ptim) ci.flags |= VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
+    }
     VkSwapchainKHR nsc;
     if (vkCreateSwapchainKHR(dev, &ci, 0, &nsc)) { L("GSVK: no swapchain\n"); return 0; }
+    sc_ptim = 0; if (!ptim) sc_prel = 0;
+    if (ptim && !pt_qsize(dev, nsc, 64)) {   /* the time domain: QueryPerformanceCounter, the host clock (host_now) */
+        VkTimeDomainKHR dm[8]; uint64_t di[8];
+        VkSwapchainTimeDomainPropertiesEXT tdp = { .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_TIME_DOMAIN_PROPERTIES_EXT, .timeDomainCount = 8, .pTimeDomains = dm, .pTimeDomainIds = di };
+        uint64_t cnt = 0;
+        char dl[128] = ""; pt_qpc = 0;
+        if (!pt_domains(dev, nsc, &tdp, &cnt)) for (uint32_t i = 0; i < tdp.timeDomainCount; i++) {
+            snprintf(dl + strlen(dl), sizeof dl - strlen(dl), " %d", (int)dm[i]);
+            if (dm[i] == VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR) { pt_dom = di[i]; sc_ptim = 1; pt_qpc = 1; }
+            else if (!sc_ptim) { pt_dom = di[i]; sc_ptim = 1; }   /* (a local clock in ns: the intervals, not the host's time) */
+        }
+        static int nl; if (nl++ < 4) L("GSVK: present timing %s (time domains%s)\n", sc_ptim ? pt_qpc ? "on (first pixel out, QueryPerformanceCounter)" : "on (first pixel out, a local clock)" : "off", dl);
+    }
     if (sc) vkDestroySwapchainKHR(dev, sc, 0);
     for (uint32_t i = 0; i < scn; i++) vkDestroySemaphore(dev, scdone[i], 0);
-    sc = nsc; scext = cap.currentExtent; scn = 8; vkGetSwapchainImagesKHR(dev, sc, &scn, scimg);
+    sc = nsc; scext = cap.currentExtent; scn = 8; vkGetSwapchainImagesKHR(dev, sc, &scn, scimg); atomic_fetch_add(&sc_gen, 1);
     VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     for (uint32_t i = 0; i < scn; i++) vkCreateSemaphore(dev, &sci, 0, &scdone[i]);
     sc_stale = 0; return 1;
@@ -591,7 +753,7 @@ int gsvk_present_init(void *hinstance, void *hwnd) {
 #else
     (void)hinstance; (void)hwnd; return 0;
 #endif
-    VkBool32 sup = 0; vkGetPhysicalDeviceSurfaceSupportKHR(phys, qfam, surf, &sup);
+    VkBool32 sup = 0; vkGetPhysicalDeviceSurfaceSupportKHR(phys, ufam, surf, &sup);
     if (!sup) { L("GSVK: the queue cannot present to the window\n"); return 0; }
     VkSurfaceFormatKHR fm[64]; uint32_t nf = 64; vkGetPhysicalDeviceSurfaceFormatsKHR(phys, surf, &nf, fm);
     if (!nf) return 0;
@@ -603,35 +765,51 @@ int gsvk_present_init(void *hinstance, void *hwnd) {
     { VkPresentModeKHR pm[16]; uint32_t np = 16; vkGetPhysicalDeviceSurfacePresentModesKHR(phys, surf, &np, pm);   /* (vsync: settings.c, HG_VSYNC) */
       for (uint32_t i = 0; i < np; i++) if ((uint32_t)pm[i] < 4) pm_has[pm[i]] = 1;
       pm_set = atomic_load(&pm_want); pmode = pick_mode(pm_set); }
-    VkCommandPoolCreateInfo cpci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qfam };
+    VkCommandPoolCreateInfo cpci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = ufam };
     VkCommandBufferAllocateInfo cbai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = NFR };
     VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     if (vkCreateCommandPool(dev, &cpci, 0, &upool)) return 0;
     cbai.commandPool = upool; if (vkAllocateCommandBuffers(dev, &cbai, ucb)) return 0;
     for (int f = 0; f < NFR; f++) { if (vkCreateFence(dev, &fci, 0, &ufence[f]) || vkCreateSemaphore(dev, &sci, 0, &uacq[f])) return 0; uslot[f] = -1; }
     if (!mkbuf(&ovbuf, (VkDeviceSize)NFR * OVW * OVH * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) || !mkimg(&ovimg, &ovmem, OVW, OVH)) return 0;
+    if (use_cal) { VkQueryPoolCreateInfo q = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 * NFR }; if (vkCreateQueryPool(dev, &q, 0, &uqp)) use_cal = 0; }
     if (!mk_swapchain()) sc_stale = 1;
     L("GSVK: the window is presented from video memory (%s)\n", mode_name(pmode));
     atomic_store(&pres_ok, 1); return 1;
 }
 /* UI thread: show picture k (k < 0: the current one again) once GS submission id is done, with the overlay ov
    (OVW x OVH, 0x00BBGGRR, or 0) at the picture's top left */
-void gsvk_present(int k, uint64_t id, const uint32_t *ov) {
-    if (!atomic_load(&pres_ok)) return;
+uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, uint64_t rel_ns) {
+    if (!atomic_load(&pres_ok)) return 0;
     if (k >= 0 && k < NPIC) { uref[k]++; ui_unref(ucur); ucur = k; ucur_id = id; }
     const int f = ufr;
-    if (usub[f]) { vkWaitForFences(dev, 1, &ufence[f], VK_TRUE, UINT64_MAX); usub[f] = 0; ui_unref(uslot[f]); uslot[f] = -1; }
+    const double p0 = host_now();
+    if (usub[f]) {
+        vkWaitForFences(dev, 1, &ufence[f], VK_TRUE, UINT64_MAX); usub[f] = 0; ui_unref(uslot[f]); uslot[f] = -1;
+        uint64_t ts[2];
+        if (use_cal && !vkGetQueryPoolResults(dev, uqp, 2 * (uint32_t)f, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT)) {
+            if (p0 - cal_t > 1) {   /* the GPU's clock against QueryPerformanceCounter */
+                VkCalibratedTimestampInfoKHR ci2[2] = { { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, .timeDomain = VK_TIME_DOMAIN_DEVICE_KHR },
+                                                        { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, .timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR } };
+                uint64_t v[2], dv; if (!get_cal(dev, 2, ci2, v, &dv)) { cal_off = host_qpc_seconds(v[1]) - v[0] * tsperiod * 1e-9; cal_t = p0; }
+            }
+            const int j = (int)(upid[f] & 63); ugt[j].pid = upid[f]; ugt[j].beg = ts[0] * tsperiod * 1e-9 + cal_off; ugt[j].end = ts[1] * tsperiod * 1e-9 + cal_off;
+        }
+    }
+    const double p1 = host_now();
     { const int w = atomic_load(&pm_want);   /* vsync changed (the Options menu): a new swapchain in that mode */
       if (w != pm_set) { pm_set = w; const VkPresentModeKHR m = pick_mode(w); if (m != pmode) { pmode = m; sc_stale = 1; L("GSVK: presenting with %s\n", mode_name(m)); } } }
-    if (sc_stale || !sc) { if (!mk_swapchain()) return; }
+    if (sc_stale || !sc) { if (!mk_swapchain()) return 0; }
     uint32_t ii;
     VkResult r = vkAcquireNextImageKHR(dev, sc, 100000000ull, uacq[f], VK_NULL_HANDLE, &ii);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) { sc_stale = 1; return; }
-    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return;
+    const double p2 = host_now();
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) { sc_stale = 1; return 0; }
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) return 0;
     if (r == VK_SUBOPTIMAL_KHR) sc_stale = 1;
     VkCommandBuffer cb = ucb[f];
     VkCommandBufferBeginInfo cbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
     vkResetCommandBuffer(cb, 0); vkBeginCommandBuffer(cb, &cbi);
+    if (use_cal) { vkCmdResetQueryPool(cb, uqp, 2 * (uint32_t)f, 2); vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, uqp, 2 * (uint32_t)f); }
     const VkImage dst = scimg[ii];
     imgbar(cb, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     const VkClearColorValue black = { { 0, 0, 0, 1 } }; const VkImageSubresourceRange all = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
@@ -657,6 +835,7 @@ void gsvk_present(int k, uint64_t id, const uint32_t *ov) {
         vkCmdBlitImage(cb, ovimg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_NEAREST);
     }
     imgbar(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    if (use_cal) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, uqp, 2 * (uint32_t)f + 1);
     vkEndCommandBuffer(cb);
     const VkSemaphore ws[2] = { uacq[f], tl }; const uint64_t wv[2] = { 0, ucur_id }; const uint64_t sv = 0;
     const VkPipelineStageFlags wst[2] = { VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT };
@@ -664,17 +843,77 @@ void gsvk_present(int k, uint64_t id, const uint32_t *ov) {
                                           .signalSemaphoreValueCount = 1, .pSignalSemaphoreValues = &sv };
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = &tsi, .waitSemaphoreCount = ucur >= 0 ? 2 : 1, .pWaitSemaphores = ws, .pWaitDstStageMask = wst,
                         .commandBufferCount = 1, .pCommandBuffers = &cb, .signalSemaphoreCount = 1, .pSignalSemaphores = &scdone[ii] };
-    VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &scdone[ii], .swapchainCount = 1, .pSwapchains = &sc, .pImageIndices = &ii };
+    const uint64_t pid = pres_id + 1;
+    VkPresentTimingInfoEXT pti = { .sType = VK_STRUCTURE_TYPE_PRESENT_TIMING_INFO_EXT, .timeDomainId = pt_dom, .presentStageQueries = VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT };
+    if (rel_ns && sc_ptim && sc_prel) {   /* shown rel_ns after the previous present reached the screen, on the nearest refresh */
+        pti.flags = VK_PRESENT_TIMING_INFO_PRESENT_AT_RELATIVE_TIME_BIT_EXT | VK_PRESENT_TIMING_INFO_PRESENT_AT_NEAREST_REFRESH_CYCLE_BIT_EXT;
+        pti.targetTime = rel_ns; pti.targetTimeDomainPresentStage = VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_OUT_BIT_EXT;
+    }
+    VkPresentTimingsInfoEXT ptis = { .sType = VK_STRUCTURE_TYPE_PRESENT_TIMINGS_INFO_EXT, .swapchainCount = 1, .pTimingInfos = &pti };
+    VkPresentIdKHR pidi = { .sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR, .pNext = sc_ptim ? &ptis : 0, .swapchainCount = 1, .pPresentIds = &pid };
+    VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = can_wait ? &pidi : 0, .waitSemaphoreCount = 1, .pWaitSemaphores = &scdone[ii], .swapchainCount = 1, .pSwapchains = &sc, .pImageIndices = &ii };
     vkResetFences(dev, 1, &ufence[f]);
     if (shared_q) pthread_mutex_lock(&qmx);
+    const double p3 = host_now();
     r = vkQueueSubmit(uqueue, 1, &si, ufence[f]);
+    const double p4 = host_now();
     const VkResult pr = r ? r : vkQueuePresentKHR(uqueue, &pi);
+    const double p5 = host_now();
+    gsvk_present_ms[0] = (p1 - p0) * 1e3; gsvk_present_ms[1] = (p2 - p1) * 1e3; gsvk_present_ms[2] = (p3 - p2) * 1e3; gsvk_present_ms[3] = (p4 - p3) * 1e3; gsvk_present_ms[4] = (p5 - p4) * 1e3;
     if (shared_q) pthread_mutex_unlock(&qmx);
-    if (r) { L("GSVK: window submit failed (%d)\n", (int)r); atomic_store(&pres_ok, 0); return; }
+    if (r) { L("GSVK: window submit failed (%d)\n", (int)r); atomic_store(&pres_ok, 0); return 0; }
     if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) sc_stale = 1;
     usub[f] = 1; uslot[f] = ucur; if (ucur >= 0) uref[ucur]++;
     ufr = (f + 1) % NFR;
+    if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) return 0;
+    pres_id = pid; upid[f] = pid; ugt[pid & 63].pid = 0; ugt[pid & 63].sub = p3;
+    if (sc_ptim) {   /* the scanout times reported since the last present */
+        VkPresentStageTimeEXT st[16]; VkPastPresentationTimingEXT pt[16];
+        for (int i = 0; i < 16; i++) { st[i] = (VkPresentStageTimeEXT){ 0 }; pt[i] = (VkPastPresentationTimingEXT){ .sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_EXT, .presentStageCount = 1, .pPresentStages = &st[i] }; }
+        VkPastPresentationTimingInfoEXT pii = { .sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_INFO_EXT, .swapchain = sc };
+        VkPastPresentationTimingPropertiesEXT pp = { .sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_PROPERTIES_EXT, .presentationTimingCount = 16, .pPresentationTimings = pt };
+        const VkResult q = pt_past(dev, &pii, &pp);
+        if (q == VK_SUCCESS || q == VK_INCOMPLETE)
+            for (uint32_t i = 0; i < pp.presentationTimingCount; i++) if (pt[i].reportComplete && st[i].stage) {
+                if (pt_n < 256) { pt_ring[pt_n].pid = pt[i].presentId; pt_ring[pt_n].t = pt_qpc ? host_qpc_seconds(pt[i].pPresentStages[0].time) : pt[i].pPresentStages[0].time * 1e-9; pt_n++; }
+            }
+    }
+    return pid;
 }
+/* UI thread: the scanout times collected (VK_EXT_present_timing): up to max {present id, host_now() seconds}; the count */
+/* UI thread: 1 if this swapchain shows presents at a time relative to the previous one (gsvk_present's rel_ns) */
+/* HG_PACEDBG: present pid's blit on the GPU, host_now() seconds: submitted, began, ended; 0 if not known (yet) */
+int gsvk_present_gpu(uint64_t pid, double *sub, double *beg, double *end) {
+    const int j = (int)(pid & 63); if (!use_cal || ugt[j].pid != pid) return 0;
+    *sub = ugt[j].sub; *beg = ugt[j].beg; *end = ugt[j].end; return 1;
+}
+int gsvk_present_timed(void) { return sc && sc_ptim && sc_prel; }
+/* UI thread: the display's refresh period the swapchain reports, in seconds (0: not known) */
+double gsvk_present_refresh(void) {
+    if (!sc || !sc_ptim || !pt_props) return 0;
+    VkSwapchainTimingPropertiesEXT tp = { .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_TIMING_PROPERTIES_EXT }; uint64_t cnt = 0;
+    const VkResult r = pt_props(dev, sc, &tp, &cnt);
+    return r == VK_SUCCESS && tp.refreshDuration > 0 ? tp.refreshDuration * 1e-9 : 0;
+}
+int gsvk_present_scanout(uint64_t *pid, double *t, int max) {
+    int n = pt_n < max ? pt_n : max;
+    for (int i = 0; i < n; i++) { pid[i] = pt_ring[i].pid; t[i] = pt_ring[i].t; }
+    memmove(pt_ring, pt_ring + n, (size_t)(pt_n - n) * sizeof pt_ring[0]); pt_n -= n;
+    return n;
+}
+/* UI thread: wait until present `pid` (from gsvk_present) has reached the screen: 1 done, 0 not within timeout_ns,
+   -1 not possible (no VK_KHR_present_wait, or the swapchain is gone) */
+int gsvk_present_wait(uint64_t pid, uint64_t timeout_ns) {
+    if (!can_wait || !sc || !pid || !atomic_load(&pres_ok)) return -1;
+    const VkResult r = wait_present(dev, sc, pid, timeout_ns);
+    if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) return 1;
+    if (r == VK_TIMEOUT) return 0;
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) sc_stale = 1;
+    return -1;
+}
+int gsvk_present_can_wait(void) { return can_wait; }
+int gsvk_present_gen(void) { return atomic_load(&sc_gen); }   /* any thread: swapchains made so far (a new one: the display may have changed) */
+int gsvk_present_fifo(void) { return sc && pmode == VK_PRESENT_MODE_FIFO_KHR; }   /* UI thread: the swapchain waits for the display */
 /* UI thread, before the process ends: nothing more is presented, the GPU is done with the window */
 void gsvk_present_shutdown(void) {
     if (!atomic_load(&pres_ok)) return;

@@ -27,12 +27,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "ee_runtime.h"
 #include "hle.h"
 #include "settings.h"
 
 int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph);
 int gs_display_gpu(int *slot, uint64_t *id);
+int gs_display_gpu_q(int *slot, uint64_t *id, int keep, int *ready, int *queued);
 uint64_t gs_display_tag(void);
 double host_idle;   /* seconds slept to pace the window to real time (HG_SPEEDLOG leaves them out) */
 
@@ -351,7 +353,16 @@ static void ui_settings(void) {
     const int fs = settings()->fullscreen ^ fs_flip;
     if (fs != fs_now) { fs_now = fs; SDL_SetWindowFullscreen(win, fs ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
 }
-static void ui_present(void) {
+/* the F3 overlay for the GPU path (176 x 42), or 0 when it is off */
+static const uint32_t *ov_build(void) {
+    static uint32_t ov[176 * 42];   /* 4 pixels from the picture's corner */
+    if (overlay <= 0) return 0;
+    for (int i = 0; i < 176 * 42; i++) ov[i] = 0x00181818;
+    for (int i = 0; i < 3; i++) ov_text(ov, 176, 42, 4, 4 + 12 * i, ov_line[i]);
+    return ov;
+}
+static uint64_t pres_tag;   /* the picture the window shows (gs_display_tag of the last one taken) */
+static uint64_t ui_present(void) {   /* the timer's way: the next picture (or the last again); the present's id (GPU path) */
 #ifdef HAVE_VULKAN
     if (vkmode == 1) {   /* the GPU renderer: set up yet? */
         int r = gsvk_ready();
@@ -362,21 +373,20 @@ static void ui_present(void) {
 #endif
         }
         if (r < 0) { vkmode = 0; sdl_renderer(); L("host: presenting with SDL\n"); }
-        else if (vkmode == 1) { int s; uint64_t id; while (gs_display_gpu(&s, &id)) gsvk_pic_release(s); return; }   /* (drops the early pictures) */
+        else if (vkmode == 1) { int s; uint64_t id; while (gs_display_gpu(&s, &id)) gsvk_pic_release(s); return 0; }   /* (drops the early pictures) */
     }
     if (vkmode == 2) {
         int s; uint64_t id = 0;
         if (!gs_display_gpu(&s, &id)) s = -1;   /* none new: the last one again */
-        static uint32_t ov[176 * 42];   /* the F3 overlay, 4 pixels from the picture's corner */
-        if (overlay > 0) { for (int i = 0; i < 176 * 42; i++) ov[i] = 0x00181818; for (int i = 0; i < 3; i++) ov_text(ov, 176, 42, 4, 4 + 12 * i, ov_line[i]); }
-        gsvk_present(s, id, overlay > 0 ? ov : 0);
-        return;
+        else pres_tag = gs_display_tag();
+        return gsvk_present(s, id, ov_build(), 0);
     }
 #endif
     int w, h;
-    if (!frame && !(frame = malloc((size_t)4096 * 4096 * 4))) return;
-    if (!ren) return;
-    if (!gs_display(frame, 4096, 4096, &w, &h)) { SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren); SDL_RenderPresent(ren); return; }
+    if (!frame && !(frame = malloc((size_t)4096 * 4096 * 4))) return 0;
+    if (!ren) return 0;
+    if (!gs_display(frame, 4096, 4096, &w, &h)) { SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren); SDL_RenderPresent(ren); return 0; }
+    pres_tag = gs_display_tag();
     if (!tex || w != tex_w || h != tex_h) {
         if (tex) SDL_DestroyTexture(tex);
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XBGR8888, SDL_TEXTUREACCESS_STREAMING, w, h); tex_w = w; tex_h = h;
@@ -385,21 +395,188 @@ static void ui_present(void) {
     ov_paint(frame, w, h);
     SDL_UpdateTexture(tex, 0, frame, w * 4);
     SDL_RenderClear(ren); SDL_RenderCopy(ren, tex, 0, 0); SDL_RenderPresent(ren);
+    return 0;
 }
-/* HG_PRESENTLOG=S: the time and picture (VBlank, sub-picture, in-between) of 600 presents from S seconds on, to check
-   the pacing (host log) */
+
+/* ================================================================== pacing (docs/frame-timing.md, "Pacing the window")
+   Two ways to time the window, by the vsync setting:
+   - Display-locked (vsync "on", the default with the GPU renderer): the swapchain is FIFO and the UI thread presents
+     at every refresh of the display, each time waiting (VK_KHR_present_wait) until the present has reached the
+     screen, so the display is the clock. Its refresh period is measured from those times. When the refresh rate is
+     within 0.5 % of a whole multiple N of 59.94 Hz (60, 120, 180, 240 Hz...), a new picture is taken every N
+     refreshes (N/2 at 120 fps) and repeated in between, so every picture is held exactly N refreshes; and the game
+     thread's emulated VBlanks follow those ticks (host_vblank), so emulation runs at refresh / N (at 120.00 Hz: 60.00
+     VBlanks a second instead of 59.94, 0.1 % faster; the sound's resampler absorbs it, host_audio_push). A slow
+     controller keeps the picture queue short: a picture not ready when its refresh comes (it is then repeated) makes
+     the game run a quarter VBlank earlier from then on; two ready at every take for 10 s, a quarter VBlank later.
+     Other rates (144, 165 Hz) have no whole multiple: the game keeps its own 59.94 Hz clock and each refresh shows
+     the picture that clock says is due, so the holds are as even as the rate allows (144 Hz: 2,3,2,3,2...).
+     If the present times turn irregular (more than 10 % of the intervals off by a quarter), the lock is let go the
+     same way until they settle.
+   - Timer (vsync "mailbox", the exact 59.94 Hz, or "off"): the UI thread presents on its own 59.94 Hz clock (mailbox
+     or immediate) and the game thread keeps emulated time at 59.94 Hz of the host clock. On a 120 Hz screen a
+     picture then lands on 1 or 3 refreshes whenever the two clocks' jitter crosses a refresh.
+   HG_PRESENTLOG=S[:N]: N presents (default 600) from S seconds on are logged ("PRESENT" after the call, and with
+   VK_KHR_present_wait "SHOWN": the time it reached the screen, new or repeated, and for a new picture the time since
+   the game thread began its VBlank, "lat"); tools/verify/pacing.py makes the histograms. */
+static SDL_SpinLock lk_lock;
+static int lk_on; static uint64_t lk_n; static double lk_t, lk_per = 1 / 59.94, lk_phase;   /* under lk_lock: ticks, the last one's time, seconds per tick, phase (ticks) */
+static volatile uint64_t vb_last;   /* the game thread's VBlank */
+static double vb_wall[1024];   /* host_now() when the game thread began each VBlank (the picture delay in the log) */
+static int plog = -1; static double plog_from, t_ui0;
+static void lock_set(int on, uint64_t n, double t, double per, double ph) {
+    SDL_AtomicLock(&lk_lock); lk_on = on; if (on) { lk_n = n; lk_t = t; lk_per = per; lk_phase = ph; } SDL_AtomicUnlock(&lk_lock);
+}
+static void plog_line(const char *what, double t, uint64_t tag, const char *kind) {   /* HG_PRESENTLOG */
+    if (plog <= 0 || t - t_ui0 < plog_from) return;
+    plog--;
+    char lat[32] = "";
+    if (kind && !strcmp(kind, "new") && vb_wall[(tag >> 2) & 1023] > 0) snprintf(lat, sizeof lat, " lat %.1f", (t - vb_wall[(tag >> 2) & 1023]) * 1000);
+    L("%s %.3f ms vb %llu.%d%s%s%s%s\n", what, t * 1000.0, (unsigned long long)(tag >> 2), (int)(tag >> 1 & 1), tag & 1 ? " i" : "", kind ? " " : "", kind ? kind : "", lat);
+}
+#ifdef HAVE_VULKAN
+/* the picture of each present (by id), for the log; scanout times (VK_EXT_present_timing) logged as "SCAN" */
+static uint64_t ptag[256]; static uint8_t pnew[256];
+static void note_present(uint64_t pid, uint64_t tag, int isnew) { if (pid) { ptag[pid & 255] = tag; pnew[pid & 255] = (uint8_t)isnew; } }
+static void log_scanouts(void) {
+    uint64_t id[64]; double t[64]; const int n = gsvk_present_scanout(id, t, 64);
+    for (int i = 0; i < n; i++) if (plog > 0) plog_line("SCAN", t[i], ptag[id[i] & 255], pnew[id[i] & 255] ? "new" : "rep");
+}
+/* The refresh period from the times presents reached the screen: each interval is a whole number of refreshes (one,
+   unless a refresh was missed), so the period is the time over the refreshes counted. The single intervals jitter
+   (in a window, where the compositor shows them, +-1.5 ms), the sum over 10 s does not. */
+enum { NIVL = 1200 };
+static double period_of(const double *v, int n, double guess, int *irregular) {
+    double t = 0, k = 0; int bad = 0;
+    for (int i = 0; i < n; i++) { double r = v[i] / guess; const double kk = r < 1.5 ? 1 : (double)(int)(r + 0.5); t += v[i]; k += kk; if (kk > 1 || r < 0.6) bad++; }
+    *irregular = bad * 50 > n;   /* more than 2 % missed refreshes or doubled presents */
+    return k > 0 ? t / k : guess;
+}
+/* one refresh of the display-locked way (vsync on): returns 0 if the window cannot be presented this way now */
+static int ui_refresh(int x2) {
+    static int gen = -1, N, hold, locked, nivl, ivl_i, irregular, took_last, depth = -1;
+    static double rp, ivl[NIVL], t_last, sched, win_t0, calm_until, ph, q_rd, q_qd, q_n; static uint64_t rc, ticks, miss_win, take_win, misses;
+    static int minrd_win = 99;
+    static int timed_ok = -1; static double slack;
+    if (depth < 0) { depth = getenv("HG_PRESENT_DEPTH") ? atoi(getenv("HG_PRESENT_DEPTH")) : 1; if (depth < 1) depth = 1; if (depth > 3) depth = 3; }
+    if (timed_ok < 0) { timed_ok = getenv("HG_PRESENT_TIMED") && atoi(getenv("HG_PRESENT_TIMED"));   /* (opt-in: not yet measured long enough) */ slack = (getenv("HG_PRESENT_SLACK") ? atof(getenv("HG_PRESENT_SLACK")) : 10.0) / 1000; }
+    const int m = x2 ? 2 : 1;
+    /* Timed (VK_EXT_present_timing, relative to the previous present): each picture is presented once, to be shown
+       exactly `hold` refreshes after the one before it; it is taken `slack` before that (HG_PRESENT_SLACK, 10 ms), so
+       the window does not present at every refresh. HG_PRESENT_TIMED=1 turns it on: so far it was measured for a
+       minute only (1 picture in 323 held 3 refreshes, like the present-every-refresh way's 1 in 300). */
+    const int timed = locked && timed_ok && gsvk_present_timed() && gen == gsvk_present_gen();
+    if (timed && t_last > 0) {
+        const double due = t_last + hold * rp - slack;
+        for (double tn = host_now(); tn < due; tn = host_now()) { if (due - tn > 0.002) SDL_Delay((Uint32)((due - tn - 0.0015) * 1000)); }
+    }
+    const double now = host_now();
+    if (gsvk_present_gen() != gen) {   /* a new swapchain (start, resize, full screen, another display): measure again */
+        gen = gsvk_present_gen(); nivl = ivl_i = 0; t_last = 0; locked = 0; rc = 0; sched = now; irregular = 0;
+        SDL_DisplayMode dm; const int d = SDL_GetWindowDisplayIndex(win);
+        rp = 1.0 / 60; if (d >= 0 && !SDL_GetDesktopDisplayMode(d, &dm) && dm.refresh_rate > 0) rp = 1.0 / dm.refresh_rate;
+        lock_set(0, 0, 0, 0, 0);
+    }
+    /* take the next picture? */
+    int adv;
+    if (timed) adv = 1;
+    else if (locked) adv = rc % (uint64_t)hold == 0;
+    else { adv = now + rp >= sched - rp / 2; if (adv) { sched += 1.0 / (59.94 * m); if (now > sched + 0.1) sched = now; } }
+    int s = -1, rd = 0, qd = 0; uint64_t id = 0, tag = pres_tag; const char *kind = "rep";
+    if (adv) {
+        if (gs_display_gpu_q(&s, &id, locked ? 4 : 0, &rd, &qd)) { tag = pres_tag = gs_display_tag(); kind = "new"; }
+        else {
+            s = -1;
+            if (locked && (qd > 0 || took_last)) {   /* a picture was due and is not ready: shown again (a stutter); the game runs earlier */
+                misses++; miss_win++; ph += 0.25; if (ph > 3) ph = 3; calm_until = now + 20;
+                static int nl; if (nl++ < 50) L("host: VB tick %llu: no picture ready (%d waiting): shown again; game phase now %.2f VBlanks earlier\n", (unsigned long long)ticks, qd, ph);
+            }
+        }
+        took_last = s >= 0;
+        if (locked && s >= 0) { take_win++; if (rd < minrd_win) minrd_win = rd; q_rd += rd; q_qd += qd; q_n++; }
+    }
+    if (locked && rc % (uint64_t)N == 0) {   /* a display VBlank: the game thread's tick */
+        ticks++; lock_set(1, ticks, now, rp * N, ph);
+        {   /* every 10 s: the lock's state (host log) */
+            static double t0; static uint64_t k0, m0;
+            if (!t0 || now < t0) { t0 = now; k0 = ticks; m0 = misses; }
+            else if (now - t0 >= 10) {
+                L("host pacing: locked at %.3f Hz / %d, %.3f ticks a second, %llu not ready, phase %.2f, game at VBlank %llu of tick %llu; at a take %.2f ready of %.2f waiting\n", 1 / rp, N,
+                  (double)(ticks - k0) / (now - t0), (unsigned long long)(misses - m0), ph, (unsigned long long)vb_last, (unsigned long long)ticks, q_n ? q_rd / q_n : 0, q_n ? q_qd / q_n : 0);
+                t0 = now; k0 = ticks; m0 = misses; q_rd = q_qd = q_n = 0;
+            }
+        }
+        if (now - win_t0 >= 10) {   /* two pictures ready at every take for 10 s: the game a quarter VBlank later */
+            if (win_t0 > 0 && !miss_win && take_win > 300 && minrd_win >= 2 && now > calm_until && ph > -3) {
+                ph -= 0.25; static int nl; if (nl++ < 50) L("host: two pictures ready at every take for 10 s: game phase now %.2f VBlanks\n", ph);
+            }
+            win_t0 = now; miss_win = take_win = 0; minrd_win = 99;
+        }
+    }
+    const double t_pc = host_now();
+    const uint64_t pid = gsvk_present(s, id, ov_build(), timed ? (uint64_t)(hold * rp * 1e9 + 0.5) : 0);
+    const double t_pr = host_now();
+    if (!pid) { if (s >= 0) { } SDL_Delay(8); t_last = 0; lock_set(0, 0, 0, 0, 0); locked = 0; return 1; }   /* (minimized, the swapchain being made again) */
+    note_present(pid, tag, kind[0] == 'n');
+    if (plog > 0) plog_line("PRESENT", host_now(), tag, 0);
+    /* wait until the present `depth - 1` before this one is on the screen: the display paces this loop */
+    log_scanouts();
+    const uint64_t wp = timed ? pid : pid > (uint64_t)(depth - 1) ? pid - (uint64_t)(depth - 1) : 0;
+    const int w = wp ? gsvk_present_wait(wp, 100000000ull) : -1;
+    const double t = host_now();
+    const int k = timed ? hold : 1;   /* refreshes this present stands for */
+    rc += (uint64_t)k;
+    if (w == 1) {
+        if (plog > 0) plog_line("SHOWN", t, ptag[wp & 255], pnew[wp & 255] ? "new" : "rep");
+        static int dbg = -1; if (dbg < 0) dbg = getenv("HG_PACEDBG") ? atoi(getenv("HG_PACEDBG")) : 0;
+        {   /* HG_PACEDBG: the GPU timing of a late present, once it is known */
+            static uint64_t lp[16]; static double lt[16]; static int nlp;
+            if (dbg && t_last > 0 && t - t_last > (k + 0.5) * rp && nlp < 16) { lp[nlp] = wp; lt[nlp] = t - t_last; nlp++; }
+            for (int i = 0; i < nlp; i++) { double sb, bg, en; extern int gsvk_present_gpu(uint64_t, double *, double *, double *);
+                if (gsvk_present_gpu(lp[i], &sb, &bg, &en)) { static int ng; if (ng++ < 200) L("host pacedbg: present %llu (interval %.2f ms): blit began %.2f ms after its submit, took %.3f ms\n",
+                    (unsigned long long)lp[i], lt[i] * 1e3, (bg - sb) * 1e3, (en - bg) * 1e3); lp[i] = lp[--nlp]; lt[i] = lt[nlp]; i--; }
+                else if (lp[i] + 16 < wp) { lp[i] = lp[--nlp]; lt[i] = lt[nlp]; i--; } }
+            /* a reference: every 500th present's numbers */
+            static uint64_t cnt; if (dbg && ++cnt % 500 == 0 && nlp < 16) { lp[nlp] = wp; lt[nlp] = t - t_last; nlp++; }
+        }
+        if (dbg && t_last > 0 && t - t_last > (k + 0.5) * rp) { static int nd; if (nd++ < 200)
+          { extern double gsvk_present_ms[5];
+            L("host pacedbg: interval %.2f ms: before the present %.2f (events, take), present call %.2f (fence %.2f acquire %.2f record %.2f submit %.2f present %.2f), wait %.2f; since the last done %.2f at its loop start\n",
+              (t - t_last) * 1e3, (t_pc - now) * 1e3, (t_pr - t_pc) * 1e3, gsvk_present_ms[0], gsvk_present_ms[1], gsvk_present_ms[2], gsvk_present_ms[3], gsvk_present_ms[4], (t - t_pr) * 1e3, (now - t_last) * 1e3); } }
+        if (t_last > 0) { ivl[ivl_i] = (t - t_last) / k; ivl_i = (ivl_i + 1) % NIVL; if (nivl < NIVL) nivl++; }
+        t_last = t;
+    } else t_last = 0;   /* (no present wait: FIFO's blocking paces the loop; the period stays the display mode's) */
+    if (nivl >= 120 && rc % 120 == 0) {   /* the refresh period, and whether it locks (with a margin once locked) */
+        int irr; double r = period_of(ivl, nivl, rp, &irr);
+        const double rd = gsvk_present_refresh(); if (rd > 0 && fabs(rd / r - 1) < 0.02) r = rd;   /* the period the swapchain reports, when there is one */
+        rp = r;
+        const double hz = 1.0 / r; const int n = (int)(hz / 59.94 + 0.5);
+        const int ok = !irr && n >= 1 && fabs(hz / n / 59.94 - 1) <= (locked ? 0.006 : 0.005) && n % m == 0 && !(getenv("HG_LOCK") && !atoi(getenv("HG_LOCK")));
+        if (ok != locked || (ok && n != N) || irr != irregular) {
+            if (ok) L("host: display %.3f Hz: locked, each picture held %d refresh%s, emulation at %.3f VBlanks a second\n", hz, n / m, n / m > 1 ? "es" : "", hz / n);
+            else if (irr) L("host: display %.3f Hz: refreshes missed or present times irregular: not locked\n", hz);
+            else L("host: display %.3f Hz: not a whole multiple of 59.94 Hz%s: pictures at 59.94 Hz, each on the refresh nearest its time\n", hz, n % m ? " for this frame rate" : "");
+            locked = ok; N = n; hold = n / m; irregular = irr; rc = 0; sched = t;
+            if (!locked) lock_set(0, 0, 0, 0, 0);
+        }
+    }
+    return 1;
+}
+#endif
 static int ui_main(void *arg) {
     (void)arg;
     const int ok = host_init();
+    {   /* the window's thread runs ahead of the game's (ABOVE_NORMAL): it has a deadline at every refresh */
+        const char *e = getenv("HG_UIPRIO"); const int p = e ? atoi(e) : 1;
+        if (p > 0) SDL_SetThreadPriority(p >= 2 ? SDL_THREAD_PRIORITY_TIME_CRITICAL : SDL_THREAD_PRIORITY_HIGH);
+    }
     SDL_AtomicSet(&ui_ready, ok ? 1 : -1);
     if (!ok) return 0;
     extern int gs_interp_now(void);
     int x2 = settings_ui_display_rate_x2();   /* 120 fps: two presents per VBlank (then from what the GS does) */
     double rate = 59.94 * (x2 ? 2 : 1), period = 1.0 / rate;
-    const Uint64 f = SDL_GetPerformanceFrequency();
-    double next = (double)SDL_GetPerformanceCounter() / f;
-    static int plog = -1; if (plog < 0) plog = getenv("HG_PRESENTLOG") ? 600 : 0;
-    const double plog_from = getenv("HG_PRESENTLOG") ? atof(getenv("HG_PRESENTLOG")) : 0, t_start = next;
+    double next = host_now();
+    { const char *e = getenv("HG_PRESENTLOG"); plog = e ? 600 : 0; plog_from = e ? atof(e) : 0; if (e && strchr(e, ':')) plog = atoi(strchr(e, ':') + 1); t_ui0 = next; }
     L("host: presenting at %.2f Hz\n", rate);
     for (;;) {
         if (SDL_AtomicGet(&ui_stop)) {   /* host_shutdown(): the GPU done with the window before it goes */
@@ -410,20 +587,30 @@ static int ui_main(void *arg) {
             SDL_DestroyWindow(win); SDL_AtomicSet(&ui_stopped, 1); return 0;
         }
         ui_settings(); ui_events(); ui_input(); ui_rumble(0);
-        ui_present();
 #ifdef HAVE_VULKAN
         if (gsvk_ready() > 0 && (gs_interp_now() >= 2) != x2) {   /* (once the GPU renderer runs) */
             x2 = gs_interp_now() >= 2; rate = 59.94 * (x2 ? 2 : 1); period = 1.0 / rate;
             L("host: presenting at %.2f Hz\n", rate);
         }
+        if (vkmode == 2 && ui_vsync == VSYNC_ON && ui_refresh(x2)) { next = host_now(); continue; }
+        lock_set(0, 0, 0, 0, 0);
 #endif
-        if (plog > 0 && (double)SDL_GetPerformanceCounter() / f - t_start >= plog_from) { plog--; const uint64_t tg = gs_display_tag();
-            L("PRESENT %.3f ms vb %llu.%d%s\n", (double)SDL_GetPerformanceCounter() / f * 1000.0, (unsigned long long)(tg >> 2), (int)(tg >> 1 & 1), tg & 1 ? " i" : ""); }
+        const uint64_t pid = ui_present();
+        if (plog > 0) {
+            const double tp = host_now(); const uint64_t tag = pres_tag;
+            plog_line("PRESENT", tp, tag, 0);
+#ifdef HAVE_VULKAN
+            static uint64_t last; note_present(pid, tag, tag != last); last = tag;
+            if (pid && gsvk_present_wait(pid, 20000000ull) == 1) plog_line("SHOWN", host_now(), tag, ptag[pid & 255] == tag && pnew[pid & 255] ? "new" : "rep");
+            log_scanouts();
+#endif
+        }
+        (void)pid;
         next += period;
-        double now = (double)SDL_GetPerformanceCounter() / f;
+        double now = host_now();
         if (now > next + 0.1) next = now;   /* far behind (a stall): start again from here */
         if (next - now > 0.002) SDL_Delay((Uint32)((next - now - 0.0015) * 1000));
-        while ((double)SDL_GetPerformanceCounter() / f < next) { }   /* the last moment, precisely */
+        while (host_now() < next) { }   /* the last moment, precisely */
     }
     return 0;
 }
@@ -438,15 +625,36 @@ void host_vblank(uint64_t vb) {
         }
     }
     if (!active) return;
-    {   /* keep emulated time at real-time pace while a window is open (emulated VBlanks are 1/59.94 s) */
-        extern int timing_wall; static Uint64 t0; static uint64_t vb0;
+    {   /* keep emulated time at real-time pace while a window is open: VBlanks follow the display's ticks when the
+           window is display-locked (see "pacing" above), else 1/59.94 s of the host clock */
+        extern int timing_wall; static Uint64 t0; static uint64_t vb0; static int anch; static uint64_t vb_a; static double n_a;
         if (!timing_wall) {
-            Uint64 now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
-            if (!t0 || vb < vb0) { t0 = now; vb0 = vb; }
-            double due = (double)(vb - vb0) / 59.94, el = (double)(now - t0) / f;
-            if (due > el + 0.002) { const double s0 = host_now(); SDL_Delay((Uint32)((due - el) * 1000)); host_idle += host_now() - s0; }
-            else if (el - due > 0.25) { t0 = now; vb0 = vb; }     /* running slow: do not try to catch up */
+            int on; uint64_t n; double tt, per, ph;
+            SDL_AtomicLock(&lk_lock); on = lk_on; n = lk_n; tt = lk_t; per = lk_per; ph = lk_phase; SDL_AtomicUnlock(&lk_lock);
+            double now = host_now();
+            if (on && per > 0 && now - tt < 0.1) {   /* the tick count, extended to now: D; VBlank vb is due at D = n_a + (vb - vb_a) - phase */
+                double D = (double)n + (now - tt) / per;
+                if (!anch || vb < vb_a) { anch = 1; vb_a = vb; n_a = D + ph; }
+                double wait = (n_a + (double)(vb - vb_a) - ph - D) * per;
+                if (wait < -0.25) { vb_a = vb; n_a = D + ph; }   /* running slow: do not try to catch up */
+                else if (wait > 0.001) {
+                    const double s0 = now;
+                    if (wait > 0.1) wait = 0.1;
+                    if (wait > 0.0015) SDL_Delay((Uint32)((wait - 0.001) * 1000));
+                    while (host_now() < s0 + wait) { }
+                    host_idle += host_now() - s0;
+                }
+                t0 = 0;
+            } else {
+                anch = 0;
+                Uint64 nowc = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
+                if (!t0 || vb < vb0) { t0 = nowc; vb0 = vb; }
+                double due = (double)(vb - vb0) / 59.94, el = (double)(nowc - t0) / f;
+                if (due > el + 0.002) { const double s0 = host_now(); SDL_Delay((Uint32)((due - el) * 1000)); host_idle += host_now() - s0; }
+                else if (el - due > 0.25) { t0 = nowc; vb0 = vb; }     /* running slow: do not try to catch up */
+            }
         }
+        vb_wall[vb & 1023] = host_now(); vb_last = vb;
     }
     if (SDL_AtomicGet(&ui_quit)) stop("window closed");
     const uint32_t an = (uint32_t)SDL_AtomicGet(&in_an); const uint8_t a4[4] = { (uint8_t)an, (uint8_t)(an >> 8), (uint8_t)(an >> 16), (uint8_t)(an >> 24) };
@@ -464,7 +672,12 @@ void host_shutdown(void) {
    (and starts again after an underrun) once 120 ms are queued, which also absorbs a slow second; beyond 300 ms,
    chunks are dropped. When the ring runs dry the last sample fades to silence over 5 ms and playback fades back in
    over 5 ms when it resumes, so an underrun is a short gap, not a click (the old queue stopped and started the
-   device on a sample: audible beeps). Statistics are logged every 10 s. */
+   device on a sample: audible beeps). Statistics are logged every 10 s.
+   The game's sound comes at 48 kHz of emulated time; display-locked, emulated time runs at the display's pace
+   (0.1 % fast at 120.00 Hz), and even at 59.94 Hz the host clock and the sound card's differ a little. So the samples
+   are resampled on their way into the ring (a 32-tap Kaiser-windowed sinc, 256 phases): the step is 1 + 5 % per
+   second of sound the ring holds beyond the 120 ms cushion (averaged over about a second), at most +-0.6 %, which
+   keeps the ring centred (0.1 % fast settles 20 ms above it) instead of drifting into drops or underruns. */
 enum { AR_CAP = 48000 / 2, AR_START = 48000 * 12 / 100, AR_MAX = 48000 * 3 / 10, AR_FADE = 240 };   /* frames */
 static int16_t ar_buf[AR_CAP * 2]; static int ar_r;   /* ring; read position (audio thread); ar_n: frames queued */
 static int ar_playing, ar_fade; static float ar_gain; static float ar_last[2]; static uint64_t ar_underruns;   /* audio thread */
@@ -484,6 +697,44 @@ static void SDLCALL audio_cb(void *ud, Uint8 *stream, int len) {   /* SDL's audi
         }
     }
 }
+enum { RS_TAPS = 32, RS_PH = 256, RS_BUF = 4096 };
+static float rs_tab[RS_PH + 1][RS_TAPS];   /* tap k of phase p: the sinc at k - 15 - p / RS_PH */
+static float rs_in[2][RS_BUF + RS_TAPS]; static int rs_n = RS_TAPS / 2 - 1; static double rs_pos = RS_TAPS / 2 - 1;   /* input kept; the next output's place in it */
+static double rs_step = 1, rs_lvl = -1, rs_sum; static uint64_t rs_cnt;   /* input frames per output frame; ring level, smoothed (frames) */
+static double bessel_i0(double x) { double s = 1, t = 1; for (int k = 1; k < 30; k++) { t *= (x / (2 * k)) * (x / (2 * k)); s += t; } return s; }
+static void rs_init(void) {
+    const double fc = 0.90, beta = 7.0;   /* cutoff (of the Nyquist frequency), Kaiser window */
+    for (int p = 0; p <= RS_PH; p++) {
+        double sum = 0;
+        for (int k = 0; k < RS_TAPS; k++) {
+            const double x = k - (RS_TAPS / 2 - 1) - (double)p / RS_PH, r = x / (RS_TAPS / 2);
+            const double sinc = fabs(x) < 1e-9 ? fc : sin(M_PI * fc * x) / (M_PI * x);
+            const double w = fabs(r) >= 1 ? 0 : bessel_i0(beta * sqrt(1 - r * r)) / bessel_i0(beta);
+            rs_tab[p][k] = (float)(sinc * w); sum += sinc * w;
+        }
+        for (int k = 0; k < RS_TAPS; k++) rs_tab[p][k] = (float)(rs_tab[p][k] / sum);
+    }
+}
+/* the input frames resampled by rs_step into out (at most max frames); returns the frames written */
+static int rs_run(const int16_t *s, int frames, int16_t *out, int max) {
+    int no = 0;
+    while (frames > 0) {
+        const int take = frames < RS_BUF - rs_n ? frames : RS_BUF - rs_n;
+        for (int i = 0; i < take; i++) { rs_in[0][rs_n + i] = s[i * 2]; rs_in[1][rs_n + i] = s[i * 2 + 1]; }
+        rs_n += take; s += take * 2; frames -= take;
+        while ((int)rs_pos + RS_TAPS / 2 < rs_n && no < max) {
+            const int i = (int)rs_pos; const double ph = (rs_pos - i) * RS_PH; const int p = (int)ph; const float a = (float)(ph - p);
+            const float *t0 = rs_tab[p], *t1 = rs_tab[p + 1], *x0 = &rs_in[0][i - (RS_TAPS / 2 - 1)], *x1 = &rs_in[1][i - (RS_TAPS / 2 - 1)];
+            float l = 0, r = 0;
+            for (int k = 0; k < RS_TAPS; k++) { const float c = t0[k] + a * (t1[k] - t0[k]); l += c * x0[k]; r += c * x1[k]; }
+            out[no * 2] = (int16_t)(l > 32767 ? 32767 : l < -32768 ? -32768 : l); out[no * 2 + 1] = (int16_t)(r > 32767 ? 32767 : r < -32768 ? -32768 : r); no++;
+            rs_pos += rs_step;
+        }
+        const int drop = (int)rs_pos - (RS_TAPS / 2 - 1);   /* keep what the next outputs still read */
+        if (drop > 0) { memmove(rs_in[0], rs_in[0] + drop, (size_t)(rs_n - drop) * 4); memmove(rs_in[1], rs_in[1] + drop, (size_t)(rs_n - drop) * 4); rs_n -= drop; rs_pos -= drop; }
+    }
+    return no;
+}
 void host_audio_push(const int16_t *s, int frames) {
     if (!audio_state) {
         const char *a = getenv("HG_AUDIO");
@@ -493,11 +744,20 @@ void host_audio_push(const int16_t *s, int frames) {
         adev = SDL_OpenAudioDevice(0, 0, &want, &got, 0);
         if (!adev) { L("host: no audio device: %s\n", SDL_GetError()); audio_state = -1; return; }
         SDL_PauseAudioDevice(adev, 0);   /* silence until the cushion is there */
-        audio_state = 1; L("host: audio open (48 kHz stereo)\n");
+        audio_state = 1; rs_init(); L("host: audio open (48 kHz stereo)\n");
     }
     if (audio_state < 0 || frames <= 0) return;
     static uint64_t drops; static int qmin = 1 << 30, qmax; static double tlog;
     static int mute = -1; if (mute < 0) mute = getenv("HG_AUDIO_MUTE") && atoi(getenv("HG_AUDIO_MUTE"));
+    static int16_t rsout[2 * 2 * RS_BUF];
+    {   /* the step from the ring's level (see above); resampled before the device is locked */
+        const int lv = ar_n;
+        rs_lvl = rs_lvl < 0 ? lv : rs_lvl + (lv - rs_lvl) / 60.0;
+        double st = 1 + 0.05 * (rs_lvl - AR_START) / 48000.0;
+        if (!ar_playing) st = 1;   /* (filling the cushion, or after an underrun) */
+        rs_step = st < 0.994 ? 0.994 : st > 1.006 ? 1.006 : st; rs_sum += rs_step; rs_cnt++;
+    }
+    frames = rs_run(s, frames, rsout, 2 * RS_BUF); s = rsout;
     SDL_LockAudioDevice(adev);
     const int q = ar_n; uint64_t und = ar_underruns;
     if (q < qmin) qmin = q;
@@ -513,8 +773,9 @@ void host_audio_push(const int16_t *s, int frames) {
     }
     SDL_UnlockAudioDevice(adev);
     if (host_now() - tlog > 10) {
-        if (tlog) L("host audio: queue %.0f-%.0f ms, %llu underruns, %llu dropped chunks\n", qmin == 1 << 30 ? 0 : qmin / 48.0, qmax / 48.0, (unsigned long long)und, (unsigned long long)drops);
-        tlog = host_now(); qmin = 1 << 30; qmax = 0;
+        if (tlog) L("host audio: queue %.0f-%.0f ms, %llu underruns, %llu dropped chunks, resampling %+.3f %%\n", qmin == 1 << 30 ? 0 : qmin / 48.0, qmax / 48.0,
+                    (unsigned long long)und, (unsigned long long)drops, rs_cnt ? (rs_sum / rs_cnt - 1) * 100 : 0.0);
+        tlog = host_now(); qmin = 1 << 30; qmax = 0; rs_sum = 0; rs_cnt = 0;
     }
 }
 #else

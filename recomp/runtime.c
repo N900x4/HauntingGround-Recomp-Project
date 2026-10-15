@@ -48,8 +48,10 @@ double host_now(void) {   /* QPC directly: winpthreads' clock_gettime also queri
     if (!inv) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); inv = 1.0 / (double)f.QuadPart; }
     QueryPerformanceCounter(&c); return (double)c.QuadPart * inv;
 }
+double host_qpc_seconds(uint64_t ticks) { static double inv; if (!inv) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); inv = 1.0 / (double)f.QuadPart; } return (double)ticks * inv; }
 #else
 double host_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
+double host_qpc_seconds(uint64_t ticks) { return (double)ticks * 1e-9; }
 #endif
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 static long log_bytes; static int log_capped;

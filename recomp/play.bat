@@ -16,7 +16,7 @@ rem   set HG_MOVIES=skip                 skip the movies
 rem   set HG_GSVK=1                      draw with the GPU (Vulkan; new, same picture as the software renderer)
 rem   set HG_GSVK_SCALE=5                with HG_GSVK=1: 5 times the resolution, 3200x2240, for 4K screens (2..8; up to 5 at full speed)
 rem   set HG_GSVK_INTERP=1               with HG_GSVK=1: 60 fps (in-between pictures; full speed up to SCALE=5; 2 = 120 fps, native only)
-rem   set HG_VSYNC=1                     with HG_GSVK=1: the window waits for the display (default: mailbox, no tearing; 0: immediate)
+rem   set HG_VSYNC=2                     with HG_GSVK=1: exact 59.94 Hz, mailbox (default 1: locked to the display, smooth; 0: may tear)
 rem   set HG_FULLSCREEN=1                start in full screen (hg.ini: fullscreen)
 rem   set HG_INI=off                     no hg.ini (HG_INI=path: another file)
 rem   set HG_RUMBLELOG=1                 log the game's vibration (each change of the two motors) to play.log

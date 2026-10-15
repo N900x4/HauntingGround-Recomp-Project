@@ -183,7 +183,8 @@ static void gsw_wait_seq(uint64_t seq);
 static void gsw_access(const uint64_t pages[8], int write);
 static void mark_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int x0, int y0, int x1, int y1);
 #ifdef HAVE_VULKAN
-static int vk_live; static void gsvk_live_need(const uint64_t pages[8]); static void gsvk_live_wrote(const uint64_t pages[8]);
+static int vk_live; static void gsvk_live_need_(const uint64_t pages[8], int line); static void gsvk_live_wrote(const uint64_t pages[8]);
+#define gsvk_live_need(pg) gsvk_live_need_(pg, __LINE__)   /* (read-backs are counted by the line that asked for them: the GSVK summary) */
 static void gsvk_xfer_touch(void);
 #endif
 static void *gs_sprhist_ptr; static int gs_sprhist_n;
@@ -1187,6 +1188,7 @@ static volatile uint64_t vi_skipped_pics;   /* in-between pictures left out (any
 static double vi_p_est = -1, vi_kappa = 2.0;   /* smoothed GPU ms per VBlank with interpolation; a frame's replay / B */
 static uint64_t vk_vbid[8];   /* the last submission of each VBlank (gs_vblank_exec) */
 static void vi_log_upload(uint32_t word, uint32_t n, const uint32_t *src);
+static void vi_log_upload_masked(const uint32_t *trip, uint32_t n);
 static uint64_t vk_hr_changes;   /* GPU work recorded since the upscaled picture was last composed */
 /* Pages drawn by the GPU since the CPU last wrote them (render targets). In copy k a render target's pixel t holds
    the scene at t + offset, so a primitive that textures from one reads, in copy k, at its coordinates minus the
@@ -1251,8 +1253,54 @@ static void gsvk_batch_close(void) {
     if (bad) { vkb_badb++; vkb_words += bad; static int nlog; if (nlog++ < 40)
         L("GSVKBATCH: VB %llu batch of %llu (fbp %u psm %02x): %llu words differ\n", (unsigned long long)cur_vb, (unsigned long long)vkb_curn, vkb_key[0], vkb_key[2], (unsigned long long)bad); }
 }
+/* Image data into pages the GPU drew in, which it covers only in part (a texture streamed into the area an effect pass
+   used): the CPU used to read those pages back first (a wait for all the GPU's work, about twice a VBlank). Now the
+   CPU keeps, for those pages (xm_pg), which bits the transfer wrote (xmask, from the same addressing as write_px);
+   the transferred bits go up as (word, value, mask) and the GPU merges them into its version of the pages, in every
+   copy (gsvk_upload_masked). The pages stay the GPU's. Sent before the next GPU work and before any read-back.
+   HG_GSVK_XMASK=0: the read-backs as before. */
+static uint32_t *xmask; static uint64_t xm_pg[8], vk_xm_words, vk_xm_flushes; static int xm_on, xm_dirty, xm_ok = -1;
+static int xfer_active_now(void);
+static void mask_px(uint32_t bp, uint32_t bw, int psm, int x, int y) {
+    uint32_t a;
+    switch (psm) {
+    case CT32: xmask[addr32(bp, bw, x, y)] = ~0u; break;
+    case CT24: xmask[addr32(bp, bw, x, y)] |= 0xFFFFFFu; break;
+    case CT16: a = addr16(bp, bw, x, y, blockTable16); xmask[(a >> 1) & 0xFFFFF] |= 0xFFFFu << ((a & 1) * 16); break;
+    case CT16S: a = addr16(bp, bw, x, y, blockTable16S); xmask[(a >> 1) & 0xFFFFF] |= 0xFFFFu << ((a & 1) * 16); break;
+    case T8: a = addr8(bp, bw, x, y); xmask[(a >> 2) & 0xFFFFF] |= 0xFFu << ((a & 3) * 8); break;
+    case T4: a = addr4(bp, bw, x, y); xmask[(a >> 3) & 0xFFFFF] |= 0xFu << ((a & 7) * 4); break;
+    case T8H: xmask[addr32(bp, bw, x, y)] |= 0xFF000000u; break;
+    case T4HL: xmask[addr32(bp, bw, x, y)] |= 0x0F000000u; break;
+    case T4HH: xmask[addr32(bp, bw, x, y)] |= 0xF0000000u; break;
+    case Z32: xmask[addr32z(bp, bw, x, y)] = ~0u; break;
+    case Z24: xmask[addr32z(bp, bw, x, y)] |= 0xFFFFFFu; break;
+    case Z16: case Z16S: a = addr16(bp, bw, x, y, blockTable16Z); xmask[(a >> 1) & 0xFFFFF] |= 0xFFFFu << ((a & 1) * 16); break;
+    default: xmask[addr32(bp, bw, x, y)] = ~0u;
+    }
+    xm_dirty = 1;
+}
+static void xm_flush(void) {
+    if (!xm_on) return;
+    if (xm_dirty) {
+        static uint32_t *trip; static size_t cap;
+        uint32_t n = 0;
+        for (uint32_t p = 0; p < 512; p++) if (xm_pg[p >> 6] >> (p & 63) & 1)
+            for (uint32_t w = p * 2048; w < p * 2048 + 2048; w++) if (xmask[w]) {
+                if ((size_t)(n + 1) * 3 > cap) { cap = cap ? cap * 2 : 3 * 4096; trip = realloc(trip, cap * 4); }
+                trip[n * 3] = w; trip[n * 3 + 1] = vm[w] & xmask[w]; trip[n * 3 + 2] = xmask[w]; xmask[w] = 0; n++;
+            }
+        if (n) {
+            gsvk_batch_close(); gsvk_upload_masked(trip, n); vk_xm_words += n; vk_xm_flushes++; vk_hr_changes++;
+            if (vk_interp) vi_log_upload_masked(trip, n);
+        }
+        xm_dirty = 0;
+    }
+    if (!xfer_active_now()) { xm_on = 0; memset(xm_pg, 0, sizeof xm_pg); }
+}
 /* live: pages the CPU wrote go up (before any GPU work that may use them) */
 static void gsvk_live_upload(void) {
+    xm_flush();
     int any = 0; for (int i = 0; i < 8; i++) any |= pg_cpu[i] != 0;
     if (!any) return;
     gsvk_batch_close();
@@ -1266,11 +1314,14 @@ static void gsvk_live_upload(void) {
     memset(pg_cpu, 0, sizeof pg_cpu);
 }
 /* live: the CPU is about to read (or partly write) these pages: the GPU's version comes back first */
-static void gsvk_live_need(const uint64_t pages[8]) {
+static struct { int line; uint64_t n, pages; } vk_dl_by[16];
+static void gsvk_live_need_(const uint64_t pages[8], int line) {
     if (!vk_live) return;
-    uint64_t m[8]; int any = 0;
-    for (int i = 0; i < 8; i++) { m[i] = pages[i] & pg_gpu[i]; any |= m[i] != 0; }
+    if (xm_on) for (int i = 0; i < 8; i++) if (pages[i] & xm_pg[i]) { xm_flush(); break; }   /* (transferred bits the GPU has not merged yet) */
+    uint64_t m[8]; int any = 0, np = 0;
+    for (int i = 0; i < 8; i++) { m[i] = pages[i] & pg_gpu[i]; any |= m[i] != 0; np += __builtin_popcountll(m[i]); }
     if (!any) return;
+    for (int i = 0; i < 16; i++) if (vk_dl_by[i].line == line || !vk_dl_by[i].line) { vk_dl_by[i].line = line; vk_dl_by[i].n++; vk_dl_by[i].pages += (uint64_t)np; break; }
     gsvk_batch_close(); gsvk_download(m, vm); vk_downloads++;
     for (int i = 0; i < 8; i++) { pg_gpu[i] &= ~m[i]; vk_dl_pages += (uint64_t)__builtin_popcountll(m[i]); }
 }
@@ -1283,7 +1334,17 @@ static void gsvk_xfer_touch(void) {
     if (vkb_open && !vk_live) { gsvk_batch_close(); return; }
     if (!vk_live) return;
     uint64_t need[8]; for (int i = 0; i < 8; i++) need[i] = xfer_pg[i] & ~xfer_full[i];
-    gsvk_live_need(need); gsvk_live_wrote(xfer_pg);
+    if (xm_ok < 0) xm_ok = !(getenv("HG_GSVK_XMASK") && !atoi(getenv("HG_GSVK_XMASK")));
+    if (xm_ok && (xmask || (xmask = calloc(1u << 20, 4)))) {   /* the GPU's pages written in part: their bits merged on the GPU (see xm_flush) */
+        for (int i = 0; i < 8; i++) {
+            const uint64_t m = need[i] & (pg_gpu[i] | xm_pg[i]), fresh = m & ~xm_pg[i];
+            for (int b = 0; b < 64; b++) if (fresh >> b & 1) memset(xmask + (uint32_t)(i * 64 + b) * 2048, 0, 8192);
+            xm_pg[i] |= m; need[i] &= ~m; if (m) xm_on = 1;
+        }
+    }
+    gsvk_live_need(need);
+    uint64_t wr[8]; for (int i = 0; i < 8; i++) { wr[i] = xfer_pg[i] & ~xm_pg[i]; pg_rt[i] &= ~xm_pg[i]; }
+    gsvk_live_wrote(wr);
     for (int i = 0; i < 8; i++) pg_gpu[i] &= ~xfer_full[i];   /* (the GPU's version of those is dropped) */
 }
 /* the CPU draws a primitive the GPU cannot (an unknown frame format) */
@@ -1566,6 +1627,12 @@ static void vi_log_break(void) {
     L->e = vi_grow(L->e, &L->cap, L->n + 1, sizeof *L->e);
     L->e[L->n++].op = 2;
 }
+static void vi_log_upload_masked(const uint32_t *trip, uint32_t n) {   /* op 3: n (word, value, mask) */
+    VkLog *L = &vlog[vlog_i];
+    L->data = vi_grow(L->data, &L->capd, L->nd + (size_t)n * 3, 4); memcpy(L->data + L->nd, trip, (size_t)n * 12);
+    L->e = vi_grow(L->e, &L->cap, L->n + 1, sizeof *L->e);
+    VkLogEnt *e = &L->e[L->n++]; e->op = 3; e->word = 0; e->n = n; e->off = L->nd; L->nd += (size_t)n * 3;
+}
 static void vi_log_upload(uint32_t word, uint32_t n, const uint32_t *src) {
     VkLog *L = &vlog[vlog_i];
     L->data = vi_grow(L->data, &L->capd, L->nd + n, 4); memcpy(L->data + L->nd, src, (size_t)n * 4);
@@ -1773,6 +1840,7 @@ static int vi_replay(const VkLog *P, const VkLog *C, float t, int set, int need0
     for (size_t i = 0; i < C->n; i++) {
         const VkLogEnt *e = &C->e[i];
         if (e->op == 1) { gsvk_upload(e->word, e->n, C->data + e->off); continue; }
+        if (e->op == 3) { gsvk_upload_masked(C->data + e->off, e->n); continue; }
         if (e->op == 2) { gsvk_break(); continue; }
         GsVkSprite s = e->s;
         const int tri = e->prim >= 3 && e->prim <= 5;
@@ -1883,7 +1951,12 @@ static void vi_vblank(uint64_t vb, const uint8_t *priv) {
     if (vi_adapt && cadence) {   /* adaptive: this frame's in-between picture(s) left out? (vi_adapt_tick) */
         vi_elig++;
         if (vi_adapt_skip || vi_nosnap) { skip = 1; vi_skip_budget++; }
-        else if (vk_have_snap && vb >= 1 && vk_vbid[(vb - 1) & 7] && !gsvk_poll(vk_vbid[(vb - 1) & 7])) { skip = 1; vi_skip_behind++; }
+        else {   /* behind: the GPU has not finished what was submitted up to `behind` VBlanks ago (HG_VI_BEHIND, default 2:
+                    a GPU working one VBlank behind the GS thread is the normal pipeline and keeps up; 1, the old rule,
+                    left out about one in-between picture in 15 at x4 in the user's rooms with the GPU at 9 of 16.7 ms) */
+            static int behind = -1; if (behind < 0) { behind = getenv("HG_VI_BEHIND") ? atoi(getenv("HG_VI_BEHIND")) : 2; if (behind < 1) behind = 1; if (behind > 6) behind = 6; }
+            if (vk_have_snap && vb >= (uint64_t)behind && vk_vbid[(vb - behind) & 7] && !gsvk_poll(vk_vbid[(vb - behind) & 7])) { skip = 1; vi_skip_behind++; }
+        }
         if (skip) { vi_skipped_pics += vk_interp >= 2 ? 3 : 1; for (int j = 0; j < 3; j++) { vi_drop(j); vi_pw[j] = 0; } }
     }
     if (skip) { }   /* the real picture is shown (vi_show = 0) */
@@ -2207,6 +2280,9 @@ static uint64_t st_xfer_psm[64];
 static void xfer_put_px(uint32_t v) {
     if (xfer.y >= xfer.h) return;
     write_px(xfer.bp, xfer.bw, xfer.psm, xfer.sx + xfer.x, xfer.sy + xfer.y, v);
+#ifdef HAVE_VULKAN
+    if (xm_on) mask_px(xfer.bp, xfer.bw, xfer.psm, xfer.sx + xfer.x, xfer.sy + xfer.y);
+#endif
     if (++xfer.x >= xfer.w) { xfer.x = 0; xfer.y++; }
 }
 static void hwreg_write(uint64_t v) {
@@ -2238,6 +2314,9 @@ static void xfer_qword(const uint64_t q[2]) {
 #endif
     const int X = xfer.sx + xfer.x, Y = xfer.sy + xfer.y;
     const uint8_t *b = (const uint8_t *)q;
+#ifdef HAVE_VULKAN
+    if (xm_on) { hwreg_write(q[0]); hwreg_write(q[1]); return; }   /* (pixel by pixel: the written bits are recorded) */
+#endif
     if (xfer.y < xfer.h) switch (xfer.psm) {
     case T8:
         if (!(X & 15) && xfer.x + 16 <= xfer.w) {
@@ -2276,7 +2355,10 @@ rowend:
     if (xfer.x >= xfer.w) { xfer.x = 0; xfer.y++; }
     if (xfer.y >= xfer.h) xfer.active = 0;
 }
-static int xfer_busy(void) { return xfer.active; }   /* draws during a transfer are drawn serially (GS workers) */
+static int xfer_busy(void) { return xfer.active; }
+#ifdef HAVE_VULKAN
+static int xfer_active_now(void) { return xfer.active; }
+#endif   /* draws during a transfer are drawn serially (GS workers) */
 static void trxdir_write(uint64_t v) {
     int xdir = v & 3;
     if (xdir == 0) {
@@ -2656,17 +2738,21 @@ static void fq_push_gpu(int slot, uint64_t id, int w, int h) {   /* a picture im
     fq[i].slot = slot; fq[i].id = id; fq[i].w = w; fq[i].h = h; fq[i].tag = fq_tag; fq_n++;
     pthread_mutex_unlock(&front_mx);
 }
-/* UI thread, presenting from video memory: the next picture image in order (1), or none new (0) */
-int gs_display_gpu(int *slot, uint64_t *id) {
+/* UI thread, presenting from video memory: the next picture image in order (1), or none new (0). keep: pictures
+   allowed to wait beyond it (older ones are dropped unseen to keep the delay short; 0 = the default for the frame
+   rate). *ready / *queued (may be 0): pictures waiting before this call whose GPU work is done / all of them. */
+int gs_display_gpu_q(int *slot, uint64_t *id, int keep, int *ready, int *queued) {
     want_front = 1;
     int got = 0;
     pthread_mutex_lock(&front_mx);
 #ifdef HAVE_VULKAN
-    fq_keep = vk_interp >= 2 ? 5 : 2;
+    fq_keep = keep > 0 ? keep : vk_interp >= 2 ? 5 : 2;
 #endif
     while (fq_n > fq_keep) fq_drop();   /* keep the delay short */
 #ifdef HAVE_VULKAN
     const uint64_t done = gsvk_done();
+    if (queued) *queued = fq_n;
+    if (ready) { int r = 0; for (int j = 0; j < fq_n; j++) { const int i = (fq_head + j) % FQ; if (fq[i].slot >= 0 && fq[i].id <= done) r++; } *ready = r; }
     while (fq_n && !got) {
         const int i = fq_head;
         if (fq[i].slot < 0) { fq_drop(); continue; }   /* pixels from before the window was presented from video memory */
@@ -2677,6 +2763,7 @@ int gs_display_gpu(int *slot, uint64_t *id) {
     pthread_mutex_unlock(&front_mx);
     return got;
 }
+int gs_display_gpu(int *slot, uint64_t *id) { return gs_display_gpu_q(slot, id, 0, 0, 0); }
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg);
 static void *gs_main(void *arg) {
     (void)arg; host_prof_thread("gs"); host_thread_boost();
@@ -2908,7 +2995,9 @@ void gs_dump_stats(void) {
           "GPU %.1f ms (waited %.1f ms); %llu read-backs (%llu pages), %llu pages uploaded\n", (unsigned long long)vk_n[0], (unsigned long long)vk_n[1], (unsigned long long)vk_n[2],
           (unsigned long long)vk_serial, (unsigned long long)(vk_cpu[0] + vk_cpu[1] + vk_cpu[2]), (unsigned long long)vkb_nbatch, (unsigned long long)dis,
           (unsigned long long)sub, gms, wms, (unsigned long long)vk_downloads, (unsigned long long)vk_dl_pages, (unsigned long long)vk_ul_pages);
-        double ph[10]; gsvk_phase_stats(ph);
+        L("GSVK masked uploads: %llu flushes, %llu words\n", (unsigned long long)vk_xm_flushes, (unsigned long long)vk_xm_words);
+        for (int i = 0; i < 16 && vk_dl_by[i].line; i++) L("GSVK read-backs asked at gs.c:%d: %llu (%llu pages)\n", vk_dl_by[i].line, (unsigned long long)vk_dl_by[i].n, (unsigned long long)vk_dl_by[i].pages);
+        double ph[10]; gsvk_phase_stats(ph); { extern void gsvk_dprof_print(void); gsvk_dprof_print(); }
         if (ph[0] + ph[1] + ph[2] + ph[3] + ph[4] > 0)
             L("GSVK GPU ms per phase (HG_GSVK_TIMING): exact batches %.1f, copies %.1f, single %.1f, compose %.1f, transfers %.1f; replays: exact %.1f, copies %.1f, single %.1f, transfers %.1f\n",
               ph[0], ph[1], ph[2], ph[3], ph[4], ph[5], ph[6], ph[7], ph[9]);

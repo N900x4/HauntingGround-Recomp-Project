@@ -254,8 +254,8 @@ static int values(int row, int *v, const char **names) {
         v[k] = 1; names[k++] = "Full screen";
         break;
     case R_VSYNC:
-        v[k] = VSYNC_MAILBOX; names[k++] = "Fast (no tearing)";
-        v[k] = VSYNC_ON; names[k++] = "On";
+        v[k] = VSYNC_ON; names[k++] = "On (smooth)";
+        v[k] = VSYNC_MAILBOX; names[k++] = "Exact 59.94 Hz";
         v[k] = VSYNC_OFF; names[k++] = "Off (may tear)";
         break;
     }

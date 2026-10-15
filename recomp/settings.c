@@ -119,7 +119,7 @@ void settings_defaults(Settings *s) {
     s->scale = 1;
     s->fps = 30;
     s->fullscreen = 0;
-    s->vsync = VSYNC_MAILBOX;
+    s->vsync = VSYNC_ON;    /* display-locked (host_sdl.c, pacing): every picture held the same number of refreshes */
     s->window_scale = 2;
     /* keyboard: SDL scancodes (USB HID usage ids) */
     s->kb[PB_UP] = 82;          /* Up */
@@ -269,7 +269,7 @@ static int env_value(int i, char *out, size_t n) {
     case 0: snprintf(out, n, "%s", v > 0 ? "gpu" : "software"); break;                  /* HG_GSVK */
     case 1: snprintf(out, n, "%d", v >= 2 && v <= 8 ? v : 1); break;                    /* HG_GSVK_SCALE: 2-8, else native */
     case 2: snprintf(out, n, "%d", v >= 2 ? 120 : v == 1 ? 60 : 30); break;             /* HG_GSVK_INTERP */
-    case 3: snprintf(out, n, "%s", v ? "on" : "off"); break;                            /* HG_VSYNC (unset: mailbox) */
+    case 3: snprintf(out, n, "%s", v == 2 || !strcasecmp(e, "mailbox") ? "mailbox" : v ? "on" : "off"); break;   /* HG_VSYNC: 1 on, 0 off, 2 or mailbox */
     case 4: snprintf(out, n, "%d", v < 1 ? 1 : v > 8 ? 8 : v); break;                   /* HG_SCALE */
     default: snprintf(out, n, "%d", v != 0); break;
     }
@@ -327,7 +327,7 @@ void settings_save(void) {
     fprintf(f, "resolution = %s      # 1 (native) .. 8, or auto (from the display); the GPU renderer only\n", v);
     fprintf(f, "fps = %d               # 30 | 60 | 120 (60 and 120 add about 17 ms of delay; 120 at native resolution)\n", file.fps);
     fprintf(f, "fullscreen = %d\n", file.fullscreen);
-    fprintf(f, "vsync = %s       # mailbox (no tearing, default) | on (wait for the display) | off (may tear)\n", vsync_name(file.vsync));
+    fprintf(f, "vsync = %s       # on (smooth: locked to the display, default) | mailbox (exact 59.94 Hz, no tearing) | off (may tear)\n", vsync_name(file.vsync));
     fprintf(f, "window_scale = %d      # the window's size at start, times 640 x 448\n\n", file.window_scale);
     fprintf(f, "# keyboard: SDL key names (\"none\" for no key)\n");
     for (int i = 0; i < PB_N; i++) fprintf(f, "kb.%s = %s\n", pb_key[i], settings_key_name(file.kb[i]));

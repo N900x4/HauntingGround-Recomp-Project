@@ -31,7 +31,7 @@ enum {
 /* a controller input: an SDL game-controller button (0-20), or one of the triggers */
 enum { PAD_LT = 100, PAD_RT = 101, PAD_NONE = -1 };
 
-enum { VSYNC_MAILBOX = 0, VSYNC_ON = 1, VSYNC_OFF = 2 };   /* 0: no tearing, the game's clock; 1: FIFO; 2: immediate */
+enum { VSYNC_MAILBOX = 0, VSYNC_ON = 1, VSYNC_OFF = 2 };   /* 0: mailbox, exact 59.94 Hz clock; 1: FIFO, locked to the display (default); 2: immediate */
 
 /* the kind of controller that names the buttons (recorded as "padtype") */
 enum { PADKIND_NONE = 0, PADKIND_XBOX = 1, PADKIND_PS = 2 /* DualShock 3/4 */, PADKIND_PS5 = 3 /* DualSense */ };

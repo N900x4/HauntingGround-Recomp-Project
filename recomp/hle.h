@@ -34,6 +34,7 @@ void vu1_dump_stats(void);
 /* host-time accounting per subsystem (seconds): 0 VU1, 1 GS drawing, 2 IOP+SPU2, 3 SPU2 mixing, 4 DMA/VIF */
 extern double tprof[8];
 double host_now(void);
+double host_qpc_seconds(uint64_t ticks);   /* Windows: QueryPerformanceCounter ticks in host_now()'s seconds */
 extern double host_idle;   /* host_sdl.c: time slept pacing the window */
 extern volatile int host_stop_req;   /* set by the Windows timer thread at the -t limit */
 void host_stop_now(void);

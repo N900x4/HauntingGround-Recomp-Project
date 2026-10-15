@@ -5,6 +5,9 @@
 // Local memory is one array of 32-bit words; 16-bit pixels are written with atomics, as two neighbours share a word.
 // Not covered (gsvk_sprite_supported() in gs.c): sprites whose texture, frame or Z buffer overlap in memory, since
 // their result depends on the order of the pixels.
+#ifdef COPIES   // the upscaling copies (batch shader, workgroup z + 1 = the copy): presentation only, no exactness needed
+#define precise
+#endif
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(std430, binding = 0) buffer Vram { uint vm[]; };
 layout(std430, binding = 1) readonly buffer Xoff { uint xoff[]; };   // [0, 32*2048): xoff32, [33*2048, ...): xoff32z
@@ -23,7 +26,8 @@ layout(std430, binding = 2) readonly buffer Clut { uint clut[]; };
     int lx0, ly0, lx1, ly1, ln; \
     int serial; \
     uint clutoff; \
-    uint mbase;
+    uint mbase; \
+    int gcopy, rt, cn, sx0, sy0, sx1, sy1; float su0, sv0, su1, sv1;
 // prim 0: sprite (px0.. are its pixel rectangle), 1: triangle (px0.. its bounding box), 2: line from (lx0,ly0) to
 // (lx1,ly1) in ln steps, 3: point at (lx0,ly0) with texel (x0,y0)
 // mbase: the word where the copy of local memory this primitive draws into starts (0: the exact one; others:
@@ -227,28 +231,71 @@ void draw_at(int x, int y) {
 // The workgroup's 8x8 tile first marks, 256 primitives at a time, those whose rectangle meets it (one bit each, so
 // the order stays), then every invocation draws the marked ones at its pixel.
 shared uint hits[8];
-// Workgroup z: the copy of local memory (upscaling), so each invocation draws one copy's pixel. A batch holds every
-// primitive once per copy, copies next to each other (an empty rectangle where a copy draws nothing): copy z's
-// primitives are first + z, first + z + ncopy, ...
+#ifdef COPIES
+// Upscaling: copy z of a primitive whose copies the GPU derives (gcopy): its geometry moved by the copy's sub-pixel
+// offset, as gs.c moves the vertices for the copies it makes itself (sprites and points in whole 1/16 pixels; a
+// primitive that textures from a render target reads at its coordinates minus the offset too). cn = N.
+void apply_copy(int z) {
+    if (z == 0 || p.gcopy == 0) return;
+    int N = p.cn, ci = (z - 1) % N, cj = (z - 1) / N;
+    float ox = float(2 * ci + 1) * 0.5 / float(N) - 0.5, oy = float(2 * cj + 1) * 0.5 / float(N) - 0.5;
+    p.mbase += uint(z) << 20;
+    if (p.prim == 1) {
+        p.tx0 -= ox; p.tx1 -= ox; p.tx2 -= ox; p.ty0 -= oy; p.ty1 -= oy; p.ty2 -= oy;
+        if (p.rt != 0) {
+            p.tu0 -= ox * 16.0 * p.tq0; p.tu1 -= ox * 16.0 * p.tq1; p.tu2 -= ox * 16.0 * p.tq2;
+            p.tv0 -= oy * 16.0 * p.tq0; p.tv1 -= oy * 16.0 * p.tq1; p.tv2 -= oy * 16.0 * p.tq2;
+        }
+        int nx0 = int(floor(min(p.tx0, min(p.tx1, p.tx2)))), nx1 = int(ceil(max(p.tx0, max(p.tx1, p.tx2))));
+        int ny0 = int(floor(min(p.ty0, min(p.ty1, p.ty2)))), ny1 = int(ceil(max(p.ty0, max(p.ty1, p.ty2))));
+        nx0 = max(nx0, p.scx0); nx1 = min(nx1, p.scx1); ny0 = max(ny0, p.scy0); ny1 = min(ny1, p.scy1);
+        p.px0 = nx0; p.px1 = nx1 >= nx0 ? nx1 + 1 : nx0; p.py0 = ny0; p.py1 = ny1 >= ny0 ? ny1 + 1 : ny0;
+        return;
+    }
+    int oxi = int(round(ox * 16.0)), oyi = int(round(oy * 16.0));
+    if (p.prim == 3) { p.lx0 = (p.sx0 - oxi) >> 4; p.ly0 = (p.sy0 - oyi) >> 4; p.px0 = p.lx0; p.px1 = p.lx0 + 1; p.py0 = p.ly0; p.py1 = p.ly0 + 1; return; }
+    if (p.prim != 0) return;
+    int x0 = p.sx0 - oxi, x1 = p.sx1 - oxi, y0 = p.sy0 - oyi, y1 = p.sy1 - oyi;   // sprite_geo()
+    float u0 = p.su0, v0 = p.sv0, u1 = p.su1, v1 = p.sv1;
+    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; float f = u0; u0 = u1; u1 = f; }
+    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; float f = v0; v0 = v1; v1 = f; }
+    int px0 = (x0 + 15) >> 4, px1 = (x1 + 15) >> 4, py0 = (y0 + 15) >> 4, py1 = (y1 + 15) >> 4;
+    px0 = max(px0, p.scx0); px1 = min(px1, p.scx1 + 1); py0 = max(py0, p.scy0); py1 = min(py1, p.scy1 + 1);
+    p.du = x1 != x0 ? (u1 - u0) / float(x1 - x0) : 0.0; p.dv = y1 != y0 ? (v1 - v0) / float(y1 - y0) : 0.0;
+    p.px0 = px0; p.px1 = px1; p.py0 = py0; p.py1 = py1; p.x0 = x0; p.y0 = y0; p.u0 = u0; p.v0 = v0;
+    if (p.rt != 0) { p.u0 -= float(oxi); p.v0 -= float(oyi); }
+}
+#endif
+// Workgroup z: the copy of local memory (upscaling), so each invocation draws one copy's pixel. A batch holds each
+// primitive once; the GPU derives its copies (apply_copy).
 void main() {
-    uint lid = gl_LocalInvocationIndex; const int zc = int(gl_WorkGroupID.z), nper = pc.n / pc.ncopy;
+    uint lid = gl_LocalInvocationIndex;
+#ifdef COPIES   // workgroup z + 1: the copy
+    const int zc = int(gl_WorkGroupID.z) + 1, nper = pc.n;
+#else
+    const int zc = 0, nper = pc.n;
+#endif
     int x = pc.bx0 + int(gl_GlobalInvocationID.x), y = pc.by0 + int(gl_GlobalInvocationID.y);
     int tx0 = pc.bx0 + int(gl_WorkGroupID.x) * 8, ty0 = pc.by0 + int(gl_WorkGroupID.y) * 8;
     for (int base = 0; base < nper; base += 256) {
         if (lid < 8u) hits[lid] = 0u;
         barrier();
         for (int k = 0; k < 4; k++) {
-            int j = int(lid) * 4 + k, i = base + j, q = pc.first + i * pc.ncopy + zc;
-            if (i < nper && prims[q].px0 < tx0 + 8 && prims[q].px1 > tx0 && prims[q].py0 < ty0 + 8 && prims[q].py1 > ty0)
+            int j = int(lid) * 4 + k, i = base + j, q = pc.first + i;
+            int mg = zc > 0 ? 2 : 0;   /* a copy moves by less than a pixel */
+            if (i < nper && (zc == 0 || prims[q].gcopy != 0) && prims[q].px0 - mg < tx0 + 8 && prims[q].px1 + mg > tx0 && prims[q].py0 - mg < ty0 + 8 && prims[q].py1 + mg > ty0)
                 atomicOr(hits[j >> 5], 1u << (j & 31));
         }
         barrier();
         for (int w = 0; w < 8; w++) {
             uint m = hits[w];
             while (m != 0u) {
-                int i = pc.first + (base + w * 32 + findLSB(m)) * pc.ncopy + zc; m &= m - 1u;
-                if (x < prims[i].px0 || x >= prims[i].px1 || y < prims[i].py0 || y >= prims[i].py1) continue;
+                int i = pc.first + base + w * 32 + findLSB(m); m &= m - 1u;
                 p = prims[i];
+#ifdef COPIES
+                apply_copy(zc);
+#endif
+                if (x < p.px0 || x >= p.px1 || y < p.py0 || y >= p.py1) continue;
                 draw_at(x, y);
             }
         }

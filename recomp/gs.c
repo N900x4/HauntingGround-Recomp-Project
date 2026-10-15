@@ -1174,7 +1174,8 @@ static int gsvk_tex_is_rt(const Draw *d) {
     uint64_t tp[8] = {0}; mark_pages(tp, d->tex.tbp, d->tex.tbw, d->tex.psm, 0, 0, (int)d->tex.tw - 1, (int)d->tex.th - 1);
     return pages_meet(tp, pg_rt);
 }
-static int vk_off(int i) { return (2 * i + 1) * 8 / vk_scale - 8; }   /* offset of sub-pixel column/row i, 1/16 pixel */
+static float vk_offf(int i) { return (2 * i + 1) * 0.5f / vk_scale - 0.5f; }   /* offset of sub-pixel column/row i, pixel */
+static int vk_off(int i) { return (int)lroundf(vk_offf(i) * 16); }            /* the same in whole 1/16 pixels */
 static uint64_t vk_n[3], vk_alone[3], vk_exact[3], vk_words[3], vk_cpu[3];   /* sprites, triangles, lines and points */
 static uint64_t vk_serial;   /* primitives drawn by one invocation in the CPU's order (their buffers overlap) */
 static uint64_t vk_selfpix;  /* triangles that texture from their own pixel (batched) */
@@ -1190,7 +1191,7 @@ static void gsvk_setup(void) {
     const char *e = getenv("HG_GSVKCHECK"), *lv = getenv("HG_GSVK");
     vk_live = lv && atoi(lv) > 0;
     vkb_mode = getenv("HG_GSVKBATCH") && atoi(getenv("HG_GSVKBATCH")) > 0;
-    if (vk_live && getenv("HG_GSVK_SCALE")) { int n = atoi(getenv("HG_GSVK_SCALE")); if (n == 2 || n == 4 || n == 8) { vk_scale = n; vk_ncopy = 1 + n * n; } }
+    if (vk_live && getenv("HG_GSVK_SCALE")) { int n = atoi(getenv("HG_GSVK_SCALE")); if (n >= 2 && n <= 8) { vk_scale = n; vk_ncopy = 1 + n * n; } }
     if (e) { vkchk_from = atol(e); const char *c = strchr(e, ':'); vkchk_to = c ? atol(c + 1) : vkchk_from;
              if (vk_live) { L("GSVK: HG_GSVKCHECK given: checking, not live\n"); vk_live = 0; } }
     if (vkchk_from < 0 && !vk_live) return;
@@ -1349,9 +1350,13 @@ static void gsvk_sprite_prim(const Draw *d, const Vtx *a, const Vtx *b) {
     GsVkSprite s = gsvk_base(d);
     s.px0 = g.px0; s.px1 = g.px1; s.py0 = g.py0; s.py1 = g.py1; s.x0 = g.x0; s.y0 = g.y0; s.u0 = g.u0; s.v0 = g.v0; s.du = g.du; s.dv = g.dv;
     s.rgba = b->rgba; s.fog = (uint32_t)b->f; s.z = b->z; s.prim = 0; s.serial = serial;
+    if (vk_ncopy > 1 && !serial) {   /* batched: the GPU makes the copies */
+        float uu0 = 0, vv0 = 0, uu1 = 0, vv1 = 0; if (d->tme) { vtx_uv(d, a, &uu0, &vv0); vtx_uv(d, b, &uu1, &vv1); }
+        s.gcopy = 1; s.cn = vk_scale; s.rt = gsvk_tex_is_rt(d); s.sx0 = a->x; s.sy0 = a->y; s.sx1 = b->x; s.sy1 = b->y; s.su0 = uu0; s.sv0 = vv0; s.su1 = uu1; s.sv1 = vv1;
+    }
     if (gsvk_take(d, &s, g.px0, g.py0, g.px1 - 1, g.py1 - 1, serial, 0)) {
         const int rt = gsvk_tex_is_rt(d);
-        for (int k = 1; k < vk_ncopy; k++) {   /* the sub-pixel copies */
+        for (int k = 1; k < vk_ncopy && s.gcopy == 0; k++) {   /* the sub-pixel copies, for a primitive drawn alone */
             Vtx a2 = *a, b2 = *b; const int ox = vk_off((k - 1) % vk_scale), oy = vk_off((k - 1) / vk_scale);
             a2.x -= ox; b2.x -= ox; a2.y -= oy; b2.y -= oy;
             SprGeo g2; sprite_geo(d, &a2, &b2, &g2);
@@ -1384,8 +1389,9 @@ static void gsvk_line_prim(const Draw *d, const Vtx *a, const Vtx *b, int point)
     s.x0 = point ? a->u : 0; s.y0 = point ? a->v : 0;
     s.rgba = b->rgba; s.fog = (uint32_t)b->f; s.z = b->z; s.prim = point ? 3 : 2; s.serial = serial;
     s.lx0 = x0; s.ly0 = y0; s.lx1 = x1; s.ly1 = y1; s.ln = n;
+    if (vk_ncopy > 1 && point && !serial) { s.gcopy = 1; s.cn = vk_scale; s.sx0 = a->x; s.sy0 = a->y; }   /* batched: copies on the GPU */
     if (gsvk_take(d, &s, bx0, by0, bx1, by1, !point || serial, 2)) {   /* lines go alone: their invocations are steps */
-        for (int k = 1; k < vk_ncopy; k++) {
+        for (int k = 1; k < vk_ncopy && s.gcopy == 0; k++) {
             const int ox = vk_off((k - 1) % vk_scale), oy = vk_off((k - 1) / vk_scale);
             GsVkSprite s2 = s;
             s2.lx0 = (a->x - ox) >> 4; s2.ly0 = (a->y - oy) >> 4; s2.lx1 = point ? s2.lx0 : (b->x - ox) >> 4; s2.ly1 = point ? s2.ly0 : (b->y - oy) >> 4;
@@ -1453,10 +1459,11 @@ static void gsvk_triangle_prim(const Draw *d, const Vtx *v0, const Vtx *v1, cons
     s.tx0 = x0; s.ty0 = y0; s.tx1 = x1; s.ty1 = y1; s.tx2 = x2; s.ty2 = y2; s.tinv = 1.0f / area;
     s.tu0 = ua[0]; s.tu1 = ua[1]; s.tu2 = ua[2]; s.tv0 = va[0]; s.tv1 = va[1]; s.tv2 = va[2]; s.tq0 = qa[0]; s.tq1 = qa[1]; s.tq2 = qa[2];
     s.tc0 = v0->rgba; s.tc1 = v1->rgba; s.tc2 = v2->rgba; s.tz0 = v0->z; s.tz1 = v1->z; s.tz2 = v2->z; s.tf0 = v0->f; s.tf1 = v1->f; s.tf2 = v2->f;
+    if (vk_ncopy > 1 && !serial) { s.gcopy = 1; s.cn = vk_scale; s.rt = gsvk_tex_is_rt(d); }   /* batched: copies on the GPU */
     if (gsvk_take(d, &s, minx, miny, maxx, maxy, serial, 1)) {
         const int rt = gsvk_tex_is_rt(d);
-        for (int k = 1; k < vk_ncopy; k++) {
-            const float ox = vk_off((k - 1) % vk_scale) / 16.0f, oy = vk_off((k - 1) / vk_scale) / 16.0f;
+        for (int k = 1; k < vk_ncopy && s.gcopy == 0; k++) {
+            const float ox = vk_offf((k - 1) % vk_scale), oy = vk_offf((k - 1) / vk_scale);
             GsVkSprite s2 = s;
             s2.tx0 = x0 - ox; s2.tx1 = x1 - ox; s2.tx2 = x2 - ox; s2.ty0 = y0 - oy; s2.ty1 = y1 - oy; s2.ty2 = y2 - oy;
             int nx0 = (int)floorf(fminf(s2.tx0, fminf(s2.tx1, s2.tx2))), nx1 = (int)ceilf(fmaxf(s2.tx0, fmaxf(s2.tx1, s2.tx2)));
@@ -2373,10 +2380,20 @@ static void emit_pic(uint64_t vb, int sub, const uint32_t *pic, int w, int h, in
     if (dump) dump_pic(vb, sub, pic, w, h, interp);
 }
 /* the real picture of this VBlank (upscaled or native); unchanged since the last one: kept */
-static int real_pic(const uint8_t *priv, uint32_t **out, int *pw, int *ph) {
+static int real_pic(const uint8_t *priv, uint32_t **out, int *pw, int *ph, int late_ok) {
     static uint32_t *buf; static int w, h, have; static uint8_t last[0xB0];
     if (!buf) buf = malloc((size_t)4096 * 4096 * 4);
     *out = buf;
+    if (vk_ncopy > 1 && late_ok) {   /* the window: composed now, collected at the next VBlank, the GPU never waited for */
+        static int pend, pslot, pw_, ph_; static uint64_t pid; static unsigned flip;
+        const int changed = !have || vk_hr_changes || memcmp(last, priv, 0xB0);
+        int submitted = 0, w2, h2; uint64_t id = 0; const int slot = 4 + (int)(flip & 1);
+        if (changed) { memcpy(last, priv, 0xB0); if (display_pic_(priv, 0, 4096, 4096, &w2, &h2, 1, vk_scale, slot)) { id = gsvk_submit(); submitted = 1; flip++; vk_hr_changes = 0; } }
+        if (pend) { gsvk_wait(pid); gsvk_compose_fetch(pslot, buf, (size_t)pw_ * ph_); w = pw_; h = ph_; have = 1; pend = 0; }
+        if (submitted) { pend = 1; pslot = slot; pid = id; pw_ = w2; ph_ = h2; }
+        if (have) { *pw = w; *ph = h; return 1; }
+        if (pend) { gsvk_wait(pid); gsvk_compose_fetch(pslot, buf, (size_t)pw_ * ph_); w = pw_; h = ph_; have = 1; pend = 0; *pw = w; *ph = h; return 1; }
+    }
     if (vk_ncopy > 1) {
         if (have && !vk_hr_changes && !memcmp(last, priv, 0xB0)) { *pw = w; *ph = h; return 1; }
         memcpy(last, priv, 0xB0);
@@ -2395,9 +2412,9 @@ static void vi_present(uint64_t vb, const uint8_t *priv, int window) {
     else if (vi_show == 2 && vi_pw[0] && vi_pw[1]) { emit_pic(vb, 0, vi_pic[0], vi_pw[0], vi_ph[0], 1, window, dump); emit_pic(vb, 1, vi_pic[1], vi_pw[1], vi_ph[1], 1, window, dump); vi_pending = 1; }
     else if (vi_pending && vi_pw[2]) {
         emit_pic(vb, 0, vi_pic[2], vi_pw[2], vi_ph[2], 1, window, dump);
-        if (real_pic(priv, &rp, &rw, &rh)) emit_pic(vb, 1, rp, rw, rh, 0, window, dump);
+        if (real_pic(priv, &rp, &rw, &rh, window && !dump)) emit_pic(vb, 1, rp, rw, rh, 0, window, dump);
         vi_pending = 0;
-    } else if (real_pic(priv, &rp, &rw, &rh)) for (int j = 0; j < k; j++) emit_pic(vb, j, rp, rw, rh, 0, window, dump);
+    } else if (real_pic(priv, &rp, &rw, &rh, window && !dump)) for (int j = 0; j < k; j++) emit_pic(vb, j, rp, rw, rh, 0, window, dump);
     if (vi_show != 2) vi_pending = 0;
 }
 static void dump_frame_hr(uint64_t vb, const uint8_t *priv) {

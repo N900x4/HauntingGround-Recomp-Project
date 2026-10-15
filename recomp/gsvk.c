@@ -14,11 +14,16 @@
 #include "gsvk.h"
 #include "gen/gs_sprite_spv.h"
 #include "gen/gs_batch_spv.h"
+#include "gen/gs_batchc_spv.h"
 #include <time.h>
 
 static VkInstance inst; static VkPhysicalDevice phys; static VkDevice dev; static VkQueue queue; static uint32_t qfam;
-static VkDescriptorSetLayout dsl; static VkPipelineLayout pl; static VkPipeline pipe1, pipeb; static VkDescriptorPool dpool; static VkDescriptorSet dset;
-static VkCommandPool cpool; static VkCommandBuffer cmd; static VkFence fence; static VkQueryPool qpool; static float tsperiod;
+static VkDescriptorSetLayout dsl; static VkPipelineLayout pl; static VkPipeline pipe1, pipeb, pipebc; static VkDescriptorPool dpool; static VkDescriptorSet dset;
+/* command buffers in rotation: one is recorded while earlier ones may still run (gsvk_submit); gsvk_finish waits for all */
+enum { NCMD = 4 };
+static VkCommandPool cpool; static VkCommandBuffer cmds[NCMD]; static VkFence fences[NCMD]; static int busy[NCMD]; static uint64_t sub_id[NCMD], n_sub_id; static int ci;
+#define cmd (cmds[ci])
+static VkQueryPool qpool; static float tsperiod;
 typedef struct { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceSize n; } Buf;
 static Buf vram, dvram, xoffb, tabb, primb, clutb, upb, hrb;   /* hrb: the upscaled display read back */
 static VkDeviceSize outbase, outbytes;   /* in dvram, after the copies */
@@ -82,7 +87,7 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *ta
     ncopy = ncopies < 1 ? 1 : (uint32_t)ncopies; up_first = 0; up_count = ncopy;
     outbase = (VkDeviceSize)ncopy * (1u << 22) + 16;
     if (!mkbuf_(&vram, vbytes, xfer, 1)) { vkDestroyBuffer(dev, vram.b, 0); vram.b = 0; L("GSVK: no host-cached memory, mirror uncached\n"); }
-    if ((!vram.p && !mkbuf(&vram, vbytes, xfer)) || !mkbuf_(&dvram, (VkDeviceSize)ncopy * (1u << 22) + 16 + (outbytes = ncopy > 1 ? (VkDeviceSize)(ncopy - 1) * 1024 * 1024 * 4 : 0), sto | xfer, 2) ||
+    if ((!vram.p && !mkbuf(&vram, vbytes, xfer)) || !mkbuf_(&dvram, (VkDeviceSize)ncopy * (1u << 22) + 16 + (outbytes = ncopy > 1 ? (VkDeviceSize)ncopy * 8 * 1024 * 1024 : 0), sto | xfer, 2) ||
         (outbytes && !mkbuf_(&hrb, outbytes, xfer, 1) && !mkbuf(&hrb, outbytes, xfer)) || !mkbuf(&xoffb, 66u * 2048 * 4, sto) ||
         !mkbuf(&tabb, GSVK_TABLES * 4, sto) || !mkbuf_(&primb, (VkDeviceSize)PRIM_MAX * sizeof(GsVkSprite), sto, 3) ||
         !mkbuf_(&clutb, (VkDeviceSize)CLUT_MAX * 1024, sto, 3) || !mkbuf(&upb, UP_BYTES, xfer)) { L("GSVK: buffers failed\n"); return 0; }
@@ -96,13 +101,14 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *ta
     VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 20 };
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
     if (vkCreateDescriptorSetLayout(dev, &dli, 0, &dsl) || vkCreatePipelineLayout(dev, &pli, 0, &pl)) { L("GSVK: pipeline layout failed\n"); return 0; }
-    for (int k = 0; k < 2; k++) {
-        VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = k ? sizeof gs_batch_spv : sizeof gs_sprite_spv, .pCode = k ? gs_batch_spv : gs_sprite_spv };
+    for (int k = 0; k < 3; k++) {   /* one primitive; a batch; a batch's upscaling copies */
+        VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = k == 2 ? sizeof gs_batchc_spv : k ? sizeof gs_batch_spv : sizeof gs_sprite_spv,
+                                         .pCode = k == 2 ? gs_batchc_spv : k ? gs_batch_spv : gs_sprite_spv };
         VkShaderModule sm;
         if (vkCreateShaderModule(dev, &smi, 0, &sm)) { L("GSVK: shader failed\n"); return 0; }
         VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = pl,
             .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" } };
-        if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, 0, k ? &pipeb : &pipe1)) { L("GSVK: pipeline failed\n"); return 0; }
+        if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, 0, k == 2 ? &pipebc : k ? &pipeb : &pipe1)) { L("GSVK: pipeline failed\n"); return 0; }
     }
     VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5 };
     VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps };
@@ -115,12 +121,13 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *ta
                                                                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[i] };
     vkUpdateDescriptorSets(dev, 5, wr, 0, 0);
     VkCommandPoolCreateInfo cpci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qfam };
-    VkCommandBufferAllocateInfo cbai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+    VkCommandBufferAllocateInfo cbai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = NCMD };
     VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
     if (vkCreateCommandPool(dev, &cpci, 0, &cpool)) return 0;
     cbai.commandPool = cpool;
-    if (vkAllocateCommandBuffers(dev, &cbai, &cmd) || vkCreateFence(dev, &fci, 0, &fence)) return 0;
-    VkQueryPoolCreateInfo qpi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 };
+    if (vkAllocateCommandBuffers(dev, &cbai, cmds)) return 0;
+    for (int k = 0; k < NCMD; k++) if (vkCreateFence(dev, &fci, 0, &fences[k])) return 0;
+    VkQueryPoolCreateInfo qpi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 * NCMD };
     if (vkCreateQueryPool(dev, &qpi, 0, &qpool)) return 0;
     tsperiod = pr.limits.timestampPeriod;
     L("GSVK: Vulkan compute on %s\n", pr.deviceName);
@@ -134,12 +141,22 @@ static void barrier(void) {   /* everything before (transfers, dispatches) is vi
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                          0, 1, &mb, 0, 0, 0, 0);
 }
+static void slot_wait(int k) {   /* the submission in command buffer k is done; its GPU time counted */
+    if (!busy[k]) return;
+    struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (vkWaitForFences(dev, 1, &fences[k], VK_TRUE, 10000000000ull)) { L("GSVK: wait failed\n"); state = -1; }
+    clock_gettime(CLOCK_MONOTONIC, &t1); wait_ms_all += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+    uint64_t ts[2];
+    if (!vkGetQueryPoolResults(dev, qpool, 2 * k, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT)) gpu_ms_all += (double)(ts[1] - ts[0]) * tsperiod / 1e6;
+    busy[k] = 0;
+}
 static void rec_open(void) {
     if (open_) return;
+    ci = (ci + 1) % NCMD; slot_wait(ci);
     VkCommandBufferBeginInfo cbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
     vkResetCommandBuffer(cmd, 0); vkBeginCommandBuffer(cmd, &cbi);
-    vkCmdResetQueryPool(cmd, qpool, 0, 2);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool, 0);
+    vkCmdResetQueryPool(cmd, qpool, 2 * ci, 2);
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool, 2 * ci);
     open_ = 1; bound = 0; cur_pipe = VK_NULL_HANDLE;
 }
 static void use(VkPipeline p) {
@@ -153,28 +170,40 @@ static void close_batch(void) {
         rec_open(); barrier(); use(pipeb);
         int32_t pc[5] = { (int32_t)bn, x0, y0, (int32_t)bfirst, (int32_t)up_count };   /* a primitive has a copy per copy of the set */
         vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
-        vkCmdDispatch(cmd, (uint32_t)(x1 - x0 + 7) / 8, (uint32_t)(y1 - y0 + 7) / 8, up_count);   /* z: the copy */
+        vkCmdDispatch(cmd, (uint32_t)(x1 - x0 + 7) / 8, (uint32_t)(y1 - y0 + 7) / 8, 1);   /* the exact copy */
         n_dispatch++;
+        if (up_count > 1) {   /* the upscaling copies (their own memory: no barrier), moved by under a pixel: a margin of 2 */
+            const int cx0 = x0 >= 2 ? x0 - 2 : 0, cy0 = y0 >= 2 ? y0 - 2 : 0, cx1 = x1 + 2 > 2048 ? 2048 : x1 + 2, cy1 = y1 + 2 > 2048 ? 2048 : y1 + 2;
+            use(pipebc);
+            int32_t pcc[5] = { (int32_t)bn, cx0, cy0, (int32_t)bfirst, (int32_t)up_count };
+            vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pcc, pcc);
+            vkCmdDispatch(cmd, (uint32_t)(cx1 - cx0 + 7) / 8, (uint32_t)(cy1 - cy0 + 7) / 8, up_count - 1);   /* z + 1: the copy */
+            n_dispatch++;
+        }
     }
     bn = 0;
 }
 void gsvk_break(void) { if (state > 0) close_batch(); }
-/* submit what is recorded and wait for it; the rings start over */
-void gsvk_finish(void) {
-    if (state <= 0) return;
+/* submit what is recorded; with wait, wait for everything submitted, and the rings start over. Returns the
+   submission's id (for gsvk_wait), 0 if nothing was recorded. */
+static uint64_t submit(int wait) {
+    if (state <= 0) return 0;
     close_batch();
-    if (!open_) return;
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, 1);
-    vkEndCommandBuffer(cmd); open_ = 0;
-    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
-    vkResetFences(dev, 1, &fence);
-    struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
-    if (vkQueueSubmit(queue, 1, &si, fence) || vkWaitForFences(dev, 1, &fence, VK_TRUE, 10000000000ull)) { L("GSVK: submit failed\n"); state = -1; return; }
-    clock_gettime(CLOCK_MONOTONIC, &t1); wait_ms_all += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
-    uint64_t ts[2];
-    if (!vkGetQueryPoolResults(dev, qpool, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT)) gpu_ms_all += (double)(ts[1] - ts[0]) * tsperiod / 1e6;
-    n_submits++; nprim = nclut = 0; upoff = 0;
+    uint64_t id = 0;
+    if (open_) {
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qpool, 2 * ci + 1);
+        vkEndCommandBuffer(cmd); open_ = 0;
+        VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
+        vkResetFences(dev, 1, &fences[ci]);
+        if (vkQueueSubmit(queue, 1, &si, fences[ci])) { L("GSVK: submit failed\n"); state = -1; return 0; }
+        busy[ci] = 1; sub_id[ci] = id = ++n_sub_id; n_submits++;
+    }
+    if (wait) { for (int k = 0; k < NCMD; k++) slot_wait(k); nprim = nclut = 0; upoff = 0; }
+    return id;
 }
+void gsvk_finish(void) { submit(1); }
+uint64_t gsvk_submit(void) { return submit(0); }
+void gsvk_wait(uint64_t id) { for (int k = 0; k < NCMD; k++) if (busy[k] && sub_id[k] <= id) slot_wait(k); }
 /* local memory words [w, w+n) from src, at this point of the stream */
 void gsvk_upload(uint32_t w, uint32_t n, const uint32_t *src) {
     if (state <= 0 || !n) return;
@@ -182,9 +211,15 @@ void gsvk_upload(uint32_t w, uint32_t n, const uint32_t *src) {
     if (upoff + n * 4 > UP_BYTES) gsvk_finish();
     memcpy((uint8_t *)upb.p + upoff, src, (size_t)n * 4);
     rec_open(); barrier();
-    VkBufferCopy c[65]; uint32_t nc = up_count < 65 ? up_count : 65;
-    for (uint32_t k = 0; k < nc; k++) c[k] = (VkBufferCopy){ upoff, (VkDeviceSize)(up_first + k) * (1u << 22) + (VkDeviceSize)w * 4, (VkDeviceSize)n * 4 };
-    vkCmdCopyBuffer(cmd, upb.b, dvram.b, nc, c);
+    VkBufferCopy c0 = { upoff, (VkDeviceSize)up_first * (1u << 22) + (VkDeviceSize)w * 4, (VkDeviceSize)n * 4 };
+    vkCmdCopyBuffer(cmd, upb.b, dvram.b, 1, &c0);   /* over the bus once, into the set's first copy... */
+    if (up_count > 1) {   /* ...then from there into the others, in video memory */
+        VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT };
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, 0, 0, 0);
+        VkBufferCopy c[64]; uint32_t nc = 0;
+        for (uint32_t k = 1; k < up_count && nc < 64; k++) c[nc++] = (VkBufferCopy){ c0.dstOffset, (VkDeviceSize)(up_first + k) * (1u << 22) + (VkDeviceSize)w * 4, (VkDeviceSize)n * 4 };
+        vkCmdCopyBuffer(cmd, dvram.b, dvram.b, nc, c);
+    }
     upoff += (n * 4 + 255) & ~255u;
 }
 /* one primitive: alone (lines, serial ones) or added to the batch being collected */
@@ -243,11 +278,11 @@ void gsvk_copy_copies(uint32_t dst, uint32_t src, uint32_t count) {
     VkBufferCopy c = { (VkDeviceSize)src << 22, (VkDeviceSize)dst << 22, (VkDeviceSize)count << 22 };
     vkCmdCopyBuffer(cmd, dvram.b, dvram.b, 1, &c);
 }
-/* the out region holds 4 pictures (slots); compose_rec records one, compose_fetch reads it after a finish */
+/* the out region holds 6 pictures (slots); compose_rec records one, compose_fetch reads it once its submission is done */
 int gsvk_compose_rec(const GsVkSprite *s0, int slot) {
-    if (state <= 0 || !outbytes || slot < 0 || slot > 3) return 0;
+    if (state <= 0 || !outbytes || slot < 0 || slot > 5) return 0;
     GsVkSprite s = *s0;
-    const VkDeviceSize n = (VkDeviceSize)s.px1 * s.py1 * 4, slotb = (outbytes / 4) & ~(VkDeviceSize)255;
+    const VkDeviceSize n = (VkDeviceSize)s.px1 * s.py1 * 4, slotb = (outbytes / 6) & ~(VkDeviceSize)255;
     if (n > slotb || s.px1 <= 0 || s.py1 <= 0) return 0;
     s.prim = 4; s.px0 = s.py0 = 0; s.serial = 0; s.z = (uint32_t)((outbase + slot * slotb) / 4); s.mbase = 0;
     const uint32_t keep = mbase_add; mbase_add = 0;   /* the compose primitive reads copies by itself */
@@ -261,8 +296,8 @@ int gsvk_compose_rec(const GsVkSprite *s0, int slot) {
     return 1;
 }
 void gsvk_compose_fetch(int slot, uint32_t *dst, size_t words) {
-    const VkDeviceSize slotb = (outbytes / 4) & ~(VkDeviceSize)255;
-    if (state > 0 && slot >= 0 && slot < 4 && words * 4 <= slotb) memcpy(dst, (uint8_t *)hrb.p + slot * slotb, words * 4);
+    const VkDeviceSize slotb = (outbytes / 6) & ~(VkDeviceSize)255;
+    if (state > 0 && slot >= 0 && slot < 6 && words * 4 <= slotb) memcpy(dst, (uint8_t *)hrb.p + slot * slotb, words * 4);
 }
 int gsvk_compose(const GsVkSprite *s0, uint32_t *dst) {
     if (!gsvk_compose_rec(s0, 0)) return 0;

@@ -18,6 +18,9 @@ typedef struct {
     int32_t serial;                   /* 1: one invocation draws every pixel in the CPU's order (buffers overlap) */
     uint32_t clutoff;                 /* set by gsvk_prim() */
     uint32_t mbase;                   /* copy of local memory drawn into: copy k at k << 20 (0: the exact one) */
+    int32_t gcopy, rt, cn;            /* upscaling copies made on the GPU (batches), texturing from a render target, N */
+    int32_t sx0, sy0, sx1, sy1;       /* sprite or point: the vertices in 1/16 pixels */
+    float su0, sv0, su1, sv1;         /* sprite: their texture coordinates (1/16 texel) */
 } GsVkSprite;
 /* tables: the 8-, 4- and 16-bit block and column tables, laid out as the shader's BT8 ... CT16 offsets */
 #define GSVK_TABLES 1056
@@ -35,12 +38,14 @@ void gsvk_download_copy(int k, const uint64_t pages[8], uint32_t *dst);  /* the 
 /* a display picture into dst, W x H, interleaving N x N copies from copy ly1: s->prim 4, fbp/fbw/fpsm and lx0/ly0 =
    the display buffer and its origin, px1/py1 = W/H, ln = N, ly1 = the first copy */
 int gsvk_compose(const GsVkSprite *s, uint32_t *dst);
-int gsvk_compose_rec(const GsVkSprite *s, int slot);              /* the same, recorded into one of 4 slots */
+int gsvk_compose_rec(const GsVkSprite *s, int slot);              /* the same, recorded into one of 6 slots */
 void gsvk_compose_fetch(int slot, uint32_t *dst, size_t words);  /* after gsvk_finish() */
 /* where primitives and uploads go: copies [first, first + count) (primitives add first << 20 to their mbase) */
 void gsvk_set_target(uint32_t first, uint32_t count);
 void gsvk_copy_copies(uint32_t dst, uint32_t src, uint32_t count);   /* whole copies, on the GPU, in stream order */
-void gsvk_finish(void);                                                    /* submit and wait */
+void gsvk_finish(void);                                                    /* submit and wait for everything */
+uint64_t gsvk_submit(void);                                                /* submit, do not wait: an id */
+void gsvk_wait(uint64_t id);                                               /* that submission (and earlier) done */
 void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms);   /* wait: wall ms in submit+wait */
 /* checking: the GPU's memory is set to `now`, then primitives are recorded, then the GPU's memory comes back */
 void gsvk_check_begin(const uint32_t *now);

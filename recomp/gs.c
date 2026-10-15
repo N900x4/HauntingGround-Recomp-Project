@@ -1930,20 +1930,29 @@ static int display_from(const uint8_t *priv, uint32_t *out, int maxw, int maxh, 
 #ifdef HAVE_VULKAN
 static int display_from(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph);
 /* HG_FRAMES_HR=dir with HG_GSVK_SCALE: the upscaled picture, interleaved from the sub-pixel copies */
+/* the upscaled display (as display_from(), from the sub-pixel copies, interleaved on the GPU) */
+static int display_hr(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
+    if (!priv || vk_ncopy < 2) return 0;
+    uint64_t pmode, dispfb, display;
+    memcpy(&pmode, priv + 0x00, 8);
+    int c2 = (pmode >> 1) & 1;
+    memcpy(&dispfb, priv + (c2 ? 0x90 : 0x70), 8); memcpy(&display, priv + (c2 ? 0xa0 : 0x80), 8);
+    const int N = vk_scale;
+    int magh = BITS(display, 23, 4) + 1, dw = BITS(display, 32, 12) + 1, dh = BITS(display, 44, 11) + 1;
+    int w = dw / magh, h = dh; if (w > 1024) w = 1024; if (h > 1024) h = 1024;
+    if (w <= 1 || h <= 1 || w * N > maxw || h * N > maxh) return 0;
+    GsVkSprite s = { 0 };
+    s.fbp = BITS(dispfb, 0, 9) * 32; s.fbw = BITS(dispfb, 9, 6); s.fpsm = BITS(dispfb, 15, 5); s.lx0 = BITS(dispfb, 32, 11); s.ly0 = BITS(dispfb, 43, 11);
+    s.px1 = w * N; s.py1 = h * N; s.ln = N;
+    if (!gsvk_compose(&s, out)) return 0;
+    *pw = w * N; *ph = h * N; return 1;
+}
 static void dump_frame_hr(uint64_t vb, const uint8_t *priv) {
     const char *dir = getenv("HG_FRAMES_HR"); if (!dir || vk_ncopy < 2) return;
-    static uint32_t *save, *img, *hr; const int N = vk_scale;
-    if (!save) { save = malloc(sizeof vm); img = malloc(1024 * 1024 * 4); hr = malloc((size_t)1024 * 1024 * 4 * 64); }
-    memcpy(save, vm, sizeof vm);
-    int w = 0, h = 0, ok = 1;
-    for (int k = 1; k < vk_ncopy && ok; k++) {
-        gsvk_download_copy(k, all_pages, vm);
-        int w2, h2; ok = display_from(priv, img, 1024, 1024, &w2, &h2); if (!ok) break;
-        w = w2; h = h2; const int i = (k - 1) % N, j = (k - 1) / N;
-        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) hr[(size_t)(y * N + j) * w * N + x * N + i] = img[y * w + x];
-    }
-    memcpy(vm, save, sizeof vm);
-    if (!ok) return;
+    static uint32_t *hr; const int N = vk_scale;
+    if (!hr) hr = malloc((size_t)1024 * 1024 * 4 * 64);
+    int W, H; if (!display_hr(priv, hr, 1024 * N, 1024 * N, &W, &H)) return;
+    const int w = W / N, h = H / N;
     char path[1024]; snprintf(path, sizeof path, "%s/hr_%06llu.ppm", dir, (unsigned long long)vb);
     FILE *f = fopen(path, "wb"); if (!f) return;
     fprintf(f, "P6\n%d %d\n255\n", w * N, h * N);
@@ -1987,7 +1996,7 @@ static pthread_mutex_t gs_mx = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t 
 static _Atomic int cons_sleeping, prod_sleeping; static _Atomic uint64_t vb_sent, vb_done;
 static uint8_t priv_snap[4][0xB0];
 static GifPath shadow[4];                                        /* producer-side packet tracking */
-static uint32_t front[1024 * 1024]; static int front_w, front_h, front_ok; static pthread_mutex_t front_mx = PTHREAD_MUTEX_INITIALIZER;
+static uint32_t *front; static int front_w, front_h, front_ok;   /* up to 4096 x 4096 (upscaled) */ static pthread_mutex_t front_mx = PTHREAD_MUTEX_INITIALIZER;
 static int want_front;
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv);
 static void *gs_main(void *arg) {
@@ -2082,7 +2091,13 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
     cur_vb = vb;
     { static int init; if (!init) { init = 1; const char *p = getenv("HG_PIXWATCH"); if (p) sscanf(p, "%d,%d,%ld", &watch_x, &watch_y, &watch_vb); } }
     if (mtgs && want_front) {
-        static uint32_t tmp[1024 * 1024]; int w, h, ok = display_from(priv, tmp, 1024, 1024, &w, &h);
+        static uint32_t *tmp; if (!tmp) tmp = malloc((size_t)4096 * 4096 * 4);
+        int w, h, ok = 0;
+#ifdef HAVE_VULKAN
+        if (vk_ncopy > 1) ok = display_hr(priv, tmp, 4096, 4096, &w, &h);
+#endif
+        if (!ok) ok = display_from(priv, tmp, 1024, 1024, &w, &h);
+        if (!front) front = malloc((size_t)4096 * 4096 * 4);
         pthread_mutex_lock(&front_mx); front_ok = ok; if (ok) { memcpy(front, tmp, (size_t)w * h * 4); front_w = w; front_h = h; } pthread_mutex_unlock(&front_mx);
     }
     static long every = -1; if (every < 0) every = getenv("HG_FRAME_EVERY") ? atol(getenv("HG_FRAME_EVERY")) : 60;

@@ -23,7 +23,7 @@ enum { B_SELECT = 0, B_L3, B_R3, B_START, B_UP, B_RIGHT, B_DOWN, B_LEFT, B_L2, B
 static SDL_Window *win; static SDL_Renderer *ren; static SDL_Texture *tex;
 static SDL_GameController *pad;
 static int tex_w, tex_h, active = -1;
-static uint32_t frame[1024 * 1024];
+static uint32_t frame[4096 * 4096];   /* up to 4096 x 4096: the upscaled picture (HG_GSVK_SCALE) */
 
 static const struct { SDL_Scancode sc; int bit; } keymap[] = {
     { SDL_SCANCODE_UP, B_UP }, { SDL_SCANCODE_DOWN, B_DOWN }, { SDL_SCANCODE_LEFT, B_LEFT }, { SDL_SCANCODE_RIGHT, B_RIGHT },
@@ -148,7 +148,7 @@ void host_vblank(uint64_t vb) {
     pad_set_input(held, an);
     /* picture */
     int w, h;
-    if (!gs_display(frame, 1024, 1024, &w, &h)) { SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren); SDL_RenderPresent(ren); return; }
+    if (!gs_display(frame, 4096, 4096, &w, &h)) { SDL_SetRenderDrawColor(ren, 0, 0, 0, 255); SDL_RenderClear(ren); SDL_RenderPresent(ren); return; }
     if (!tex || w != tex_w || h != tex_h) {
         if (tex) SDL_DestroyTexture(tex);
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XBGR8888, SDL_TEXTUREACCESS_STREAMING, w, h); tex_w = w; tex_h = h;

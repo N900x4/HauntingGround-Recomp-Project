@@ -260,6 +260,17 @@ void line_step(int i) {   // draw_line()
 }
 void main() {
     p = prims[pc.n];
+    if (p.prim == 4) {   // upscaled display: hi-res pixel (X, Y) is pixel (X/N, Y/N) of copy 1 + X%N + (Y%N)*N
+        int X = int(gl_GlobalInvocationID.x), Y = int(gl_GlobalInvocationID.y), N = p.ln;   // as display_from() in gs.c
+        if (X >= p.px1 || Y >= p.py1) return;
+        uint outw = p.z + uint(Y * p.px1 + X);
+        p.mbase = uint(1 + X % N + (Y % N) * N) << 20;
+        bool is16 = p.fpsm == 2u || p.fpsm == 10u;
+        uint c = read_px(p.fbp, p.fbw, is16 ? int(p.fpsm) : CT32, p.lx0 + X / N, p.ly0 + Y / N);
+        if (is16) c = c16to32(c, 0, 0u, 0x80u);
+        vm[outw] = c & 0xFFFFFFu;
+        return;
+    }
     if (p.serial != 0) {   // primitives that read what they write: the CPU's order, rows then columns
         if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u) return;
         if (p.prim == 2) { for (int i = 0; i <= p.ln; i++) line_step(i); return; }

@@ -20,7 +20,8 @@ static VkInstance inst; static VkPhysicalDevice phys; static VkDevice dev; stati
 static VkDescriptorSetLayout dsl; static VkPipelineLayout pl; static VkPipeline pipe1, pipeb; static VkDescriptorPool dpool; static VkDescriptorSet dset;
 static VkCommandPool cpool; static VkCommandBuffer cmd; static VkFence fence; static VkQueryPool qpool; static float tsperiod;
 typedef struct { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceSize n; } Buf;
-static Buf vram, dvram, xoffb, tabb, primb, clutb, upb;
+static Buf vram, dvram, xoffb, tabb, primb, clutb, upb, hrb;   /* hrb: the upscaled display read back */
+static VkDeviceSize outbase, outbytes;   /* in dvram, after the copies */
 enum { PRIM_MAX = 32768, CLUT_MAX = 4096, UP_BYTES = 32 << 20 };
 static int state;   /* 0 untried, 1 ready, -1 unavailable */
 /* recording */
@@ -78,8 +79,10 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *ta
     const VkBufferUsageFlags xfer = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, sto = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     const VkDeviceSize vbytes = ((1u << 20) + 4) * 4;
     ncopy = ncopies < 1 ? 1 : (uint32_t)ncopies;
+    outbase = (VkDeviceSize)ncopy * (1u << 22) + 16;
     if (!mkbuf_(&vram, vbytes, xfer, 1)) { vkDestroyBuffer(dev, vram.b, 0); vram.b = 0; L("GSVK: no host-cached memory, mirror uncached\n"); }
-    if ((!vram.p && !mkbuf(&vram, vbytes, xfer)) || !mkbuf_(&dvram, (VkDeviceSize)ncopy * (1u << 22) + 16, sto | xfer, 2) || !mkbuf(&xoffb, 66u * 2048 * 4, sto) ||
+    if ((!vram.p && !mkbuf(&vram, vbytes, xfer)) || !mkbuf_(&dvram, (VkDeviceSize)ncopy * (1u << 22) + 16 + (outbytes = ncopy > 1 ? (VkDeviceSize)(ncopy - 1) * 1024 * 1024 * 4 : 0), sto | xfer, 2) ||
+        (outbytes && !mkbuf_(&hrb, outbytes, xfer, 1) && !mkbuf(&hrb, outbytes, xfer)) || !mkbuf(&xoffb, 66u * 2048 * 4, sto) ||
         !mkbuf(&tabb, GSVK_TABLES * 4, sto) || !mkbuf_(&primb, (VkDeviceSize)PRIM_MAX * sizeof(GsVkSprite), sto, 3) ||
         !mkbuf_(&clutb, (VkDeviceSize)CLUT_MAX * 1024, sto, 3) || !mkbuf(&upb, UP_BYTES, xfer)) { L("GSVK: buffers failed\n"); return 0; }
     memcpy(xoffb.p, xoff32, 33u * 2048 * 4); memcpy((uint32_t *)xoffb.p + 33u * 2048, xoff32z, 33u * 2048 * 4); memcpy(tabb.p, tables, GSVK_TABLES * 4);
@@ -224,6 +227,24 @@ void gsvk_download_copy(int k, const uint64_t pages[8], uint32_t *dst) {
     gsvk_finish();
     for (uint32_t i = 0; i < nc; i++) memcpy((uint8_t *)dst + c[i].srcOffset, (uint8_t *)vram.p + c[i].srcOffset, c[i].size);
     vfresh = 1;   /* the mirror no longer holds the whole of the GPU's memory */
+}
+int gsvk_compose(const GsVkSprite *s0, uint32_t *dst) {
+    if (state <= 0 || !outbytes) return 0;
+    GsVkSprite s = *s0;
+    const VkDeviceSize n = (VkDeviceSize)s.px1 * s.py1 * 4;
+    if (n > outbytes || s.px1 <= 0 || s.py1 <= 0) return 0;
+    s.prim = 4; s.px0 = s.py0 = 0; s.serial = 0; s.z = (uint32_t)(outbase / 4);
+    static const uint32_t noclut[256];
+    gsvk_prim(&s, noclut, 1);
+    rec_open(); barrier();
+    VkBufferCopy c = { outbase, 0, n };
+    vkCmdCopyBuffer(cmd, dvram.b, hrb.b, 1, &c);
+    VkMemoryBarrier hb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, 0, 0, 0);
+    gsvk_finish();
+    if (state <= 0) return 0;
+    memcpy(dst, hrb.p, n);
+    return 1;
 }
 void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms) { *submits = n_submits; *dispatches = n_dispatch; *gpu_ms = gpu_ms_all; *wait_ms = wait_ms_all; }
 

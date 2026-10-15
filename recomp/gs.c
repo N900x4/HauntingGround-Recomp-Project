@@ -1151,6 +1151,7 @@ static long vkchk_from = -2, vkchk_to; static int vkb_mode;
    every copy, everything the CPU reads comes from copy 0, which stays exact. Hazard analysis is done on copy 0's
    geometry only: the other copies are for the picture. */
 static int vk_scale = 1, vk_ncopy = 1;
+static uint64_t vk_hr_changes;   /* GPU work recorded since the upscaled picture was last composed */
 /* Pages drawn by the GPU since the CPU last wrote them (render targets). In copy k a render target's pixel t holds
    the scene at t + offset, so a primitive that textures from one reads, in copy k, at its coordinates minus the
    offset (in texels: the effect passes copy and filter at the same or a simple scale). Without this the full-screen
@@ -1216,7 +1217,7 @@ static void gsvk_live_upload(void) {
     for (uint32_t p = 0; p < 512; ) {
         if (!(pg_cpu[p >> 6] >> (p & 63) & 1)) { p++; continue; }
         uint32_t q = p; while (q < 512 && (pg_cpu[q >> 6] >> (q & 63) & 1)) q++;
-        gsvk_upload(p * 2048, (q - p) * 2048, vm + p * 2048); vk_ul_pages += q - p; p = q;
+        gsvk_upload(p * 2048, (q - p) * 2048, vm + p * 2048); vk_ul_pages += q - p; vk_hr_changes++; p = q;
     }
     memset(pg_cpu, 0, sizeof pg_cpu);
 }
@@ -1268,12 +1269,12 @@ static int gsvk_take(const Draw *d, const GsVkSprite *s, int x0, int y0, int x1,
         }
         gsvk_prim(s, cl, 0);
         for (int i = 0; i < 8; i++) { vkb_w[i] |= w[i]; vkb_r[i] |= r[i]; if (vk_live) { pg_gpu[i] |= w[i]; pg_rt[i] |= w[i]; } }
-        vkb_nprim++; vkb_curn++; vk_n[kind]++;
+        vkb_nprim++; vkb_curn++; vk_n[kind]++; vk_hr_changes++;
         return vk_live;
     }
     gsvk_batch_close();
     vk_n[kind]++;
-    if (vk_live) { gsvk_prim(s, cl, 1); for (int i = 0; i < 8; i++) { pg_gpu[i] |= w[i]; pg_rt[i] |= w[i]; } return 1; }
+    if (vk_live) { gsvk_prim(s, cl, 1); for (int i = 0; i < 8; i++) { pg_gpu[i] |= w[i]; pg_rt[i] |= w[i]; } vk_hr_changes++; return 1; }
     gsvk_check_begin(vm); gsvk_prim(s, cl, 1); vk_alone[kind]++;
     vk_pending = kind; vk_box[0] = x0; vk_box[1] = x1; vk_box[2] = y0; vk_box[3] = y1;
     return 0;
@@ -1323,8 +1324,8 @@ static void gsvk_sprite_prim(const Draw *d, const Vtx *a, const Vtx *b) {
             Vtx a2 = *a, b2 = *b; const int ox = vk_off((k - 1) % vk_scale), oy = vk_off((k - 1) / vk_scale);
             a2.x -= ox; b2.x -= ox; a2.y -= oy; b2.y -= oy;
             SprGeo g2; sprite_geo(d, &a2, &b2, &g2);
-            if (g2.px1 <= g2.px0 || g2.py1 <= g2.py0) continue;
             GsVkSprite s2 = s;
+            if (g2.px1 <= g2.px0 || g2.py1 <= g2.py0) { if (serial) continue; g2.px0 = g2.px1 = g2.py0 = g2.py1 = 0; }   /* place holder */
             s2.px0 = g2.px0; s2.px1 = g2.px1; s2.py0 = g2.py0; s2.py1 = g2.py1; s2.x0 = g2.x0; s2.y0 = g2.y0; s2.u0 = g2.u0; s2.v0 = g2.v0; s2.du = g2.du; s2.dv = g2.dv;
             if (rt) { s2.u0 -= ox; s2.v0 -= oy; }
             s2.mbase = (uint32_t)k << 20;
@@ -1431,7 +1432,7 @@ static void gsvk_triangle_prim(const Draw *d, const Vtx *v0, const Vtx *v1, cons
             int ny0 = (int)floorf(fminf(s2.ty0, fminf(s2.ty1, s2.ty2))), ny1 = (int)ceilf(fmaxf(s2.ty0, fmaxf(s2.ty1, s2.ty2)));
             if (nx0 < d->scx0) nx0 = d->scx0; if (nx1 > d->scx1) nx1 = d->scx1;
             if (ny0 < d->scy0) ny0 = d->scy0; if (ny1 > d->scy1) ny1 = d->scy1;
-            if (nx0 > nx1 || ny0 > ny1) continue;
+            if (nx0 > nx1 || ny0 > ny1) { if (serial) continue; nx0 = 0; nx1 = -1; ny0 = 0; ny1 = -1; }   /* place holder */
             s2.px0 = nx0; s2.px1 = nx1 + 1; s2.py0 = ny0; s2.py1 = ny1 + 1; s2.mbase = (uint32_t)k << 20;
             if (rt) {   /* texture coordinates are 1/16 texel, times q */
                 s2.tu0 -= ox * 16 * s2.tq0; s2.tu1 -= ox * 16 * s2.tq1; s2.tu2 -= ox * 16 * s2.tq2;
@@ -1944,7 +1945,9 @@ static int display_hr(const uint8_t *priv, uint32_t *out, int maxw, int maxh, in
     GsVkSprite s = { 0 };
     s.fbp = BITS(dispfb, 0, 9) * 32; s.fbw = BITS(dispfb, 9, 6); s.fpsm = BITS(dispfb, 15, 5); s.lx0 = BITS(dispfb, 32, 11); s.ly0 = BITS(dispfb, 43, 11);
     s.px1 = w * N; s.py1 = h * N; s.ln = N;
+    gsvk_live_upload();
     if (!gsvk_compose(&s, out)) return 0;
+    vk_hr_changes = 0;
     *pw = w * N; *ph = h * N; return 1;
 }
 static void dump_frame_hr(uint64_t vb, const uint8_t *priv) {
@@ -2085,7 +2088,9 @@ void gs_vblank(uint64_t vb) {
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
     gsw_drain();   /* the display and frame dumps read local memory */
 #ifdef HAVE_VULKAN
-    if (vk_live) gsvk_live_need(all_pages);
+    /* upscaled window: the picture comes from the copies, composed on the GPU; copy 0 is read only for frame dumps */
+    static int hr_window = -1; if (hr_window < 0) hr_window = vk_ncopy > 1 && !getenv("HG_FRAMES");
+    if (vk_live && !(hr_window && mtgs)) gsvk_live_need(all_pages);
 #endif
     gs_nodraw = gs_draw_from < 0 || (uint64_t)gs_draw_from > vb;
     cur_vb = vb;
@@ -2094,12 +2099,21 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
         static uint32_t *tmp; if (!tmp) tmp = malloc((size_t)4096 * 4096 * 4);
         int w, h, ok = 0;
 #ifdef HAVE_VULKAN
-        if (vk_ncopy > 1) ok = display_hr(priv, tmp, 4096, 4096, &w, &h);
+        if (vk_ncopy > 1) {   /* nothing drawn or uploaded since the last picture, same display registers: keep it */
+            static uint8_t last[0xB0]; static int have;
+            if (have && !vk_hr_changes && !memcmp(last, priv, 0xB0) && front_ok) goto front_done;
+            memcpy(last, priv, 0xB0); have = 1;
+            ok = display_hr(priv, tmp, 4096, 4096, &w, &h);
+            if (!ok) gsvk_live_need(all_pages);   /* the native picture instead */
+        }
 #endif
         if (!ok) ok = display_from(priv, tmp, 1024, 1024, &w, &h);
         if (!front) front = malloc((size_t)4096 * 4096 * 4);
         pthread_mutex_lock(&front_mx); front_ok = ok; if (ok) { memcpy(front, tmp, (size_t)w * h * 4); front_w = w; front_h = h; } pthread_mutex_unlock(&front_mx);
     }
+#ifdef HAVE_VULKAN
+front_done: ;
+#endif
     static long every = -1; if (every < 0) every = getenv("HG_FRAME_EVERY") ? atol(getenv("HG_FRAME_EVERY")) : 60;
     if (every > 0 && vb % every == 0) dump_frame(vb, priv);
     static uint64_t last_log; if (vb - last_log >= 600) { last_log = vb; L("GS: VBlank %llu: %llu prims, %llu pixels, %llu GIF tags, %llu image qwords so far\n",

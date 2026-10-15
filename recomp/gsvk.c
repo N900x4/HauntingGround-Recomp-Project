@@ -92,7 +92,7 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *ta
     for (int i = 0; i < 5; i++) bd[i] = (VkDescriptorSetLayoutBinding){ .binding = (uint32_t)i, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                                                          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT };
     VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 5, .pBindings = bd };
-    VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 16 };
+    VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 20 };
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
     if (vkCreateDescriptorSetLayout(dev, &dli, 0, &dsl) || vkCreatePipelineLayout(dev, &pli, 0, &pl)) { L("GSVK: pipeline layout failed\n"); return 0; }
     for (int k = 0; k < 2; k++) {
@@ -150,9 +150,9 @@ static void close_batch(void) {
     int x0 = bx0 < 0 ? 0 : bx0, y0 = by0 < 0 ? 0 : by0, x1 = bx1 > 2048 ? 2048 : bx1, y1 = by1 > 2048 ? 2048 : by1;
     if (x1 > x0 && y1 > y0) {
         rec_open(); barrier(); use(pipeb);
-        int32_t pc[4] = { (int32_t)bn, x0, y0, (int32_t)bfirst };
+        int32_t pc[5] = { (int32_t)bn, x0, y0, (int32_t)bfirst, (int32_t)ncopy };
         vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
-        vkCmdDispatch(cmd, (uint32_t)(x1 - x0 + 7) / 8, (uint32_t)(y1 - y0 + 7) / 8, 1);
+        vkCmdDispatch(cmd, (uint32_t)(x1 - x0 + 7) / 8, (uint32_t)(y1 - y0 + 7) / 8, ncopy);   /* z: the copy */
         n_dispatch++;
     }
     bn = 0;
@@ -189,13 +189,13 @@ void gsvk_upload(uint32_t w, uint32_t n, const uint32_t *src) {
 /* one primitive: alone (lines, serial ones) or added to the batch being collected */
 void gsvk_prim(const GsVkSprite *s, const uint32_t *clut, int alone) {
     if (state <= 0) return;
-    if (nprim == PRIM_MAX || nclut == CLUT_MAX) gsvk_finish();
+    if (s->mbase == 0 && (nprim + ncopy > PRIM_MAX || nclut == CLUT_MAX)) gsvk_finish();   /* a primitive's copies stay together */
     static uint32_t last[256];   /* the ring may be video memory mapped over the bus: never read it back */
     if (!nclut || memcmp(last, clut, 1024)) { memcpy(last, clut, 1024); memcpy((uint32_t *)clutb.p + nclut++ * 256, clut, 1024); }
     GsVkSprite *d = (GsVkSprite *)primb.p + nprim; *d = *s; d->clutoff = (nclut - 1) * 256;
     if (alone) {
         close_batch(); rec_open(); barrier(); use(pipe1);
-        int32_t pc[4] = { (int32_t)nprim, 0, 0, 0 };
+        int32_t pc[5] = { (int32_t)nprim, 0, 0, 0, (int32_t)ncopy };
         vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
         if (s->serial) vkCmdDispatch(cmd, 1, 1, 1);
         else vkCmdDispatch(cmd, (uint32_t)(s->px1 - s->px0 + 7) / 8, (uint32_t)(s->py1 - s->py0 + 7) / 8, 1);
@@ -203,7 +203,8 @@ void gsvk_prim(const GsVkSprite *s, const uint32_t *clut, int alone) {
     } else {
         if (!bn) { bfirst = nprim; bx0 = by0 = 1 << 30; bx1 = by1 = -(1 << 30); }
         bn++;
-        if (s->px0 < bx0) bx0 = s->px0; if (s->py0 < by0) by0 = s->py0; if (s->px1 > bx1) bx1 = s->px1; if (s->py1 > by1) by1 = s->py1;
+        if (s->px1 > s->px0 && s->py1 > s->py0) {   /* (a copy's empty place holder adds nothing) */
+            if (s->px0 < bx0) bx0 = s->px0; if (s->py0 < by0) by0 = s->py0; if (s->px1 > bx1) bx1 = s->px1; if (s->py1 > by1) by1 = s->py1; }
     }
     nprim++;
 }

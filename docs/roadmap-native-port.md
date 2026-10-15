@@ -187,6 +187,10 @@ Dependencies: none. Risks: queue synchronization bugs (validation layers), drive
 
 Goal: VU1 cost per VBlank cut by 2-3x with identical results, then VU1 off the EE thread, so the EE thread has headroom for everything later (interpolation logging, settings, mods, other machines).
 
+**Status (2026-10-15): steps 2.0 and 2.1 done, step 2.2 deferred by Q2** (VU1 7.3 -> 2.8 ms per VBlank, EE thread
+9.8 -> 5.3 ms in stage 1; 0 AMBIGUOUS consumers; details, gates and the thread design in
+`docs/renderer-performance.md`, last section).
+
 **Step 2.0: measure and prove (1 day).**
 - Baseline with `HG_SPEEDLOG=300` in stage 1 and the Castle Suite: VU1 ms per VBlank (today 6.4-7.3), runs, instructions, AOT handovers (expect 0).
 - Write `tools/vu1timing.py` (reads the 19 programs through `vu1gen.programs`): build the control-flow graph per program (B, BAL, IBxx, JR/JALR, E-bit), then for every Q consumer (an upper op with the Q broadcast source, `MULq`, `ADDq`, ...), every P consumer (`MFP`) and every `WAITQ`/`WAITP`, find on every path the nearest preceding DIV/SQRT/RSQRT/EFU and the minimum and maximum elapsed cycles: instructions on the path plus the possible stall range (0 to 3 cycles per pair from the 4-cycle VF latency, up to 13 from a busy FDIV). Classify each consumer: **SAFE** (a WAITQ/WAITP lies between, or minimum cycles >= latency), **OLD** (maximum cycles < latency: the consumer certainly sees the previous Q/P), **AMBIGUOUS** (otherwise). Print the table. Also list every `JR`/`JALR` (dynamic targets) and every MSCNT entry point (the pair after an E-bit pair, plus 0 and every MSCAL immediate the game uses).

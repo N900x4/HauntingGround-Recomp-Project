@@ -20,6 +20,25 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### 2026-10-15 (afternoon): roadmap phase 2, VU1 compiled as whole programs
+
+- **Timing analysis** (`recomp/vu1timing.py`, commit `bbd813d`): for every Q consumer (MULq/ADDq) and P consumer
+  (MFP) of the 19 programs, all paths explored under both copies of the timing model. Q: 195 SAFE, 5 OLD,
+  0 AMBIGUOUS; P: 58 SAFE, 13 OLD, 0 AMBIGUOUS. No JR/JALR, no path leaves a program, the two models never stall
+  differently. The OLD ones are the game's own software pipelining.
+- **Generator v2** (`recomp/vu1gen.py`, `cd507d1`, `83bf07a`): one C function per program, no cycle bookkeeping;
+  Q/P committed where the proof says; flags that are overwritten before anyone can see them only feed the sticky
+  status bits; XGKICK in one call to the GS ring (`gif_kick`). Programs the proof would not cover fall back to the
+  v1 per-pair code (none do).
+- **Checked**: `HG_VU1CHECK` 2.02 M + 1.36 M + 17.66 M runs (New Game, Castle Suite, the whole recorded session),
+  0 mismatches, 0 handovers; frames identical to `hashA`/`cs.md5` (software, GPU, +60, x5) and to `soak.md5`;
+  `gpucheck.sh batch` clean; window x5 + 60 fps at 1.00x (median 16.72 ms, 0 repeats, 0 out of order).
+- **Speed** (`abba.py`): VU1 7.3 -> 2.8 ms per VBlank in stage 1, 6.9 -> 2.7 in the Castle Suite; EE thread
+  9.8 -> 5.3 and 9.0 -> 4.8 ms (`HG_GSDRAW=0`). Table and details: `docs/renderer-performance.md`, last section.
+- **VU1 thread: not built** (the user's rule Q2: compile, re-measure, decide). The EE thread uses about a third of its
+  budget; the design for later is in `docs/renderer-performance.md`.
+- `tools/verify/abba.py` now prints VU1 ms too and takes `HG_ROUTE=cs` (Castle Suite from `../memcards`).
+
 ### Day 2026-10-15: 60 fps and 4K (the user at work)
 
 - **60 fps works** (`HG_GSVK=1 HG_GSVK_INTERP=1`): each 30 Hz frame is replayed on the GPU with its triangles moved

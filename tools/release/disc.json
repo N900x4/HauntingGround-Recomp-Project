@@ -1,0 +1,70 @@
+{
+ "title": "Haunting Ground",
+ "serial": "SLUS-21075",
+ "region": "NTSC-U",
+ "boot": "SLUS_210.75",
+ "elf": "SLUS_210.75",
+ "note": "SHA-256 of the files the build and the game read from the disc (no game data: digests only). Made from a dump that boots and plays; see tools/release/README.md.",
+ "files": {
+  "SLUS_210.75": [
+   3650608,
+   "3b374d53a499d2c17b205274ee9eb34280768f294f970ebf6ae6731f6a2dacb8"
+  ],
+  "DATA.CVM": [
+   1577156608,
+   "308f99c32f65f72f649a978956379433d13ba2e26b8f654b1385fb651bac658c"
+  ],
+  "MODULES/CRI_ADXI.IRX": [
+   69261,
+   "65e4ef1f223eb7f988e28b1e5cda14aee48a7844a561d8a42f31847b6fbbe4c1"
+  ],
+  "MODULES/DBCMAN.IRX": [
+   15653,
+   "60bfea7d0877df3af370676666e5f1043b6e71723fab94cdff790c19e75e12e7"
+  ],
+  "MODULES/DS2O_S1.IRX": [
+   10941,
+   "68f5bcbaba9afad15a2393b7069e5b00dad7d5ab10aef6028327d7a32f632fbc"
+  ],
+  "MODULES/IOPRP300.IMG": [
+   278305,
+   "8e11fc76bbdd5770a47a56549d861c0caebc9f9190a1cf936990dcff9e5a86c5"
+  ],
+  "MODULES/LIBSD.IRX": [
+   30085,
+   "94915a3d9673e8a370e144ae493552d5e1f3956bb9ae5bd91e2da5f36c83ce7d"
+  ],
+  "MODULES/MCMAN.IRX": [
+   96181,
+   "b4df4061f8fdc9c7cf06a329b96227ad6ca69d008df475c1fc4d3e8d06fe3fa4"
+  ],
+  "MODULES/MCSERV.IRX": [
+   7385,
+   "5006b0dd650fa416d03a559bc8e3bae8a7ae95be81f3e4f3fd9bd524fa27e000"
+  ],
+  "MODULES/MODHSYN.IRX": [
+   63037,
+   "804a40a38d620ecc88b81b90afb8aab262f0540187e8db25eed1ede69131fed1"
+  ],
+  "MODULES/MODMIDI.IRX": [
+   21941,
+   "c22df1c868d4baa4f51ab45e319e6b76fcab7fe0be7f0d5493a9f60285501489"
+  ],
+  "MODULES/MODMSIN.IRX": [
+   1929,
+   "b1a46d7ff1379222af01662b03a972b8e7d23cf2360cbe20c44569df788821ba"
+  ],
+  "MODULES/SIO2D.IRX": [
+   11289,
+   "b07339d0b6ef6021ebb2bd8dba1138f3159b2cdfbf1b29df799694107107d330"
+  ],
+  "MODULES/SIO2MAN.IRX": [
+   6641,
+   "565ec77e75f174cfddf72c41ccc446c1c07a3d5fb0a2ccfefad337cb8a7d0728"
+  ],
+  "MODULES/SNDDRV.IRX": [
+   82848,
+   "3b8e76b6fcaa1b3fbe59848a6094bd230d5fe9643496e3aff5f3b969730404bf"
+  ]
+ }
+}

@@ -1,0 +1,3 @@
+windows-default-manifest (default-manifest.o, linked into programs built with this GCC)
+MSYS2 package mingw-w64-ucrt-x86_64-windows-default-manifest; licence: public domain (the package's own declaration,
+"custom:Public Domain"). Origin: the Cygwin windows-default-manifest package.

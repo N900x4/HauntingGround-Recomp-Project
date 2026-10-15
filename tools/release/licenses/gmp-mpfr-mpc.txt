@@ -1,0 +1,5 @@
+GMP (https://gmplib.org/), MPFR (https://www.mpfr.org/) and MPC (https://www.multiprecision.org/) are bundled as
+libgmp-*.dll, libmpfr-*.dll and libmpc-*.dll, libraries GCC's cc1.exe uses. They are distributed under the GNU Lesser
+General Public License version 3 or later (GMP: LGPL-3.0-or-later or GPL-2.0-or-later, at your option). The texts of
+the GNU LGPL v3 (COPYING3.LIB) and the GNU GPL v3 (COPYING3) are in this folder. The source code: see
+THIRD_PARTY_NOTICES.txt, "Source code".

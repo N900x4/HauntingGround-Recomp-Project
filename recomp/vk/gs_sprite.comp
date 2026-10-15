@@ -393,6 +393,14 @@ void apply_copy(int z) {
         return;
     }
     int oxi = int(round(ox * 16.0)), oyi = int(round(oy * 16.0));
+    // A render target copied one texel per pixel (along an axis) is a memory operation, not a scene: the effect passes
+    // that shuffle channels through 16-bit views draw 8-pixel strips with gaps, and moving those strips by under a
+    // pixel left a column out at one edge and wrote one too many at the other in half the copies (dark lines every
+    // 16 pixels, fixed on the screen). Each copy does the same operation on its own memory, unmoved.
+    if (PF(rt) != 0) {
+        if (PF(su1) - PF(su0) == float(PF(sx1) - PF(sx0))) oxi = 0;
+        if (PF(sv1) - PF(sv0) == float(PF(sy1) - PF(sy0))) oyi = 0;
+    }
     if (PF(prim) == 3) { PF(lx0) = (PF(sx0) - oxi) >> 4; PF(ly0) = (PF(sy0) - oyi) >> 4; PF(px0) = PF(lx0); PF(px1) = PF(lx0) + 1; PF(py0) = PF(ly0); PF(py1) = PF(ly0) + 1; return; }
     if (PF(prim) != 0) return;
     int x0 = PF(sx0) - oxi, x1 = PF(sx1) - oxi, y0 = PF(sy0) - oyi, y1 = PF(sy1) - oyi;   // sprite_geo()
@@ -401,6 +409,12 @@ void apply_copy(int z) {
     if (y0 > y1) { int t = y0; y0 = y1; y1 = t; float f = v0; v0 = v1; v1 = f; }
     int px0 = (x0 + 15) >> 4, px1 = (x1 + 15) >> 4, py0 = (y0 + 15) >> 4, py1 = (y1 + 15) >> 4;
     px0 = max(px0, PF(scx0)); px1 = min(px1, PF(scx1) + 1); py0 = max(py0, PF(scy0)); py1 = min(py1, PF(scy1) + 1);
+    // a sprite that reaches the scissor's edge in the frame (c_px0 .. still hold copy 0's rectangle) reaches it in
+    // every copy: moved by under a pixel it left the edge column of half the copies undrawn (a dark line at the border)
+    if (PF(px0) <= PF(scx0)) px0 = PF(scx0);
+    if (PF(px1) > PF(scx1)) px1 = PF(scx1) + 1;
+    if (PF(py0) <= PF(scy0)) py0 = PF(scy0);
+    if (PF(py1) > PF(scy1)) py1 = PF(scy1) + 1;
     PF(du) = x1 != x0 ? (u1 - u0) / float(x1 - x0) : 0.0; PF(dv) = y1 != y0 ? (v1 - v0) / float(y1 - y0) : 0.0;
     PF(px0) = px0; PF(px1) = px1; PF(py0) = py0; PF(py1) = py1; PF(x0) = x0; PF(y0) = y0; PF(u0) = u0; PF(v0) = v0;
     if (PF(rt) != 0) { PF(u0) -= float(oxi); PF(v0) -= float(oyi); }

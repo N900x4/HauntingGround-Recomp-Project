@@ -1445,8 +1445,11 @@ static void gsvk_sprite_prim(const Draw *d, const Vtx *a, const Vtx *b) {
     }
     if (gsvk_take(d, &s, g.px0, g.py0, g.px1 - 1, g.py1 - 1, serial, 0)) {
         const int rt = gsvk_tex_is_rt(d);
+        int one_x = 0, one_y = 0;   /* a render target copied one texel per pixel: not moved (as apply_copy in the shader) */
+        if (rt && s.gcopy == 0) { float uu0 = 0, vv0 = 0, uu1 = 0, vv1 = 0; vtx_uv(d, a, &uu0, &vv0); vtx_uv(d, b, &uu1, &vv1);
+                                  one_x = uu1 - uu0 == (float)(b->x - a->x); one_y = vv1 - vv0 == (float)(b->y - a->y); }
         for (int k = 1; k < vk_ncopy && s.gcopy == 0; k++) {   /* the sub-pixel copies, for a primitive drawn alone */
-            Vtx a2 = *a, b2 = *b; const int ox = vk_off((k - 1) % vk_scale), oy = vk_off((k - 1) / vk_scale);
+            Vtx a2 = *a, b2 = *b; const int ox = one_x ? 0 : vk_off((k - 1) % vk_scale), oy = one_y ? 0 : vk_off((k - 1) / vk_scale);
             a2.x -= ox; b2.x -= ox; a2.y -= oy; b2.y -= oy;
             SprGeo g2; sprite_geo(d, &a2, &b2, &g2);
             GsVkSprite s2 = s;
@@ -1815,14 +1818,23 @@ static int vi_replay(const VkLog *P, const VkLog *C, float t, int set, int need0
     vi_match(P, C, match);
     vi_t_match += host_now() - tm0; tm0 = host_now();
     uint64_t sub0, dis0; double g0, w0; gsvk_stats(&sub0, &dis0, &g0, &w0);
-    double moved = 0; uint64_t ntri = 0;   /* camera cut? */
+    double moved = 0; uint64_t ntri = 0, ctri = 0;   /* camera cut? */
     for (size_t i = 0; i < C->n; i++) {
-        const VkLogEnt *e = &C->e[i]; if (e->op || e->k || match[i] < 0 || e->prim < 3 || e->prim > 5) continue;
+        const VkLogEnt *e = &C->e[i]; if (e->op || e->k || e->prim < 3 || e->prim > 5) continue;
+        ctri++;
+        if (match[i] < 0) continue;
         const VkLogEnt *f = &P->e[match[i]];
         for (int k = 0; k < 3; k++) moved += abs(e->w[k].x - f->w[k].x) + abs(e->w[k].y - f->w[k].y);
         ntri++;
     }
     if (ntri && moved / (ntri * 3) > 32 * 16 * 2) return 0;
+    /* A cut to another camera: most of the new frame's triangles (the new view's background) have no partner in the
+       previous one, while the few that do (Fiona) would be drawn halfway between two unrelated screen positions over
+       the new background. Fewer than 40 % matched: the real picture is shown twice, as for a big move. */
+    {   static int cutlog = -1; if (cutlog < 0) cutlog = getenv("HG_VI_CUTLOG") ? atoi(getenv("HG_VI_CUTLOG")) : 0;
+        if (cutlog && ctri >= 100) L("GSVK cutlog: VB %llu: %llu of %llu triangles matched (%.0f %%), moved %.1f px\n", (unsigned long long)cur_vb,
+                                     (unsigned long long)ntri, (unsigned long long)ctri, 100.0 * ntri / ctri, ntri ? moved / (ntri * 3) / 16.0 : 0.0);
+        if (ctri >= 200 && ntri * 10 < ctri * 4) return 0; }
     {   size_t need = 1024; while (need < C->n * 6) need *= 2;
         if (need > vimv_cap) { free(vimv); vimv = malloc(need * sizeof *vimv); vimv_cap = need; }
         vimv_mask = vimv_cap - 1; memset(vimv, 0, vimv_cap * sizeof *vimv);

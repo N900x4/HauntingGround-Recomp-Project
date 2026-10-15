@@ -108,6 +108,7 @@ void dump_stats(const char *why) {
 void stop(const char *fmt, ...) {
     char buf[512]; va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
     fprintf(stderr, "STOP: %s\n", buf);
+    host_shutdown();   /* a swapchain left presenting into a window torn down by exit() kept the process from ending */
     dump_stats(buf); exit(0);
 }
 void rec_first(int i) { if (n_first < MAXF) first_order[n_first++] = i; }

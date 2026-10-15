@@ -51,8 +51,8 @@ obj/gsvk.o: gsvk.c gsvk.h gen/gs_sprite_spv.h gen/gs_batch_spv.h gen/gs_batchc_s
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
 obj/dmac.o: dmac.c ee_runtime.h hle.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/host_sdl.o: host_sdl.c ee_runtime.h hle.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) $(SDL_CFLAGS) -c $< -o $@
+obj/host_sdl.o: host_sdl.c ee_runtime.h hle.h gsvk.h
+	@mkdir -p obj; $(CC) $(RTFLAGS) $(SDL_CFLAGS) $(VK_CFLAGS) -c $< -o $@
 obj/vu1.o: vu1.c vu1_core.h ee_runtime.h hle.h vu1_state.h
 	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -ffp-contract=off -c $< -o $@
 obj/ipu.o: ipu.c ee_runtime.h hle.h

@@ -54,6 +54,7 @@ int hle_cd_read_iop(uint32_t lsn, uint32_t n, uint32_t iop_addr);
 /* host_sdl.c: window + live input (no-ops when built without SDL or run with HG_WINDOW=0) */
 int host_window_wanted(void);
 void host_vblank(uint64_t vblank);
+void host_shutdown(void);   /* before exit: the UI thread stops presenting and closes the window */
 void host_audio_push(const int16_t *stereo, int frames);   /* 48 kHz stereo from the SPU2 */   /* $HG_GAME_DIR/name, default ../game/name */
 void hle_run_main(uint32_t entry) __attribute__((noreturn));
 #endif

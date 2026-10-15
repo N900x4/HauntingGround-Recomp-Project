@@ -43,13 +43,24 @@ void gsvk_compose_fetch(int slot, uint32_t *dst, size_t words);  /* after gsvk_f
 /* where primitives and uploads go: copies [first, first + count) (primitives add first << 20 to their mbase) */
 void gsvk_set_target(uint32_t first, uint32_t count);
 void gsvk_copy_copies(uint32_t dst, uint32_t src, uint32_t count);   /* whole copies, on the GPU, in stream order */
+void gsvk_skip_exact(int on);   /* 1: batches leave out the exact copy (copy 0) of the set drawn into (replays only need the others) */
 void gsvk_finish(void);                                                    /* submit and wait for everything */
 uint64_t gsvk_submit(void);                                                /* submit, do not wait: an id */
 void gsvk_wait(uint64_t id);                                               /* that submission (and earlier) done */
+uint64_t gsvk_last(void);                                                  /* the last submission's id */
+uint64_t gsvk_done(void);                                                  /* any thread: the last submission done (0 without the window) */
 void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms);   /* wait: wall ms in submit+wait */
 /* HG_GSVK_TIMING=1: GPU ms per phase: exact batches, copies batches, single primitives, compose, transfers; then the
    same five for the replays of frame interpolation */
 void gsvk_phase_stats(double ms[10]);
+/* presenting the window from video memory (the window's pictures never leave the GPU) */
+int gsvk_ready(void);                                    /* any thread: 1 set up, 0 not yet, -1 unavailable */
+int gsvk_present_ready(void);                            /* any thread: gsvk_present_init() succeeded */
+int gsvk_pic(const GsVkSprite *s, uint64_t *id);         /* GS thread: as gsvk_compose, into a picture image: its index (or -1), the submission */
+void gsvk_pic_release(int k);                            /* any thread: picture image k is not needed (dropped unseen) */
+int gsvk_present_init(void *hinstance, void *hwnd);      /* UI thread: a swapchain on the window; 0: not possible */
+void gsvk_present(int k, uint64_t id, const uint32_t *ov);   /* UI thread: show picture k (k < 0: the last again), overlay 176 x 42 or 0 */
+void gsvk_present_shutdown(void);                        /* UI thread, before the process ends */
 /* checking: the GPU's memory is set to `now`, then primitives are recorded, then the GPU's memory comes back */
 void gsvk_check_begin(const uint32_t *now);
 const uint32_t *gsvk_check_end(double *ms);

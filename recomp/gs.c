@@ -1727,10 +1727,12 @@ static int vi_tri_geom(GsVkSprite *s, const VkLogEnt *e, const Vtx *w) {
     }
     return 1;
 }
-/* frame C replayed into set I from snapshot S, at t between the previous frame P (0) and C (1); 0: a camera cut.
-   The GPU records C produced are submitted again: triangles with their vertices moved (a matched one towards its
-   place in P, an unmatched one with its neighbours), their sub-pixel copies following; the rest as they were. */
-static int vi_replay(const VkLog *P, const VkLog *C, float t) {
+/* frame C replayed from snapshot S, at t between the previous frame P (0) and C (1), into set I (set 1, a copy of S)
+   or into S itself (set 2: the last replay of a frame, as the next snapshot replaces S anyway); 0: a camera cut. The
+   GPU records C produced are submitted again: triangles with their vertices moved (a matched one towards its place in
+   P, an unmatched one with its neighbours), their sub-pixel copies following; the rest as they were. Without need0
+   the set's exact copy is not drawn (with upscaling the picture comes from the others). */
+static int vi_replay(const VkLog *P, const VkLog *C, float t, int set, int need0) {
     static int *match; static size_t capm;
     match = vi_grow(match, &capm, C->n + 1, sizeof *match);
     double tm0 = host_now();
@@ -1756,8 +1758,8 @@ static int vi_replay(const VkLog *P, const VkLog *C, float t) {
     }
     static const uint32_t noclut[256];
     gsvk_batch_close();
-    gsvk_copy_copies(vk_ncopy, 2 * vk_ncopy, vk_ncopy);   /* I = S */
-    gsvk_set_target(vk_ncopy, vk_ncopy);
+    if (set == 1) gsvk_copy_copies(vk_ncopy, 2 * vk_ncopy, vk_ncopy);   /* I = S */
+    gsvk_set_target(set * vk_ncopy, vk_ncopy); gsvk_skip_exact(!need0);
     const VkLogEnt *rec0 = 0; GsVkSprite cur0; int mod0 = 0;
     for (size_t i = 0; i < C->n; i++) {
         const VkLogEnt *e = &C->e[i];
@@ -1801,7 +1803,7 @@ static int vi_replay(const VkLog *P, const VkLog *C, float t) {
         }
         gsvk_prim(&s, e->clut >= 0 ? C->cl + (size_t)e->clut * 256 : noclut, e->alone);
     }
-    gsvk_break();
+    gsvk_break(); gsvk_skip_exact(0);
     gsvk_set_target(0, vk_ncopy);
     vi_t_replay += host_now() - tm0;
     { uint64_t sub1, dis1; double g1, w1; gsvk_stats(&sub1, &dis1, &g1, &w1); vi_r_sub += sub1 - sub0; vi_r_wait += w1 - w0; }
@@ -1811,8 +1813,12 @@ static int display_pic(const uint8_t *priv, uint32_t *out, int maxw, int maxh, i
 static int display_pic_(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph, int base, int N, int slot);
 static int display_interp(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph);
 static void vi_reset(VkLog *L) { L->n = 0; L->ncl = 0; L->nd = 0; L->disp = 0; }
+static int display_gpu(const uint8_t *priv, int base, int N, uint64_t *id, int *pw, int *ph);
 /* at each VBlank, before the picture is taken: a frame completed? then the in-between picture is drawn */
-static uint32_t *vi_pic[3]; static int vi_pw[3], vi_ph[3], vi_want;   /* in-between pictures, if anyone looks */
+static uint32_t *vi_pic[3]; static int vi_pw[3], vi_ph[3], vi_want;   /* in-between pictures read back (dumps, the SDL window) */
+static int vi_gpu, vi_cpu;   /* (set by the caller) the window is presented from video memory; pictures are needed in memory */
+static int vi_slot[3] = { -1, -1, -1 }, vi_gw[3], vi_gh[3]; static uint64_t vi_id[3];   /* in-between pictures in picture images */
+static void vi_drop(int j) { if (vi_slot[j] >= 0) { gsvk_pic_release(vi_slot[j]); vi_slot[j] = -1; } }
 static void vi_vblank(uint64_t vb, const uint8_t *priv) {
     vi_show = 0;
     if (!vk_interp || !vk_live || !priv) return;
@@ -1824,7 +1830,7 @@ static void vi_vblank(uint64_t vb, const uint8_t *priv) {
         /* HG_VI_SELFTEST=1: replayed with no movement, the frame must come out as the real one, pixel for pixel */
         static uint32_t *a, *b; if (!a) { a = malloc((size_t)1024 * 1024 * 4); b = malloc((size_t)1024 * 1024 * 4); }
         int w1, h1, w2, h2;
-        if (vi_replay(P, C, 1.0f) && display_pic(priv, a, 1024, 1024, &w1, &h1, vk_ncopy, 1) && display_pic(priv, b, 1024, 1024, &w2, &h2, 0, 1) && w1 == w2 && h1 == h2) {
+        if (vi_replay(P, C, 1.0f, 1, 1) && display_pic(priv, a, 1024, 1024, &w1, &h1, vk_ncopy, 1) && display_pic(priv, b, 1024, 1024, &w2, &h2, 0, 1) && w1 == w2 && h1 == h2) {
             uint64_t bad = 0; for (int i = 0; i < w1 * h1; i++) bad += a[i] != b[i];
             vi_st_frames++; if (bad) { vi_st_bad++; static int nl; if (nl++ < 20) L("GSVK selftest: VB %llu: replay differs from the frame in %llu pixels\n", (unsigned long long)vb, (unsigned long long)bad); }
         }
@@ -1832,14 +1838,19 @@ static void vi_vblank(uint64_t vb, const uint8_t *priv) {
     if (vb - vk_last_done == 2 && vlog_prev_ok && vk_have_snap) {
         static const float t1[1] = { 0.5f }, t3[3] = { 0.25f, 0.5f, 0.75f };
         const int n = vk_interp >= 2 ? 3 : 1; const float *ts = n == 3 ? t3 : t1; int ok = 1;
-        for (int j = 0; j < n && ok; j++) {   /* replay, picture, replay, picture...: recorded, then one wait */
-            ok = vi_replay(P, C, ts[j]);
-            if (ok && vi_want) {
+        for (int j = 0; j < 3; j++) vi_drop(j);
+        for (int j = 0; j < n && ok; j++) {   /* replay, picture, replay, picture... */
+            const int set = j == n - 1 ? 2 : 1, base = set * vk_ncopy + (vk_ncopy > 1);
+            ok = vi_replay(P, C, ts[j], set, vk_ncopy == 1);
+            vi_pw[j] = 0;
+            if (ok && vi_want && vi_gpu) vi_slot[j] = display_gpu(priv, base, vk_scale, &vi_id[j], &vi_gw[j], &vi_gh[j]);   /* not waited for */
+            if (ok && vi_want && vi_cpu) {   /* recorded, then one wait */
                 const size_t cap = (size_t)4096 * 4096; if (!vi_pic[j]) vi_pic[j] = malloc(cap * 4);
-                if (!vi_pic[j] || !display_pic_(priv, 0, 4096, 4096, &vi_pw[j], &vi_ph[j], vk_ncopy + (vk_ncopy > 1), vk_scale, j)) vi_pw[j] = 0;
+                if (!vi_pic[j] || !display_pic_(priv, 0, 4096, 4096, &vi_pw[j], &vi_ph[j], base, vk_scale, j)) vi_pw[j] = 0;
             }
         }
-        if (ok && vi_want) {
+        if (!ok) for (int j = 0; j < 3; j++) vi_drop(j);
+        if (ok && vi_want && vi_cpu) {
             const double tc = host_now();
             gsvk_finish();
             for (int j = 0; j < n; j++) if (vi_pw[j]) gsvk_compose_fetch(j, vi_pic[j], (size_t)vi_pw[j] * vi_ph[j]);
@@ -2018,7 +2029,7 @@ static void gsw_init(void) {
     const char *e = getenv("HG_GSTHREADS"); int n = e ? atoi(e) : host_ncpus() / 2;
     if (!e && n > 8) n = 8;
     if (n > GS_MAXW) n = GS_MAXW;
-    if (getenv("HG_PIXWATCH") || getenv("HG_SPRLOG") || getenv("HG_SPRSTAT") || getenv("HG_GSVKCHECK") || getenv("HG_GSVK")) n = 0;   /* per-pixel debugging: one drawing thread */
+    if (getenv("HG_PIXWATCH") || getenv("HG_SPRLOG") || getenv("HG_SPRSTAT") || getenv("HG_GSVKCHECK") || (getenv("HG_GSVK") && atoi(getenv("HG_GSVK")) > 0)) n = 0;   /* per-pixel debugging, or the GPU: no workers */
     if (n < 1 || !(gsq = calloc(GSQ, sizeof *gsq))) { L("GS: drawing on the GS thread (HG_GSTHREADS=0)\n"); return; }
     gsw_n = n;
     for (int k = 0; k < n; k++) if (pthread_create(&gsw_thr[k], 0, gsw_main, (void *)(intptr_t)k)) { L("GS: worker %d failed to start\n", k); exit(1); }
@@ -2318,7 +2329,7 @@ static void gif_qword_exec(int path, const uint64_t q[2]) {
 }
 
 /* ================================================================== display output */
-static uint64_t frames_written;
+static uint64_t frames_written, fq_tag;
 /* Copy the displayed picture (read circuit from PMODE, DISPFB/DISPLAY) into out as 0x00BBGGRR words.
    Returns 0 when nothing displayable is set up. */
 static int display_from(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
@@ -2364,6 +2375,24 @@ static int display_pic_(const uint8_t *priv, uint32_t *out, int maxw, int maxh, 
     else if (!gsvk_compose(&s, out)) return 0;
     *pw = w * N; *ph = h * N; return 1;
 }
+/* the same into a picture image for the window (gsvk_pic): its index, or -1 */
+static int display_gpu(const uint8_t *priv, int base, int N, uint64_t *id, int *pw, int *ph) {
+    if (!priv) return -1;
+    uint64_t pmode, dispfb, display;
+    memcpy(&pmode, priv + 0x00, 8);
+    int c2 = (pmode >> 1) & 1;
+    memcpy(&dispfb, priv + (c2 ? 0x90 : 0x70), 8); memcpy(&display, priv + (c2 ? 0xa0 : 0x80), 8);
+    int magh = BITS(display, 23, 4) + 1, dw = BITS(display, 32, 12) + 1, dh = BITS(display, 44, 11) + 1;
+    int w = dw / magh, h = dh; if (w > 1024) w = 1024; if (h > 1024) h = 1024;
+    if (w <= 1 || h <= 1) return -1;
+    GsVkSprite s = { 0 };
+    s.fbp = BITS(dispfb, 0, 9) * 32; s.fbw = BITS(dispfb, 9, 6); s.fpsm = BITS(dispfb, 15, 5); s.lx0 = BITS(dispfb, 32, 11); s.ly0 = BITS(dispfb, 43, 11);
+    s.px1 = w * N; s.py1 = h * N; s.ln = N; s.ly1 = base;
+    gsvk_live_upload();
+    const int k = gsvk_pic(&s, id);
+    if (k >= 0) { *pw = w * N; *ph = h * N; }
+    return k;
+}
 static int display_hr(const uint8_t *priv, uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
     if (vk_ncopy < 2 || !display_pic(priv, out, maxw, maxh, pw, ph, 1, vk_scale)) return 0;
     vk_hr_changes = 0; return 1;
@@ -2374,7 +2403,6 @@ static int display_interp(const uint8_t *priv, uint32_t *out, int maxw, int maxh
 }
 /* HG_FRAMES_SHOWN=dir:FROM:TO: every VBlank in that range, the picture shown (in-between or real) */
 static void fq_push(const uint32_t *pic, int w, int h);
-static uint64_t fq_tag;
 /* HG_FRAMES_SHOWN=dir:FROM:TO[:PERIOD]: the pictures handed to the window in those VBlanks (4 VBlanks every PERIOD) */
 static char shown_dir[512]; static long shown_from = -1, shown_to, shown_period;
 static int shown_wanted(uint64_t vb) {
@@ -2393,6 +2421,11 @@ static void dump_pic(uint64_t vb, int sub, const uint32_t *buf, int w, int h, in
     uint8_t *row = malloc((size_t)w * 3);
     for (int y = 0; y < h; y++) { for (int x = 0; x < w; x++) { uint32_t c = buf[(size_t)y * w + x]; row[x * 3] = c; row[x * 3 + 1] = c >> 8; row[x * 3 + 2] = c >> 16; } fwrite(row, 1, (size_t)w * 3, f); }
     free(row); fclose(f);
+}
+static void fq_push_gpu(int slot, uint64_t id, int w, int h);
+static void emit_gpu(uint64_t vb, int sub, int slot, uint64_t id, int w, int h, int interp) {
+    fq_tag = vb << 2 | (uint64_t)sub << 1 | (uint64_t)interp;
+    fq_push_gpu(slot, id, w, h);
 }
 static void emit_pic(uint64_t vb, int sub, const uint32_t *pic, int w, int h, int interp, int window, int dump) {
     fq_tag = vb << 2 | (uint64_t)sub << 1 | (uint64_t)interp;
@@ -2423,19 +2456,33 @@ static int real_pic(const uint8_t *priv, uint32_t **out, int *pw, int *ph, int l
     if (!display_from(priv, buf, 1024, 1024, &w, &h)) return 0;
     *pw = w; *ph = h; return 1;
 }
+/* The pictures of this VBlank, in order: at 60 fps the in-between one when a frame completed, else the real one (one
+   VBlank later than without interpolation); at 120 fps two (1/4 and 1/2 when a frame completed, then 3/4 and the real
+   one). With the window presented from video memory (gpu) they go to it as picture images, composed now and never
+   waited for; dumps (HG_FRAMES_SHOWN) and the SDL window read them back. */
 static int vi_pending;   /* 120 fps: the 3/4 picture waits for the next VBlank */
 static void vi_present(uint64_t vb, const uint8_t *priv, int window) {
-    const int dump = shown_wanted(vb), k = vk_interp >= 2 ? 2 : 1;
-    if (!window && !dump) { vi_pending = 0; return; }
-    uint32_t *rp; int rw, rh;
-    if (vi_show == 1 && vi_pw[0]) emit_pic(vb, 0, vi_pic[0], vi_pw[0], vi_ph[0], 1, window, dump);
-    else if (vi_show == 2 && vi_pw[0] && vi_pw[1]) { emit_pic(vb, 0, vi_pic[0], vi_pw[0], vi_ph[0], 1, window, dump); emit_pic(vb, 1, vi_pic[1], vi_pw[1], vi_ph[1], 1, window, dump); vi_pending = 1; }
-    else if (vi_pending && vi_pw[2]) {
-        emit_pic(vb, 0, vi_pic[2], vi_pw[2], vi_ph[2], 1, window, dump);
-        if (real_pic(priv, &rp, &rw, &rh, window && !dump)) emit_pic(vb, 1, rp, rw, rh, 0, window, dump);
-        vi_pending = 0;
-    } else if (real_pic(priv, &rp, &rw, &rh, window && !dump)) for (int j = 0; j < k; j++) emit_pic(vb, j, rp, rw, rh, 0, window, dump);
-    if (vi_show != 2) vi_pending = 0;
+    const int dump = shown_wanted(vb), k = vk_interp >= 2 ? 2 : 1, gpu = window && vi_gpu, cpu = dump || (window && !gpu);
+    int it[2], n = 0;   /* in-between picture j (0-2), or 3: the real one */
+    if (vi_show == 1) it[n++] = 0;
+    else if (vi_show == 2) { it[n++] = 0; it[n++] = 1; }
+    else if (vi_pending) { it[n++] = 2; it[n++] = 3; }
+    else for (int j = 0; j < k; j++) it[n++] = 3;
+    vi_pending = vi_show == 2;
+    for (int i = 0; i < n && (window || dump); i++) {
+        int j = it[i];
+        if (gpu) {
+            if (j < 3 && vi_slot[j] >= 0) { emit_gpu(vb, i, vi_slot[j], vi_id[j], vi_gw[j], vi_gh[j], 1); vi_slot[j] = -1; }
+            else { uint64_t id; int w, h; const int s = display_gpu(priv, vk_ncopy > 1, vk_scale, &id, &w, &h); if (s >= 0) emit_gpu(vb, i, s, id, w, h, 0); }
+        }
+        if (cpu) {
+            uint32_t *rp; int rw, rh;
+            if (j < 3 && vi_pw[j]) emit_pic(vb, i, vi_pic[j], vi_pw[j], vi_ph[j], 1, window && !gpu, dump);
+            else if (real_pic(priv, &rp, &rw, &rh, window && !gpu && !dump && !vk_interp)) emit_pic(vb, i, rp, rw, rh, 0, window && !gpu, dump);
+        }
+    }
+    for (int j = 0; j < 3; j++) if (!(vi_pending && j == 2)) vi_drop(j);   /* not handed over */
+    if (!vi_pending) vi_pw[2] = 0;
 }
 static void dump_frame_hr(uint64_t vb, const uint8_t *priv) {
     const char *dir = getenv("HG_FRAMES_HR"); if (!dir || vk_ncopy < 2) return;
@@ -2486,32 +2533,63 @@ static pthread_mutex_t gs_mx = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t 
 static _Atomic int cons_sleeping, prod_sleeping; static _Atomic uint64_t vb_sent, vb_done;
 static uint8_t priv_snap[4][0xB0];
 static GifPath shadow[4];                                        /* producer-side packet tracking */
-static uint32_t *front; static int front_w, front_h, front_ok;   /* the picture last handed to the window (up to 4096 x 4096) */
+static uint32_t *front; static size_t front_cap; static int front_w, front_h, front_ok;   /* the picture last handed to the SDL window */
 static pthread_mutex_t front_mx = PTHREAD_MUTEX_INITIALIZER;
 /* Pictures go to the window through a short queue, one per VBlank of the GS thread, so that none is skipped or shown
    twice when the GS thread runs a VBlank or two behind and catches up (it matters with the in-between pictures). */
 enum { FQ = 8 };
 static int fq_keep = 2;   /* pictures allowed to wait: 2 at 60 fps, 5 at 120 (the GS thread hands over two at a time) */
-static struct { uint32_t *p; size_t cap; int w, h; uint64_t tag; } fq[FQ]; static int fq_head, fq_n;   /* under front_mx */
+static struct { uint32_t *p; size_t cap; int w, h; uint64_t tag; int slot; uint64_t id; } fq[FQ]; static int fq_head, fq_n;   /* under front_mx */
+static void fq_drop(void) {   /* the oldest waiting picture, unseen */
+#ifdef HAVE_VULKAN
+    if (fq[fq_head].slot >= 0) gsvk_pic_release(fq[fq_head].slot);
+#endif
+    fq[fq_head].slot = -1; fq_head = (fq_head + 1) % FQ; fq_n--;
+}
 static uint64_t front_tag;   /* fq_tag: next push: VBlank << 2 | sub << 1 | in-between (HG_PRESENTLOG) */
+static int want_front;
 static void fq_push(const uint32_t *pic, int w, int h) {
     pthread_mutex_lock(&front_mx);
-    if (fq_n == FQ) { fq_head = (fq_head + 1) % FQ; fq_n--; }   /* the window fell behind: drop the oldest */
+    if (fq_n == FQ) fq_drop();   /* the window fell behind: drop the oldest */
     const int i = (fq_head + fq_n) % FQ; const size_t n = (size_t)w * h;
     if (fq[i].cap < n) { free(fq[i].p); fq[i].p = malloc(n * 4); fq[i].cap = fq[i].p ? n : 0; }
-    if (fq[i].p) { memcpy(fq[i].p, pic, n * 4); fq[i].w = w; fq[i].h = h; fq[i].tag = fq_tag; fq_n++; }
+    if (fq[i].p) { memcpy(fq[i].p, pic, n * 4); fq[i].w = w; fq[i].h = h; fq[i].tag = fq_tag; fq[i].slot = -1; fq_n++; }
     pthread_mutex_unlock(&front_mx);
 }
-static int want_front;
+static void fq_push_gpu(int slot, uint64_t id, int w, int h) {   /* a picture image (presenting from video memory) */
+    pthread_mutex_lock(&front_mx);
+    if (fq_n == FQ) fq_drop();
+    const int i = (fq_head + fq_n) % FQ;
+    fq[i].slot = slot; fq[i].id = id; fq[i].w = w; fq[i].h = h; fq[i].tag = fq_tag; fq_n++;
+    pthread_mutex_unlock(&front_mx);
+}
+/* UI thread, presenting from video memory: the next picture image in order (1), or none new (0) */
+int gs_display_gpu(int *slot, uint64_t *id) {
+    want_front = 1;
+    int got = 0;
+    pthread_mutex_lock(&front_mx);
+#ifdef HAVE_VULKAN
+    if (vk_interp >= 2) fq_keep = 5;
+#endif
+    while (fq_n > fq_keep) fq_drop();   /* keep the delay short */
+#ifdef HAVE_VULKAN
+    const uint64_t done = gsvk_done();
+    while (fq_n && !got) {
+        const int i = fq_head;
+        if (fq[i].slot < 0) { fq_drop(); continue; }   /* pixels from before the window was presented from video memory */
+        if (fq[i].id > done) break;   /* not drawn yet: the last picture again rather than waiting */
+        *slot = fq[i].slot; *id = fq[i].id; front_tag = fq[i].tag; got = 1; fq[i].slot = -1; fq_head = (fq_head + 1) % FQ; fq_n--;
+    }
+#endif
+    pthread_mutex_unlock(&front_mx);
+    return got;
+}
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv);
 static void *gs_main(void *arg) {
     (void)arg; host_prof_thread("gs"); host_thread_boost();
     for (;;) {
         uint64_t t = atomic_load_explicit(&r_tail, memory_order_relaxed), h = atomic_load_explicit(&r_head, memory_order_acquire);
         if (t == h) {
-#ifdef HAVE_VULKAN
-            if (vk_live) gsvk_submit();   /* nothing more to record for now: the GPU gets what is recorded */
-#endif
             pthread_mutex_lock(&gs_mx); atomic_store(&cons_sleeping, 1);
             while (atomic_load(&r_tail) == atomic_load(&r_head)) pthread_cond_wait(&gs_cv_data, &gs_mx);
             atomic_store(&cons_sleeping, 0); pthread_mutex_unlock(&gs_mx);
@@ -2521,11 +2599,16 @@ static void *gs_main(void *arg) {
             const GsEnt *e = &ring[t & (RING - 1)];
             if (e->kind < 4) gif_qword_exec((int)e->kind, e->q);
             else { gs_vblank_exec(e->q[0], priv_snap[e->q[0] & 3]); atomic_store_explicit(&vb_done, e->q[0], memory_order_release); }
-            if (((t + 1) & 1023) == 0) {   /* hand space back regularly */
+            if (((t + 1) & 1023) == 0 && t + 1 != h) {   /* hand space back regularly (not the last: see below) */
                 atomic_store_explicit(&r_tail, t + 1, memory_order_release);
                 if (atomic_load(&prod_sleeping)) { pthread_mutex_lock(&gs_mx); pthread_cond_signal(&gs_cv_space); pthread_mutex_unlock(&gs_mx); }
             }
         }
+#ifdef HAVE_VULKAN
+        /* nothing more to record for now: the GPU gets what is recorded. Before the ring shows empty, as the EE thread
+           may then use the GPU itself (gs_dump_stats at the end) */
+        if (vk_live) gsvk_submit();
+#endif
         atomic_store_explicit(&r_tail, t, memory_order_release);
         if (atomic_load(&prod_sleeping)) { pthread_mutex_lock(&gs_mx); pthread_cond_signal(&gs_cv_space); pthread_mutex_unlock(&gs_mx); }
     }
@@ -2583,14 +2666,15 @@ int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
     }
     want_front = 1;
     pthread_mutex_lock(&front_mx);
-    if (!front) front = malloc((size_t)4096 * 4096 * 4);
 #ifdef HAVE_VULKAN
     if (vk_interp >= 2) fq_keep = 5;
 #endif
-    while (fq_n > fq_keep) { fq_head = (fq_head + 1) % FQ; fq_n--; }   /* keep the delay short */
+    while (fq_n > fq_keep) fq_drop();   /* keep the delay short */
+    while (fq_n && fq[fq_head].slot >= 0) fq_drop();   /* (picture images: not for this window) */
     if (fq_n) {   /* the next picture in order; with none waiting, the last one again */
         const int i = fq_head; fq_head = (fq_head + 1) % FQ; fq_n--;
-        if (front && (size_t)fq[i].w * fq[i].h <= (size_t)4096 * 4096) { memcpy(front, fq[i].p, (size_t)fq[i].w * fq[i].h * 4); front_w = fq[i].w; front_h = fq[i].h; front_ok = 1; front_tag = fq[i].tag; }
+        if ((size_t)fq[i].w * fq[i].h > front_cap) { free(front); front = malloc((size_t)fq[i].w * fq[i].h * 4); front_cap = front ? (size_t)fq[i].w * fq[i].h : 0; }
+        if (front) { memcpy(front, fq[i].p, (size_t)fq[i].w * fq[i].h * 4); front_w = fq[i].w; front_h = fq[i].h; front_ok = 1; front_tag = fq[i].tag; }
     }
     int ok = front_ok && front_w <= maxw && front_h <= maxh;
     if (ok) { for (int y = 0; y < front_h; y++) memcpy(out + y * front_w, front + y * front_w, (size_t)front_w * 4); *pw = front_w; *ph = front_h; }
@@ -2607,13 +2691,14 @@ void gs_vblank(uint64_t vb) {
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
     gsw_drain();   /* the display and frame dumps read local memory */
 #ifdef HAVE_VULKAN
-    /* upscaled window: the picture comes from the copies, composed on the GPU; copy 0 is read only for frame dumps */
+    /* frame dumps (HG_FRAMES) read local memory: what the GPU drew comes back; the window's picture is composed on the
+       GPU (upscaled, or presented from video memory) or read back by real_pic() */
     static int frames_env = -1; if (frames_env < 0) frames_env = getenv("HG_FRAMES") != 0;
-    const int hr_window = vk_ncopy > 1 && !frames_env;   /* (vk_ncopy is known once the GPU is set up, at the first primitive) */
-    if (vk_live && !(hr_window && mtgs)) gsvk_live_need(all_pages);
+    if (vk_live && (frames_env || !mtgs)) gsvk_live_need(all_pages);
 #endif
 #ifdef HAVE_VULKAN
     vi_want = (mtgs && want_front) || shown_wanted(vb);
+    vi_gpu = mtgs && want_front && gsvk_present_ready(); vi_cpu = shown_wanted(vb) || (mtgs && want_front && !vi_gpu);
     vi_vblank(vb, priv);
     if (vk_live) { const double tp = host_now(); vi_present(vb, priv, mtgs && want_front); vi_t_present += host_now() - tp; }
 #endif
@@ -2627,8 +2712,7 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
        ) {
         static uint32_t *tmp; if (!tmp) tmp = malloc((size_t)1024 * 1024 * 4);
         int w, h;
-        if (!front) front = malloc((size_t)4096 * 4096 * 4);
-        if (display_from(priv, tmp, 1024, 1024, &w, &h)) fq_push(tmp, w, h);
+        if (display_from(priv, tmp, 1024, 1024, &w, &h)) { fq_tag = vb << 2; fq_push(tmp, w, h); }
     }
 
     static long every = -1; if (every < 0) every = getenv("HG_FRAME_EVERY") ? atol(getenv("HG_FRAME_EVERY")) : 60;
@@ -2646,6 +2730,13 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv) {
 #endif
     }
     n_kicks_frame = 0;
+#ifdef HAVE_VULKAN
+    if (vk_live) {   /* the GPU at most HG_GSVK_LAG (2) VBlanks behind: pictures come out in time, and late input is not buffered */
+        static uint64_t vbid[8]; static int lag = -1; if (lag < 0) { lag = getenv("HG_GSVK_LAG") ? atoi(getenv("HG_GSVK_LAG")) : 2; if (lag < 1) lag = 1; if (lag > 7) lag = 7; }
+        gsvk_submit(); vbid[vb & 7] = gsvk_last();
+        if (vb >= (uint64_t)lag && vbid[(vb - lag) & 7]) gsvk_wait(vbid[(vb - lag) & 7]);
+    }
+#endif
 }
 #if defined(__x86_64__)
 static void build_simd_tables(void) {

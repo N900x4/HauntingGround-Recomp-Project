@@ -8,8 +8,9 @@ rem   set HG_SCALE=3                     window scale (default 2)
 rem   set HG_WAV=D:\ps2-work\session.wav  record the game's sound
 rem   set HG_MOVIES=skip                 skip the movies
 rem   set HG_GSVK=1                      draw with the GPU (Vulkan; new, same picture as the software renderer)
-rem   set HG_GSVK_SCALE=5                with HG_GSVK=1: 5 times the resolution, 3200x2240, for 4K screens (2..6; 4 and 5 at full speed)
-rem   set HG_GSVK_INTERP=1               with HG_GSVK=1: 60 fps (in-between pictures; full speed at native resolution, not yet with SCALE)
+rem   set HG_GSVK_SCALE=5                with HG_GSVK=1: 5 times the resolution, 3200x2240, for 4K screens (2..8; up to 5 at full speed)
+rem   set HG_GSVK_INTERP=1               with HG_GSVK=1: 60 fps (in-between pictures; full speed up to SCALE=5; 2 = 120 fps, native only)
+rem   set HG_VSYNC=1                     with HG_GSVK=1: the window waits for the display (default: mailbox, no tearing; 0: immediate)
 rem   F11 = fullscreen, F3 = speed overlay
 cd /d "%~dp0"
 set "PATH=%~dp0;C:\msys64\ucrt64\bin;%PATH%"

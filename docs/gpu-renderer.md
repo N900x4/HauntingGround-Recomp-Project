@@ -41,6 +41,8 @@ The build finds Vulkan through `pkg-config vulkan` (MSYS2 packages `mingw-w64-uc
 | `HG_GSVK_EAGER=N` | Submit the command buffer every N batches (default 2; 0: only when a result is needed, as before). |
 | `HG_GSVK_LAG=N` | The GS thread waits at each VBlank until the GPU has finished the work of N VBlanks ago (default 2). |
 | `HG_VI_SELFTEST=1` | With `HG_GSVK_INTERP`: every frame also replayed with no movement and compared with the real one. |
+| `HG_VI_ADAPT=0` / `1` | Adaptive interpolation (in-between pictures left out when the GPU is short of time, see 60 fps): default on with the window, off headless; `0` always off (every frame interpolated, the old behaviour), `1` on headless too. |
+| `HG_VI_BUDGET=MS` | Adaptive interpolation: GPU ms per VBlank, with interpolation, above which the in-between pictures stop (default 14.5; back below MS - 1). |
 | `HG_FRAMES_SHOWN=dir:FROM:TO[:PERIOD]` | Dump the pictures handed to the window in those VBlanks (4 every PERIOD). |
 | `HG_PRESENTLOG=S` | Log the time and picture of 600 presents from S seconds on (pacing checks; `tools/verify/pacing.py`). |
 | `HG_FRAMES_HR=dir` | With `HG_GSVK_SCALE`: dump the upscaled picture (`hr_VVVVVV.ppm`, every `HG_FRAME_EVERY` VBlanks). |
@@ -175,6 +177,19 @@ shown for two VBlanks (`docs/frame-timing.md`). With `HG_GSVK_INTERP=1`:
 - **Replays, phase 1.** The last replay of a frame goes straight into the snapshot set S (the next snapshot replaces
   it anyway), so 60 fps no longer copies S into I first; set I is used only by the 120 fps replays before it and by the
   self-test. With upscaling the replays leave out the set's exact copy, which the picture does not use.
+- **Adaptive (2026-10-15, after the user's playtest).** The user's rooms needed 15-19 ms of GPU per VBlank at x5 +
+  60 fps (the Castle Suite 14.3), so emulation fell behind real time: sound underran (~350 times in 6 minutes),
+  stutter. The in-between pictures are display-only, so now they are left out when the GPU is short of time and
+  the real picture is shown again (as at 30 fps); the game, its frames and their hashes are unchanged. Two signals
+  (`vi_adapt_tick` in `gs.c`): a **budget**, from GPU time measured every 30 VBlanks in two parts (the
+  interpolation's command buffers are tagged, `gsvk_tag`) so that the cost *with* interpolation is known also while
+  it is off: P = B + f x kappa x B (B: the rest per VBlank, f: interpolated frames per VBlank, kappa: a frame's
+  interpolation / B, measured while on). P smoothed above `HG_VI_BUDGET` (default 14.5 ms) turns the pictures off
+  (and the snapshot copy with them); they come back under the budget - 1 ms after at least 2 s. And **behind**:
+  when a frame completes and the GPU has not finished what was submitted up to the previous VBlank
+  (`gsvk_poll`, never waits), that frame's picture is left out. Counted in the GSVK line every 600 VBlanks, at
+  exit, and as `SKIP n` (pictures left out in the last second) in the F3 overlay. On by default when the window
+  shows the pictures; off headless, with `HG_VI_SELFTEST` and with picture dumps, so the gates are unaffected.
 
 Found on the way: `gsvk_prim` read back the primitive ring, which lives in video memory over PCIe (microseconds per
 primitive); without that read, normal GPU rendering went from 9.5 to 8.4 ms per VBlank.

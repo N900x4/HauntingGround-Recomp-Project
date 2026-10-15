@@ -201,9 +201,12 @@ static int host_init(void) {   /* on the UI thread */
     return 1;
 }
 static SDL_AudioDeviceID adev; static int audio_state;   /* 0 = not tried, 1 = open, -1 = unavailable */
+static volatile int ar_n;   /* audio frames queued (host_audio_push), read by the overlay */
 
 /* F3 (or HG_OVERLAY=1): performance readout over the picture, updated every second: emulated speed (100 % = 59.94
-   VBlanks a second), host work per VBlank (pacing sleep left out) and the worst VBlank, and the audio queue. Drawn
+   VBlanks a second; with frame interpolation also SKIP: in-between pictures left out in that second because the GPU
+   was short of time, gs.c vi_adapt_tick), host work per VBlank (pacing sleep left out) and the worst VBlank, and the
+   audio queue. Drawn
    into the frame with a 3x5 pixel font at twice its size. */
 static const struct { char c; uint8_t r[5]; } glyphs[] = {
     {'0',{7,5,5,5,7}},{'1',{2,6,2,2,7}},{'2',{7,1,7,4,7}},{'3',{7,1,7,1,7}},{'4',{5,5,7,1,1}},{'5',{7,4,7,1,7}},
@@ -231,8 +234,16 @@ static void ov_stats(void) {
     if (now - t0 >= 1.0) {
         const double busy = (now - t0) - (host_idle - idle0);
         snprintf(line[0], sizeof line[0], "SPEED %.0f%%", n / (now - t0) / 59.94 * 100);
+#ifdef HAVE_VULKAN
+        {   /* adaptive interpolation: in-between pictures left out in the last second */
+            extern uint64_t gs_vi_skipped(void); extern int gs_interp_now(void); static uint64_t s0;
+            const uint64_t s = gs_vi_skipped();
+            if (gs_interp_now()) snprintf(line[0], sizeof line[0], "SPEED %.0f%% SKIP %llu", n / (now - t0) / 59.94 * 100, (unsigned long long)(s - s0));
+            s0 = s;
+        }
+#endif
         snprintf(line[1], sizeof line[1], "WORK %.1f MS MAX %.1f", busy / n * 1000, worst * 1000);
-        snprintf(line[2], sizeof line[2], "AUDIO %.0f MS", adev ? SDL_GetQueuedAudioSize(adev) / 192.0 : 0.0);
+        snprintf(line[2], sizeof line[2], "AUDIO %.0f MS", adev ? ar_n / 48.0 : 0.0);
         t0 = now; idle0 = host_idle; n = 0; worst = 0;
     }
 }
@@ -448,35 +459,63 @@ void host_shutdown(void) {
     SDL_AtomicSet(&ui_stop, 1);
     for (int i = 0; i < 3000 && !SDL_AtomicGet(&ui_stopped); i++) SDL_Delay(1);
 }
+/* Sound: the game thread's samples go into a ring that SDL's audio thread plays from (audio_cb). The device takes
+   about 21 ms per period and the game delivers about 17 ms per VBlank, so the ring keeps a cushion: playback starts
+   (and starts again after an underrun) once 120 ms are queued, which also absorbs a slow second; beyond 300 ms,
+   chunks are dropped. When the ring runs dry the last sample fades to silence over 5 ms and playback fades back in
+   over 5 ms when it resumes, so an underrun is a short gap, not a click (the old queue stopped and started the
+   device on a sample: audible beeps). Statistics are logged every 10 s. */
+enum { AR_CAP = 48000 / 2, AR_START = 48000 * 12 / 100, AR_MAX = 48000 * 3 / 10, AR_FADE = 240 };   /* frames */
+static int16_t ar_buf[AR_CAP * 2]; static int ar_r;   /* ring; read position (audio thread); ar_n: frames queued */
+static int ar_playing, ar_fade; static float ar_gain; static float ar_last[2]; static uint64_t ar_underruns;   /* audio thread */
+static void SDLCALL audio_cb(void *ud, Uint8 *stream, int len) {   /* SDL's audio thread, with the device locked */
+    (void)ud;
+    int16_t *out = (int16_t *)stream; const int frames = len / 4;
+    for (int i = 0; i < frames; i++) {
+        if (!ar_playing && ar_n >= AR_START) { ar_playing = 1; ar_gain = 0; }
+        if (ar_playing && ar_n > 0) {
+            float l = ar_buf[ar_r * 2], r = ar_buf[ar_r * 2 + 1]; ar_r = (ar_r + 1) % AR_CAP; ar_n--;
+            if (ar_gain < 1) { ar_gain += 1.0f / AR_FADE; if (ar_gain > 1) ar_gain = 1; l *= ar_gain; r *= ar_gain; }
+            out[i * 2] = (int16_t)l; out[i * 2 + 1] = (int16_t)r; ar_last[0] = l; ar_last[1] = r; ar_fade = AR_FADE;
+        } else {
+            if (ar_playing) { ar_playing = 0; ar_underruns++; }
+            const float g = ar_fade > 0 ? (float)ar_fade-- / AR_FADE : 0;   /* the last sample, fading out */
+            out[i * 2] = (int16_t)(ar_last[0] * g); out[i * 2 + 1] = (int16_t)(ar_last[1] * g);
+        }
+    }
+}
 void host_audio_push(const int16_t *s, int frames) {
     if (!audio_state) {
         const char *a = getenv("HG_AUDIO");
         if ((a && !strcmp(a, "0")) || !(active == 1 || (a && !strcmp(a, "1")))) { audio_state = -1; return; }
         if (!SDL_WasInit(SDL_INIT_AUDIO) && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) { L("host: no audio: %s\n", SDL_GetError()); audio_state = -1; return; }
-        SDL_AudioSpec want = { 0 }, got; want.freq = 48000; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 1024;
+        SDL_AudioSpec want = { 0 }, got; want.freq = 48000; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 1024; want.callback = audio_cb;
         adev = SDL_OpenAudioDevice(0, 0, &want, &got, 0);
         if (!adev) { L("host: no audio device: %s\n", SDL_GetError()); audio_state = -1; return; }
-        audio_state = 1; L("host: audio open (48 kHz stereo)\n");   /* playback starts once the queue is primed */
+        SDL_PauseAudioDevice(adev, 0);   /* silence until the cushion is there */
+        audio_state = 1; L("host: audio open (48 kHz stereo)\n");
     }
-    if (audio_state < 0) return;
-    /* The device takes about 21 ms per period and the game delivers about 17 ms per VBlank, so the queue needs a
-       cushion: playback starts (and restarts after an underrun) only once 100 ms are queued, which also absorbs a
-       slow second (55 VBlanks: ~80 ms short); beyond 250 ms, chunks are dropped. An underrun plays silence and a
-       dropped chunk skips sound, both audible as ticks. Statistics are logged every 10 s. */
-    enum { AQ_START = 48000 * 4 / 10, AQ_MAX = 48000 * 4 / 4 };
-    static int playing; static uint64_t underruns, drops; static Uint32 qmin = 0xFFFFFFFF, qmax; static double tlog;
-    const Uint32 q = SDL_GetQueuedAudioSize(adev);
-    if (playing) { if (q < qmin) qmin = q; if (q > qmax) qmax = q; }
-    if (playing && q == 0) { underruns++; SDL_PauseAudioDevice(adev, 1); playing = 0; }   /* refill before going on */
-    if (host_now() - tlog > 10) {
-        if (tlog) L("host audio: queue %.0f-%.0f ms, %llu underruns, %llu dropped chunks\n", qmin == 0xFFFFFFFF ? 0 : qmin / 192.0, qmax / 192.0, (unsigned long long)underruns, (unsigned long long)drops);
-        tlog = host_now(); qmin = 0xFFFFFFFF; qmax = 0;
-    }
-    if (q > AQ_MAX) { drops++; return; }
+    if (audio_state < 0 || frames <= 0) return;
+    static uint64_t drops; static int qmin = 1 << 30, qmax; static double tlog;
     static int mute = -1; if (mute < 0) mute = getenv("HG_AUDIO_MUTE") && atoi(getenv("HG_AUDIO_MUTE"));
-    if (mute) { static int16_t z[4096 * 2]; if (frames <= 4096) s = z; }   /* testing: the real device's timing, no sound */
-    SDL_QueueAudio(adev, s, (Uint32)frames * 4);
-    if (!playing && q + (Uint32)frames * 4 >= AQ_START) { SDL_PauseAudioDevice(adev, 0); playing = 1; }
+    SDL_LockAudioDevice(adev);
+    const int q = ar_n; uint64_t und = ar_underruns;
+    if (q < qmin) qmin = q;
+    if (q > qmax) qmax = q;
+    if (q + frames > AR_MAX) drops++;
+    else {
+        int w = (ar_r + q) % AR_CAP;
+        for (int i = 0; i < frames; i++) {
+            ar_buf[w * 2] = mute ? 0 : s[i * 2]; ar_buf[w * 2 + 1] = mute ? 0 : s[i * 2 + 1];   /* (muted: the device's timing, no sound) */
+            if (++w == AR_CAP) w = 0;
+        }
+        ar_n = q + frames;
+    }
+    SDL_UnlockAudioDevice(adev);
+    if (host_now() - tlog > 10) {
+        if (tlog) L("host audio: queue %.0f-%.0f ms, %llu underruns, %llu dropped chunks\n", qmin == 1 << 30 ? 0 : qmin / 48.0, qmax / 48.0, (unsigned long long)und, (unsigned long long)drops);
+        tlog = host_now(); qmin = 1 << 30; qmax = 0;
+    }
 }
 #else
 void host_audio_push(const int16_t *s, int frames) { (void)s; (void)frames; }

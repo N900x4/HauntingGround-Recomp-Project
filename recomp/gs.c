@@ -1180,6 +1180,12 @@ static uint32_t vk_disp_fbp = ~0u;
 static uint64_t vi_r_sub; static double vi_r_wait;
 static double vi_t_match, vi_t_replay, vi_t_compose, vi_t_log, vi_t_present;
 static uint64_t vi_frames, vi_cut, vi_off_cadence, vi_prims, vi_matched, vi_far, vi_carried, vi_st_frames, vi_st_bad; static int vi_selftest;
+/* adaptive interpolation (see vi_adapt_tick) */
+static int vi_adapt, vi_adapt_skip, vi_nosnap;   /* on (this VBlank); the budget says no in-between pictures; no snapshot taken */
+static uint64_t vi_skip_budget, vi_skip_behind, vi_elig, vi_rep_frames;   /* frames: left out (budget, GPU behind); on cadence; replayed */
+static volatile uint64_t vi_skipped_pics;   /* in-between pictures left out (any thread reads: the F3 overlay) */
+static double vi_p_est = -1, vi_kappa = 2.0;   /* smoothed GPU ms per VBlank with interpolation; a frame's replay / B */
+static uint64_t vk_vbid[8];   /* the last submission of each VBlank (gs_vblank_exec) */
 static void vi_log_upload(uint32_t word, uint32_t n, const uint32_t *src);
 static uint64_t vk_hr_changes;   /* GPU work recorded since the upscaled picture was last composed */
 /* Pages drawn by the GPU since the CPU last wrote them (render targets). In copy k a render target's pixel t holds
@@ -1822,6 +1828,40 @@ static uint32_t *vi_pic[3]; static int vi_pw[3], vi_ph[3], vi_want;   /* in-betw
 static int vi_gpu, vi_cpu;   /* (set by the caller) the window is presented from video memory; pictures are needed in memory */
 static int vi_slot[3] = { -1, -1, -1 }, vi_gw[3], vi_gh[3]; static uint64_t vi_id[3];   /* in-between pictures in picture images */
 static void vi_drop(int j) { if (vi_slot[j] >= 0) { gsvk_pic_release(vi_slot[j]); vi_slot[j] = -1; } }
+/* Adaptive interpolation (HG_VI_ADAPT: on by default when the window shows the pictures, off headless and with
+   HG_VI_SELFTEST or picture dumps; 0 = always interpolate, the old behaviour; 1 = on headless too). The in-between
+   pictures are for the display only, so when the GPU cannot keep up they are left out (the real picture is shown, as
+   at 30 fps) instead of slowing the game down. The game's memory, its frames and their hashes are not affected.
+   - Budget: every 30 VBlanks the GPU time per VBlank is measured in two parts, interpolation (its command buffers are
+     tagged: replays, in-between pictures, the snapshot) and the rest, B. A frame's interpolation costs about kappa * B
+     (measured while interpolating, kept while not), so with interpolation the GPU would need P = B + f * kappa * B ms
+     per VBlank (f: frames per VBlank that are interpolated, about 0.5). P is smoothed; above HG_VI_BUDGET ms (default
+     14.5 of the 16.7 ms VBlank) the in-between pictures stop, and they come back once P is under the budget minus
+     1 ms, after 2 s at the least. While they are off the snapshot copy is left out too.
+   - Behind: when a frame completes and the GPU has not finished what was submitted up to the previous VBlank, this
+     frame's in-between picture is left out. */
+static void vi_adapt_tick(uint64_t vb) {
+    static double budget = -1; if (budget < 0) { budget = getenv("HG_VI_BUDGET") ? atof(getenv("HG_VI_BUDGET")) : 14.5; if (budget <= 0) budget = 14.5; }
+    static uint64_t vb0, rep0, el0, since; static double g0, t0; static int init;
+    uint64_t ns, nd; double g, w; gsvk_stats(&ns, &nd, &g, &w); const double t = gsvk_tag_ms();
+    if (!init || vb < vb0) { init = 1; vb0 = vb; g0 = g; t0 = t; rep0 = vi_rep_frames; el0 = vi_elig; return; }
+    if (vb - vb0 < 30) return;
+    const double n = (double)(vb - vb0), B = (g - g0 - (t - t0)) / n, Bf = B > 0.5 ? B : 0.5, f = (double)(vi_elig - el0) / n;
+    const uint64_t nrep = vi_rep_frames - rep0;
+    if (nrep >= 3) { double k = (t - t0) / (double)nrep / Bf; if (k > 8) k = 8; vi_kappa = 0.7 * vi_kappa + 0.3 * k; }
+    const double P = B + f * vi_kappa * Bf;
+    vi_p_est = vi_p_est < 0 ? P : 0.75 * vi_p_est + 0.25 * P;   /* (about 2 s) */
+    static int nlog;
+    if (!vi_adapt_skip && vi_p_est > budget) {
+        vi_adapt_skip = 1; since = vb;
+        if (nlog++ < 100) L("GSVK: VB %llu: in-between pictures off: with them the GPU would need %.1f ms per VBlank (budget %.1f)\n", (unsigned long long)vb, vi_p_est, budget);
+    } else if (vi_adapt_skip && vi_p_est < budget - 1.0 && vb - since >= 120) {
+        vi_adapt_skip = 0;
+        if (nlog++ < 100) L("GSVK: VB %llu: in-between pictures on again (%.1f ms per VBlank expected)\n", (unsigned long long)vb, vi_p_est);
+    }
+    vb0 = vb; g0 = g; t0 = t; rep0 = vi_rep_frames; el0 = vi_elig;
+}
+uint64_t gs_vi_skipped(void) { return vi_skipped_pics; }   /* any thread: in-between pictures left out so far */
 static void vi_vblank(uint64_t vb, const uint8_t *priv) {
     vi_show = 0;
     if (!vk_interp || !vk_live || !priv) return;
@@ -1838,10 +1878,20 @@ static void vi_vblank(uint64_t vb, const uint8_t *priv) {
             vi_st_frames++; if (bad) { vi_st_bad++; static int nl; if (nl++ < 20) L("GSVK selftest: VB %llu: replay differs from the frame in %llu pixels\n", (unsigned long long)vb, (unsigned long long)bad); }
         }
     }
-    if (vb - vk_last_done == 2 && vlog_prev_ok && vk_have_snap) {
+    const int cadence = vb - vk_last_done == 2 && vlog_prev_ok;
+    int skip = 0;
+    if (vi_adapt && cadence) {   /* adaptive: this frame's in-between picture(s) left out? (vi_adapt_tick) */
+        vi_elig++;
+        if (vi_adapt_skip || vi_nosnap) { skip = 1; vi_skip_budget++; }
+        else if (vk_have_snap && vb >= 1 && vk_vbid[(vb - 1) & 7] && !gsvk_poll(vk_vbid[(vb - 1) & 7])) { skip = 1; vi_skip_behind++; }
+        if (skip) { vi_skipped_pics += vk_interp >= 2 ? 3 : 1; for (int j = 0; j < 3; j++) { vi_drop(j); vi_pw[j] = 0; } }
+    }
+    if (skip) { }   /* the real picture is shown (vi_show = 0) */
+    else if (cadence && vk_have_snap) {
         static const float t1[1] = { 0.5f }, t3[3] = { 0.25f, 0.5f, 0.75f };
         const int n = vk_interp >= 2 ? 3 : 1; const float *ts = n == 3 ? t3 : t1; int ok = 1;
         for (int j = 0; j < 3; j++) vi_drop(j);
+        if (vi_adapt) { gsvk_batch_close(); gsvk_submit(); gsvk_tag(1); vi_rep_frames++; }   /* the replays' GPU time apart */
         for (int j = 0; j < n && ok; j++) {   /* replay, picture, replay, picture... */
             const int set = j == n - 1 ? 2 : 1, base = set * vk_ncopy + (vk_ncopy > 1);
             ok = vi_replay(P, C, ts[j], set, vk_ncopy == 1);
@@ -1863,7 +1913,13 @@ static void vi_vblank(uint64_t vb, const uint8_t *priv) {
     }
     else vi_off_cadence++;
     gsvk_batch_close();
-    gsvk_copy_copies(2 * vk_ncopy, 0, vk_ncopy); vk_have_snap = 1;   /* S = the memory as the next frame begins */
+    vi_nosnap = vi_adapt && vi_adapt_skip;   /* no in-between pictures for a while: no snapshot either */
+    if (vi_nosnap) { vk_have_snap = 0; if (vi_adapt) { gsvk_submit(); gsvk_tag(0); } }
+    else {
+        if (vi_adapt) { gsvk_submit(); gsvk_tag(1); }
+        gsvk_copy_copies(2 * vk_ncopy, 0, vk_ncopy); vk_have_snap = 1;   /* S = the memory as the next frame begins */
+        if (vi_adapt) { gsvk_submit(); gsvk_tag(0); }
+    }
     vk_last_done = vb; vlog_prev_ok = !vi_partial; vi_partial = 0;
     vlog_i ^= 1; vi_reset(&vlog[vlog_i]);
 }
@@ -1883,7 +1939,7 @@ static void vk_reconfigure(uint64_t vb, int scale, int interp) {
     gsvk_batch_close();
     gsvk_live_need(all_pages);   /* everything the GPU drew, into vm */
     for (int j = 0; j < 3; j++) { vi_drop(j); vi_pw[j] = 0; }
-    vi_pending = 0; vi_show = 0; vlog_prev_ok = 0; vk_have_snap = 0; vi_partial = 1;
+    vi_pending = 0; vi_show = 0; vlog_prev_ok = 0; vk_have_snap = 0; vi_partial = 1; vi_nosnap = 0;
     vi_reset(&vlog[0]); vi_reset(&vlog[1]);
     const int ncopy = scale >= 2 ? 1 + scale * scale : 1;
     if (!gsvk_resize(interp ? 3 * ncopy : ncopy)) {   /* kept the old size (or lost the GPU) */
@@ -2765,6 +2821,11 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg) {
 #ifdef HAVE_VULKAN
     vi_want = (mtgs && want_front) || shown_wanted(vb);
     vi_gpu = mtgs && want_front && gsvk_present_ready(); vi_cpu = shown_wanted(vb) || (mtgs && want_front && !vi_gpu);
+    {   /* adaptive interpolation (vi_adapt_tick): HG_VI_ADAPT=0 off, 1 on; default on when the window shows the pictures */
+        static int env = -2; if (env == -2) env = getenv("HG_VI_ADAPT") ? atoi(getenv("HG_VI_ADAPT")) : -1;
+        vi_adapt = vk_live && vk_interp && !vi_selftest && (env > 0 || (env < 0 && mtgs && want_front && !shown_wanted(vb)));
+        if (vi_adapt) vi_adapt_tick(vb);
+    }
     vi_vblank(vb, priv);
     if (vk_live) { const double tp = host_now(); vi_present(vb, priv, mtgs && want_front); vi_t_present += host_now() - tp; }
 #endif
@@ -2792,13 +2853,16 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg) {
             L("GSVK GPU ms per VBlank: %.2f (GS thread waited %.2f)", (g - g0) / 600, (w - w0) / 600); g0 = g; w0 = w;
             if (ph[0] + ph[1] > 0) L(": exact %.2f, copies %.2f, single %.2f, compose %.2f, transfers %.2f; replays: exact %.2f, copies %.2f, single %.2f, transfers %.2f",
                 d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[9]);
+            if (vi_adapt) { static uint64_t s0; L("; in-between pictures left out: %llu (%llu so far: %llu frames for the budget, %llu with the GPU behind), %s, expected %.1f ms per VBlank with them (interpolation %.2f x the rest)",
+                (unsigned long long)(vi_skipped_pics - s0), (unsigned long long)vi_skipped_pics, (unsigned long long)vi_skip_budget, (unsigned long long)vi_skip_behind,
+                vi_adapt_skip ? "off" : "on", vi_p_est, vi_kappa); s0 = vi_skipped_pics; }
             L("\n"); }
 #endif
     }
     n_kicks_frame = 0;
 #ifdef HAVE_VULKAN
     if (vk_live) {   /* the GPU at most HG_GSVK_LAG (2) VBlanks behind: pictures come out in time, and late input is not buffered */
-        static uint64_t vbid[8]; static int lag = -1; if (lag < 0) { lag = getenv("HG_GSVK_LAG") ? atoi(getenv("HG_GSVK_LAG")) : 2; if (lag < 1) lag = 1; if (lag > 7) lag = 7; }
+        uint64_t *vbid = vk_vbid; static int lag = -1; if (lag < 0) { lag = getenv("HG_GSVK_LAG") ? atoi(getenv("HG_GSVK_LAG")) : 2; if (lag < 1) lag = 1; if (lag > 7) lag = 7; }
         gsvk_submit(); vbid[vb & 7] = gsvk_last();
         if (vb >= (uint64_t)lag && vbid[(vb - lag) & 7]) gsvk_wait(vbid[(vb - lag) & 7]);
     }
@@ -2853,6 +2917,8 @@ void gs_dump_stats(void) {
     if (vk_interp) L("GSVK interpolation time: match %.1f s, replay %.1f s, compose %.1f s, logging %.1f s, presenting %.1f s; %llu submissions during replays, waiting %.1f s\n", vi_t_match, vi_t_replay, vi_t_compose, vi_t_log, vi_t_present, (unsigned long long)vi_r_sub, vi_r_wait / 1000.0);
     if (vk_interp) L("GSVK interpolation: %llu in-between pictures, %llu camera cuts, %llu frames off the 30 Hz cadence; %llu primitives replayed, %llu moved halfway, %llu too far, %llu carried along by neighbours\n",
         (unsigned long long)vi_frames, (unsigned long long)vi_cut, (unsigned long long)vi_off_cadence, (unsigned long long)vi_prims, (unsigned long long)vi_matched, (unsigned long long)vi_far, (unsigned long long)vi_carried);
+    if (vk_interp && vi_elig) L("GSVK adaptive interpolation: %llu in-between pictures left out (%llu of %llu frames: %llu for the GPU budget, %llu with the GPU behind); kappa %.2f\n",
+        (unsigned long long)vi_skipped_pics, (unsigned long long)(vi_skip_budget + vi_skip_behind), (unsigned long long)vi_elig, (unsigned long long)vi_skip_budget, (unsigned long long)vi_skip_behind, vi_kappa);
     if (vkchk_from >= 0) {
         static const char *nm[3] = { "sprites", "triangles", "lines/points" };
         for (int k = 0; k < 3; k++) L("GSVKCHECK: %llu %s on the GPU; of them %llu checked one at a time: %llu identical, %llu differing words; %llu left to the CPU\n",

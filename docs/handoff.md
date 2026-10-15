@@ -22,6 +22,22 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### 2026-10-15 (evening, playtest 2): adaptive interpolation, gentler sound underruns
+
+- The user played at x5 + 60 fps, full screen, DualSense (RTX 5090). Their rooms needed 15-19 ms of GPU per VBlank
+  (the Castle Suite 14.3), the GS thread waited 8-13 ms per VBlank for the GPU, emulation fell behind real time:
+  ~350 sound underruns in 6 minutes (each a hard stop/start of the device: beeps), stutter. At x4 13-14 ms, a few.
+- **Adaptive interpolation** (`gs.c` `vi_adapt_tick`, `docs/gpu-renderer.md` "60 fps"): the in-between pictures are
+  left out when the GPU is short of time (budget `HG_VI_BUDGET`, default 14.5 ms per VBlank with interpolation,
+  estimated also while off from tagged GPU time; or the GPU still busy with the previous VBlank's work when a frame
+  completes). F3 shows `SKIP n` per second; the GSVK line every 600 VBlanks and the exit summary count them.
+  Default on with the window, off headless / self-test / picture dumps; `HG_VI_ADAPT=0` the old behaviour.
+- **Sound**: SDL callback with our own ring instead of the SDL queue; start (and restart) at 120 ms, drop beyond
+  300 ms; an underrun fades the last sample out over 5 ms and back in over 5 ms (no click).
+- Gates (headless, `hgboot_fix.exe`): software, GPU + 60 (`HG_VI_ADAPT=0`), x5 + 60 with `HG_VI_ADAPT=1` (916 of
+  1,719 in-between pictures left out for the budget from VB 2168) and the self-test (1,719 frames, 0 differ): all
+  702/702 identical to `hashA`. No window test (the user was playing).
+
 ### 2026-10-15 (night): release 0.1, the launcher and the release docs
 
 - Distribution option (a): the zip holds no game code or data. `tools/release/` (README there): `HauntingGround.exe`

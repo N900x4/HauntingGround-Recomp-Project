@@ -35,6 +35,9 @@ static VkQueryPool qpool; static float tsperiod;
    otherwise overlaps, so the total grows a little. */
 enum { QPER = 1024, PH_EXACT = 0, PH_COPIES, PH_SINGLE, PH_COMPOSE, PH_XFER, PH_N };
 static int tim_on, cur_ph; static int qcnt[NCMD]; static int8_t qseg[NCMD][QPER]; static double ph_ms[2 * PH_N];
+/* gsvk_tag(): command buffers opened while the tag is on count their GPU time separately too (frame interpolation's
+   replays and snapshot, for the adaptive policy in gs.c) */
+static int tag_cur, tag_of[NCMD]; static double gpu_ms_tag;
 typedef struct { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceSize n; } Buf;
 static Buf vram, dvram, xoffb, tabb, primb, clutb, upb, hrb;   /* hrb: the upscaled display read back */
 static VkDeviceSize outbase, outbytes;   /* in dvram, after the copies */
@@ -213,6 +216,7 @@ static void slot_wait(int k) {   /* the submission in command buffer k is done; 
     static uint64_t ts[QPER]; const int nq = qcnt[k];
     if (nq >= 2 && !vkGetQueryPoolResults(dev, qpool, QPER * k, (uint32_t)nq, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT)) {
         gpu_ms_all += (double)(ts[nq - 1] - ts[0]) * tsperiod / 1e6;
+        if (tag_of[k]) gpu_ms_tag += (double)(ts[nq - 1] - ts[0]) * tsperiod / 1e6;
         for (int i = 0; i + 1 < nq; i++) if (qseg[k][i] >= 0) ph_ms[qseg[k][i]] += (double)(ts[i + 1] - ts[i]) * tsperiod / 1e6;
     }
     busy[k] = 0;
@@ -224,7 +228,7 @@ static void rec_open(void) {
     vkResetCommandBuffer(cmd, 0); vkBeginCommandBuffer(cmd, &cbi);
     vkCmdResetQueryPool(cmd, qpool, QPER * ci, tim_on ? QPER : 2);
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, qpool, QPER * ci);
-    qcnt[ci] = 1; qseg[ci][0] = -1; cur_ph = -1;
+    qcnt[ci] = 1; qseg[ci][0] = -1; cur_ph = -1; tag_of[ci] = tag_cur;
     open_ = 1; bound = 0; cur_pipe = VK_NULL_HANDLE; nb_open = 0;
 }
 static void phase(int ph) {   /* HG_GSVK_TIMING: what is recorded next (see above) */
@@ -298,6 +302,14 @@ static void ring_switch(void) {
 void gsvk_finish(void) { submit(1); }
 uint64_t gsvk_submit(void) { return submit(0); }
 void gsvk_wait(uint64_t id) { for (int k = 0; k < NCMD; k++) if (busy[k] && sub_id[k] <= id) slot_wait(k); }
+int gsvk_poll(uint64_t id) {   /* that submission (and earlier) done? never waits (the finished ones are collected) */
+    if (state <= 0) return 1;
+    int done = 1;
+    for (int k = 0; k < NCMD; k++) if (busy[k] && sub_id[k] <= id) { if (vkGetFenceStatus(dev, fences[k]) == VK_SUCCESS) slot_wait(k); else done = 0; }
+    return done;
+}
+void gsvk_tag(int on) { tag_cur = on; }
+double gsvk_tag_ms(void) { return gpu_ms_tag; }
 static void ring_switch(void);
 /* local memory words [w, w+n) from src, at this point of the stream */
 void gsvk_upload(uint32_t w, uint32_t n, const uint32_t *src) {

@@ -67,19 +67,19 @@ static int32_t preg(int c, int off) { return (int16_t)reg[(0x760 + c * 0x28 + of
 
 /* ------------------------------------------------------------------ envelopes */
 typedef struct { int32_t level; uint32_t counter; } Env;
-/* one 48 kHz step of the envelope algorithm; rate = (shift << 2) | step bits, exp/dec/negative as flags */
+/* one 48 kHz step of the envelope algorithm. shift 0..31 and step 0..3 are the register fields: the level moves by
+   (+7..+4 or -8..-5) << max(0, 11 - shift) once every 1 << max(0, shift - 11) samples. An exponential increase above
+   0x6000 runs 4x slower (shift + 2); an exponential decrease scales the step by the level. Decay and release have
+   a fixed step of -8 (step field 0). The counter counts samples since the last change. */
 static void env_step(Env *e, int shift, int stepv, int exponential, int decreasing, int negative) {
+    if (stepv == 3 && shift == 31) return;                   /* all-ones rate: never steps */
     int32_t step = 7 - stepv;
     if (decreasing ^ negative) step = ~step;
-    step = step << (11 - shift > 0 ? 11 - shift : 0);
-    uint32_t inc = 0x8000u >> (shift - 11 > 0 ? shift - 11 : 0);
-    if (exponential && !decreasing && e->level > 0x6000) {
-        if (shift < 10) step >>= 2; else if (shift >= 11) inc >>= 2; else { step >>= 1; inc >>= 1; }
-    } else if (exponential && decreasing) step = (int32_t)(((int64_t)step * e->level) >> 15);   /* arithmetic shift: floors to -1, so release reaches 0 */
-    if ((stepv | (shift << 2)) != 0x7F && inc == 0) inc = 1;
-    if ((stepv | (shift << 2)) == 0x7F) return;              /* all-ones rate: never steps */
-    e->counter += inc;
-    if (!(e->counter & 0x8000)) return;
+    int s = shift;
+    if (exponential && !decreasing && e->level > 0x6000) s += 2;
+    step = step << (11 - s > 0 ? 11 - s : 0);
+    if (exponential && decreasing) step = (int32_t)(((int64_t)step * e->level) >> 15);   /* arithmetic shift: floors to -1, so release reaches 0 */
+    if (++e->counter < (1u << (s - 11 > 0 ? s - 11 : 0))) return;
     e->counter = 0;
     int32_t l = e->level + step;
     if (!decreasing) l = l > 0x7FFF ? 0x7FFF : l < -0x8000 ? -0x8000 : l;
@@ -167,14 +167,14 @@ static void adsr_tick(int c, int n, Voice *v) {
         break;
     case PH_DECAY: {
         int32_t sl = ((a1 & 15) + 1) * 0x800;
-        env_step(&v->adsr, ((a1 >> 4) & 15) << 2, 0, 1, 1, 0);
+        env_step(&v->adsr, (a1 >> 4) & 15, 0, 1, 1, 0);                 /* decay: shift 0..15, step -8, exponential */
         if (v->adsr.level <= sl) { v->phase = PH_SUSTAIN; v->adsr.counter = 0; }
         break; }
     case PH_SUSTAIN:
         env_step(&v->adsr, (a2 >> 8) & 31, (a2 >> 6) & 3, a2 >> 15, (a2 >> 14) & 1, 0);
         break;
     case PH_RELEASE:
-        env_step(&v->adsr, (a2 & 31) << 2, 0, (a2 >> 5) & 1, 1, 0);
+        env_step(&v->adsr, a2 & 31, 0, (a2 >> 5) & 1, 1, 0);           /* release: shift 0..31, step -8 */
         if (v->adsr.level <= 0) { v->adsr.level = 0; v->phase = PH_OFF; }
         break;
     }
@@ -215,16 +215,21 @@ static int32_t voice_sample(int c, int n, Voice *v, int32_t prev_out, uint32_t p
 /* ------------------------------------------------------------------ reverb (per core, 24 kHz) */
 typedef struct { int16_t inl[64], inr[64]; int pos; uint32_t cur; int32_t outl, outr, pl, pr; int16_t hl[64], hr[64]; } Rev;
 static Rev rev[2];
+/* EEA holds only the upper address bits (the low 16 are all ones). Drivers write it as the byte address >> 17 and
+   may pass 'the top of RAM' as 0x7FFFFFFF (SNDDRV does: 0x3FFF); the SPU2 keeps only the bits its 2 MB decode, as
+   for every other address register here. Unmasked, the work area ran past the end of sound RAM and the reverb
+   writes wrapped round all of it, overwriting the sample banks and the stream input area. */
+static uint32_t rv_end(int c) { return (((uint32_t)reg[CORE(c, 0x33C)] << 16) | 0xFFFF) & RAMMASK; }
 static uint32_t rv_addr(int c, int off) { return pair(c, 0x2E4 + off); }   /* reverb address pair at 0x2E4 + off */
 static int16_t rd_rev(int c, uint32_t a) {
-    uint32_t esa = pair(c, 0x2E0), eea = ((uint32_t)reg[CORE(c, 0x33C)] << 16) | 0xFFFF, size = eea - esa + 1;
+    uint32_t esa = pair(c, 0x2E0), eea = rv_end(c), size = eea - esa + 1;
     if (eea <= esa) return 0;
     uint32_t x = esa + ((rev[c].cur - esa + a) % size);
     return (int16_t)spu_ram[x & RAMMASK];
 }
 static void wr_rev(int c, uint32_t a, int32_t v, int enabled) {
     if (!enabled) return;
-    uint32_t esa = pair(c, 0x2E0), eea = ((uint32_t)reg[CORE(c, 0x33C)] << 16) | 0xFFFF, size = eea - esa + 1;
+    uint32_t esa = pair(c, 0x2E0), eea = rv_end(c), size = eea - esa + 1;
     if (eea <= esa) return;
     uint32_t x = esa + ((rev[c].cur - esa + a) % size);
     spu_ram[x & RAMMASK] = (uint16_t)sat16(v);
@@ -254,7 +259,7 @@ static void reverb_core(int c, int32_t lin, int32_t rin, int32_t *lout, int32_t 
     Lo = Lo - mulv(vAPF2, rd_rev(c, mLAPF2 - dAPF2)); wr_rev(c, mLAPF2, Lo, en); Lo = mulv(Lo, vAPF2) + rd_rev(c, mLAPF2 - dAPF2);
     Ro = Ro - mulv(vAPF2, rd_rev(c, mRAPF2 - dAPF2)); wr_rev(c, mRAPF2, Ro, en); Ro = mulv(Ro, vAPF2) + rd_rev(c, mRAPF2 - dAPF2);
     *lout = sat16(Lo); *rout = sat16(Ro);
-    uint32_t esa = pair(c, 0x2E0), eea = ((uint32_t)reg[CORE(c, 0x33C)] << 16) | 0xFFFF;
+    uint32_t esa = pair(c, 0x2E0), eea = rv_end(c);
     if (eea > esa) { rev[c].cur++; if (rev[c].cur > eea || rev[c].cur < esa) rev[c].cur = esa; }
 }
 /* 48 kHz in/out around the 24 kHz reverb using the 39-tap filter */
@@ -348,7 +353,21 @@ static void wav_open(void) {
     fwrite(h, 1, 44, wav); atexit(wav_close);
 }
 void spu2_flush_output(void);
+/* HG_SPUSTAT=1: once per second, every voice (and the stream input) audible in the dry mix: rms, mean, envelope
+   phase and level, pitch, current and loop address, ADSR and volume registers */
+static int st_on = -1; static double st_s[2][25][2], st_q[2][25]; static int st_n;
+static void stat_flush(void) {
+    L("SPUSTAT t=%.1f:", n_samples / 48000.0);
+    for (int c = 0; c < 2; c++) for (int n = 0; n < 25; n++) {
+        double r = sqrt(st_q[c][n] / (2.0 * st_n)); if (r < 20) continue;
+        if (n < 24) { Voice *v = &voice[c][n]; L(" [c%d v%d rms %.0f dc %.0f/%.0f ph %d env %d pitch %04x addr %05x loop %05x adsr %04x/%04x vol %04x/%04x]", c, n, r, st_s[c][n][0] / st_n, st_s[c][n][1] / st_n,
+            v->phase, v->adsr.level, reg[VREG(c, n, 4)], v->addr, v->loop, reg[VREG(c, n, 6)], reg[VREG(c, n, 8)], reg[VREG(c, n, 0)], reg[VREG(c, n, 2)]); }
+        else L(" [c%d ADMA rms %.0f dc %.0f/%.0f]", c, r, st_s[c][n][0] / st_n, st_s[c][n][1] / st_n);
+    }
+    L("\n"); memset(st_s, 0, sizeof st_s); memset(st_q, 0, sizeof st_q); st_n = 0;
+}
 static void mix_sample(void) {
+    if (st_on < 0) st_on = getenv("HG_SPUSTAT") != 0;
     static int odd; odd ^= 1;
     int32_t core_out_l = 0, core_out_r = 0;
     noise_tick();
@@ -364,11 +383,13 @@ static void mix_sample(void) {
             reg[VREG(c, n, 0xC)] = (uint16_t)v->vl.cur; reg[VREG(c, n, 0xE)] = (uint16_t)v->vr.cur;
             if (vmixl & (1u << n)) dl += l; if (vmixr & (1u << n)) dr += r;
             if (vmixel & (1u << n)) wl += l; if (vmixer & (1u << n)) wr += r;
+            if (st_on) { int32_t dl1 = (vmixl >> n & 1) ? l : 0, dr1 = (vmixr >> n & 1) ? r : 0; st_s[c][n][0] += dl1; st_s[c][n][1] += dr1; st_q[c][n] += (double)dl1 * dl1 + (double)dr1 * dr1; }
         }
         if (!(mmix & 0x800)) dl = 0; if (!(mmix & 0x400)) dr = 0; if (!(mmix & 0x200)) wl = 0; if (!(mmix & 0x100)) wr = 0;
         /* memory input (auto-DMA stream) with BVOL, sound input (core 0 output into core 1) with AVOL */
         int32_t ml = mulv(spu2_adma_sample(c, 0), preg(c, 0x0C)), mr = mulv(spu2_adma_sample(c, 1), preg(c, 0x0E));
         int32_t sl = c ? mulv(core_out_l, preg(c, 0x08)) : 0, sr = c ? mulv(core_out_r, preg(c, 0x0A)) : 0;
+        if (st_on) { st_s[c][24][0] += ml; st_s[c][24][1] += mr; st_q[c][24] += (double)ml * ml + (double)mr * mr; }
         if (mmix & 0x80) dl += ml; if (mmix & 0x40) dr += mr; if (mmix & 0x20) wl += ml; if (mmix & 0x10) wr += mr;
         if (mmix & 0x08) dl += sl; if (mmix & 0x04) dr += sr; if (mmix & 0x02) wl += sl; if (mmix & 0x01) wr += sr;
         int32_t rl, rr; reverb_48k(c, wl, wr, &rl, &rr, odd);
@@ -379,6 +400,7 @@ static void mix_sample(void) {
         set_mask24(c, 0x340, endx[c]);
         core_out_l = sat16(ol); core_out_r = sat16(orr);
     }
+    if (st_on && ++st_n >= 48000) stat_flush();
     out_buf[out_n * 2] = (int16_t)core_out_l; out_buf[out_n * 2 + 1] = (int16_t)core_out_r;
     if (++out_n >= 800) spu2_flush_output();
 }

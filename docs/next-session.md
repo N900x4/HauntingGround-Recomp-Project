@@ -31,7 +31,7 @@ identical frames). A full decompilation was judged a multi-year job; readable C 
 | Area | State |
 |---|---|
 | Recompiled game | Boots, menus, movies (emulated IPU), stage 1, Castle Suite, many rooms; LOAD GAME works; **saving verified** (`tools/verify/savetest.sh`, 2026-10-15). 20,600-VBlank recorded session replays deterministically. |
-| Sound | Game's own IOP modules on an emulated IOP + SPU2; beeps fixed (audio queue cushion). |
+| Sound | Game's own IOP modules on an emulated IOP + SPU2; underrun beeps fixed (audio queue cushion); the constant beep and scratches of playtest 2 fixed in the SPU2 (reverb end address masked, decay/release rates), checked with `tools/verify/audiocheck.sh`. |
 | CPU side (Phase 4, roadmap phase 2) | VIF unpack fast path done (-12 % EE thread). **VU1 compiled as whole programs with the timing proven at build time** (`recomp/vu1timing.py`, `vu1gen.py` v2, 2026-10-15): VU1 7.3 -> 2.8 ms per VBlank in stage 1, 6.9 -> 2.7 in the Castle Suite; EE thread 9.8 -> 5.3 and 9.0 -> 4.8 ms (`HG_GSDRAW=0`). **VU1 thread: deferred** (EE thread at about a third of its budget; design in `docs/renderer-performance.md`). |
 | Software GS | Exact reference renderer, 4 worker threads, full speed at native resolution. |
 | **GPU GS** (`HG_GSVK=1`) | Vulkan compute rasterizer, **bit-exact** with the software GS: 742,414 primitives checked word for word; frames to VB 4000 identical to `hashA` (702/702); the user's whole recorded session at x4 identical (1,005/1,005). Faster than the software GS. |

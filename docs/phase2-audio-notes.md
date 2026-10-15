@@ -83,6 +83,14 @@ The IOP runs in lock-step with the EE VBlank: 1/59.94 s of IOP time per VBlank, 
 - An exponential envelope decrease must use an arithmetic shift (`step * level >> 15`). Truncating division stalls release at level 1, so ENVX never reaches 0 and SNDDRV never frees the voice.
 - `ReferThreadStatus` on the EE must report SUSPEND (8) / WAITSUSPEND (0xC). CRI's EE helpers resume their server thread only when they see those values. Without them, ADX streaming stalled after the first buffer.
 - Scripted input must be timed in emulated VBlanks. A Start press meant for the title paused the stage, and pausing mutes all sound.
+- (2026-10-15, playtest 2) The reverb end address (EEA) must be masked to the 2 MB decode. SNDDRV writes `0x3FFF`
+  (top of RAM as byte address >> 17); unmasked, core 0's reverb writes swept all of sound RAM every 43.7 s and turned
+  the sample banks into residue: voices looped on garbage blocks (a constant beep at the voices' pitches) and
+  one-shots and the stream input area scratched. The verifications above were not affected: they checked key-ons
+  and the stream's DMA input, not what the voices read back from RAM.
+- (same) Decay and release shifts are the register fields themselves (decay bits 7-4, release bits 4-0, step -8);
+  they were passed as `shift << 2`, so releases lasted minutes instead of seconds. Envelope waits above shift 26 now
+  last `1 << (shift - 11)` samples. `tools/verify/audiocheck.sh` checks a replay's mix for stuck tones, DC and clicks.
 
 ## Known gaps
 

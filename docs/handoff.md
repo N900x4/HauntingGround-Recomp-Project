@@ -22,6 +22,39 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### 2026-10-15 (night, playtest 2 follow-up): the constant beep and the scratches were the SPU2
+
+- **Symptom** (New Game, intro skipped, the guest room): a constant beep and scratches, with a healthy host queue.
+  The game's own mix (`HG_WAV`, replay of `recordings/20261015-184308`) had them too, so not the host path.
+- **Cause 1, reverb end address.** SNDDRV writes the reverb end address register (EEA, `0x33C`) as `0x3FFF` ("top
+  of RAM" as a byte address >> 17). `spu2.c` used it unmasked, so core 0's work area (ESA `0xFDBE0`) ran 1 GB past
+  the end of sound RAM and the reverb writes, masked into RAM, swept all 2 MB every 43.7 s at 24 kHz: the sample
+  banks became reverb residue. Voices then decoded garbage blocks whose flags loop on themselves: steady tones at
+  180, 360, 510, 540, 600 and 760 Hz with harmonics (28-sample loops at the voices' pitches) and DC up to -1,500
+  for half a minute at a time (the beep); garbage one-shots and the stream input area overwritten once per sweep
+  (the scratches; also in the movies: residual 12 dB instead of 55-67 dB at 44 s and 86 s of the opening).
+  Fix: EEA masked to the 2 MB decode like every other address register.
+- **Cause 2, decay and release rates.** The decay shift (bits 7-4) and release shift (bits 4-0) were passed as
+  `shift << 2` (the 7-bit "rate" notation fed to a function that takes the shift itself), so a release of shift
+  16 took about 45 minutes instead of 2.7 s; and shifts above 26 waited 32,768 samples instead of `1 << (shift -
+  11)`. Both fixed in `env_step` (it now counts samples).
+- **Measured** (`tools/verify/audiocheck.py` on replays): `20261015-184308` before: 55 stuck tones (250 Hz-12 kHz,
+  >= 8 s), 45 s with |DC| > 300 (largest 13,102), 16 clicks; after: 0, 0 (largest 131), 3 (sound attacks). The
+  unfixed replay ends as the user's session did (`2 voices active`, 377 key-ons by VB 11994).
+  `20261015-181554` (6 min): before 113 stuck tones, 113 s DC (largest 8,572), 67 clicks; after 0, 0 (140), 10.
+  Opening movie: 44 clicks -> 3; the stream comes out 55-67 dB clean throughout.
+- **Gates**: G1 702/702 and G2 742/742 identical. **G3 changes from VB 11940** (Fiona's pose by a few pixels,
+  1,176 pixels): the SPU2 state SNDDRV reads (ENVX/ENDX) changes how long its threads run, the IOP clock slips by a
+  sample from about 75 s in, and that timing reaches the EE late in the session. Each fix alone diverges at the
+  same frame; nothing is wrong with the frames. `ref/soak.md5` re-frozen with the fix (two runs identical, one with
+  `HG_VU1CHECK=1`: 0 mismatches). Older recordings may replay slightly differently from where sound timing matters.
+- **New check**: `tools/verify/audiocheck.sh TAG [REC [EXE]]` replays a recording headless without drawing, writes
+  the WAV to scratch and runs `audiocheck.py` (stuck tones, DC, clicks; PASS/FAIL). `HG_SPUSTAT=1` logs every
+  audible voice once per second (rms, DC, phase, envelope, pitch, addresses, ADSR, volume) and the stream input.
+- Not a defect: a faint 15.73 kHz line (-60 dBFS) in some rooms is in the ADX stream itself (checked with
+  `HG_ADMAWAV`). Listen for: no tone under the guest room's ambience, notes that end, clean Hewie/Fiona samples;
+  reverb is still inaudible (EVOL 0, as before).
+
 ### 2026-10-15 (evening, playtest 2): adaptive interpolation, gentler sound underruns
 
 - The user played at x5 + 60 fps, full screen, DualSense (RTX 5090). Their rooms needed 15-19 ms of GPU per VBlank

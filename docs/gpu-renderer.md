@@ -7,14 +7,15 @@ Roadmap Phase 5. The goal is a GPU renderer for 4K output at 60 fps. Reached on 
 - a **live mode** (`HG_GSVK=1`) in which the GPU draws everything: frames to VB 4000 are identical to the software
   GS's (702/702 against `hashA`), and the run is faster than the software GS on 4 worker threads.
 
-- a first **upscaling** mode (`HG_GSVK_SCALE=2/4/8`) on top of it: at x4 the game draws at 2560x1792 in the window
-  at 96 % speed (x2 at full speed), while the native local memory stays exact.
+- **upscaling** (`HG_GSVK_SCALE=2..8`) on top of it, while the native local memory stays exact: since 2026-10-15
+  x5 (3200x2240, 4K screens) runs at full speed in the window;
+- **60 fps** by frame interpolation (`HG_GSVK_INTERP=1`), at full speed at native resolution (see 60 fps below).
 
 ## Files
 
 | File | What |
 |---|---|
-| `recomp/vk/gs_sprite.comp` | The compute shader. Built twice: `gen/gs_sprite_spv.h` (one primitive per dispatch) and, with `-DBATCH`, `gen/gs_batch_spv.h` (a list of primitives per dispatch). |
+| `recomp/vk/gs_sprite.comp` | The compute shader. Built three times: `gen/gs_sprite_spv.h` (one primitive per dispatch), with `-DBATCH` `gen/gs_batch_spv.h` (a list of primitives per dispatch, copy 0) and with `-DBATCH -DCOPIES` `gen/gs_batchc_spv.h` (the upscaling copies of a batch). |
 | `recomp/gsvk.c`, `gsvk.h` | Vulkan set-up, buffers and rings, both pipelines, command recording (primitives, batches, uploads, downloads), GPU timestamps. |
 | `recomp/gs.c` | The `HG_GSVK*` modes: builds the GPU primitive from the same set-up the CPU uses, decides what may be batched, tracks pages (live), compares (check). |
 
@@ -28,7 +29,11 @@ The build finds Vulkan through `pkg-config vulkan` (MSYS2 packages `mingw-w64-uc
 | `HG_GSVK=1` | Live: the GPU draws everything, the software GS draws nothing. GS worker threads are off. |
 | `HG_GSVKCHECK=FROM[:TO]` | Check: in those VBlanks every primitive is drawn by the GPU and by the CPU, from the same memory, and the whole 4 MB is compared after each one. Overrides `HG_GSVK`. |
 | `HG_GSVKBATCH=1` | With `HG_GSVKCHECK`: compare after each batch instead (the live mode's batching). |
-| `HG_GSVK_SCALE=N` | With `HG_GSVK=1`: N = 2, 4 or 8 times the resolution (see Upscaling). |
+| `HG_GSVK_SCALE=N` | With `HG_GSVK=1`: N = 2..8 times the resolution (see Upscaling; the window takes up to 4096 pixels, so N <= 6 there). |
+| `HG_GSVK_INTERP=1` | With `HG_GSVK=1`: 60 fps (see 60 fps). `2`: 120 fps, experimental (87 % speed). |
+| `HG_VI_SELFTEST=1` | With `HG_GSVK_INTERP`: every frame also replayed with no movement and compared with the real one. |
+| `HG_FRAMES_SHOWN=dir:FROM:TO[:PERIOD]` | Dump the pictures handed to the window in those VBlanks (4 every PERIOD). |
+| `HG_PRESENTLOG=S` | Log the time and picture of 600 presents from S seconds on (pacing checks; `D:\ps2-work\scratch\pacing.py`). |
 | `HG_FRAMES_HR=dir` | With `HG_GSVK_SCALE`: dump the upscaled picture (`hr_VVVVVV.ppm`, every `HG_FRAME_EVERY` VBlanks). |
 
 Do not combine `HG_HOSTPROF=1` with the GPU modes: a run with both hung during boot (the sampler suspends threads,
@@ -109,15 +114,56 @@ exact (N = 2, 4 or 8). Interleaving the copies gives a picture N times larger in
   the offset. Without this, the full-screen effect passes mixed a different set of neighbours in each copy, which
   showed as vertical banding.
 - Textures keep their native resolution (texture replacement is a later step).
-- A batch holds each primitive once per copy, at a fixed stride, with an empty place holder where a copy draws
-  nothing. The copies go on the dispatch's z axis, so each copy's tiles cull only their own primitives.
+- **Copies made on the GPU.** A batched primitive is written once; it carries its raw sprite or point vertices,
+  texture coordinates and render-target flag, and the copies build of the batch shader (workgroup z + 1 = the copy)
+  moves each copy's geometry itself. Copy 0 uses the exact pipeline. The copies build is compiled without
+  `precise`: glslang's precise analysis hung on the rewritten fields, and the copies are for the picture only.
+  Lines and serial primitives still get their copies from the CPU. Any N from 2 to 8: triangle offsets are exact,
+  sprite and point offsets are rounded to 1/16 pixel.
+- Uploads cross the bus once (into copy 0 of the set) and are copied on the GPU into the others.
+- The window's picture is composed each VBlank and collected at the next one (command buffers rotate), so the GS
+  thread does not wait for the GPU every VBlank; one VBlank of extra delay.
 - A compute pass interleaves the copies' display area (as `display_from()` reads it) into one picture, which is read
   back and shown in the window. It runs only when something was drawn or uploaded since the last one.
 - The copies are for the picture only. Their order analysis uses copy 0's geometry, and they are not
   bit-reproducible between runs: 18 of 4.6M pixels differed by one level at x4.
 
-Speed (Castle Suite, windowed, F3 overlay): x2 (1280x896) 100 %, x4 (2560x1792) 96 % at 17.3 ms of work per
-VBlank. GPU time to VB 4000 at x4 went from 48.2 s (first version) to 10.8 s: copies on z, then the fixed stride.
+Speed (Castle Suite, windowed, F3 overlay): x2 (1280x896), x4 (2560x1792) and x5 (3200x2240) 100 %; x6 (3840x2688)
+78 %, limited by the GPU. On a 4K screen (F11) the 4:3 picture is shown at 2880x2160, so x5 is slightly more than
+the screen's own resolution.
+
+## 60 fps (frame interpolation)
+
+The game updates and draws at 30 fps: a frame is drawn in one VBlank interval, copied into the display buffer, and
+shown for two VBlanks (`docs/frame-timing.md`). With `HG_GSVK_INTERP=1`:
+
+- **Log.** Each frame's GPU records (the finished per-primitive records, uploads and batch breaks) are logged with
+  the primitive they came from (draw state, vertices, CLUT).
+- **Frame completion**: something was drawn into the display buffer since the last VBlank, two VBlanks after the
+  previous completion (60 Hz menus are left alone).
+- **Replay.** The frame's records are submitted again into a separate set of copies of local memory (set I), from a
+  snapshot (set S) of the memory as the frame began, with each triangle's vertices moved halfway towards where they
+  were in the previous frame. Sprites (effect passes, text) and lines are replayed as they were. That picture is
+  shown at this VBlank and the real one at the next: one VBlank later than before.
+- **Matching.** A triangle's identity is its draw state plus its vertices' texture coordinates, which come from
+  the model and do not move with the camera. Identities found once in each frame feed a motion field per render
+  target (16-pixel cells); ambiguous ones (repeated floor tiles) take the candidate whose movement agrees with the
+  field (within 8 pixels); triangles the game clipped differently in the two frames move with the matched vertices
+  they share, else with the field. A frame whose matched triangles moved 32 pixels on average is a camera cut: the
+  real picture is shown twice.
+- **Exactness.** The game's own memory is never touched (frames identical to `hashA` with interpolation on).
+  `HG_VI_SELFTEST=1` replays each frame with no movement and compares it with the real frame pixel for pixel
+  (1,496 frames, 0 differ); it caught uploads logged after the primitive that triggered them.
+- **Window.** A UI thread owns the window: it polls input and presents one picture every 1/59.94 s from a queue
+  the GS thread fills, so every picture is shown once and in order. Castle Suite, windowed: 100 % speed, presents
+  every 16.68 ms (5th-95th percentile 16.50-16.88), in-between and real pictures alternating.
+
+Found on the way: `gsvk_prim` read back the primitive ring, which lives in video memory over PCIe (microseconds per
+primitive); without that read, normal GPU rendering went from 9.5 to 8.4 ms per VBlank.
+
+Not yet: 60 fps together with upscaling (x4: 74 %, x5: 59 %; the in-between picture is a second full render and is
+read back synchronously), and 120 fps (`HG_GSVK_INTERP=2`: pictures at 1/4, 1/2, 3/4 and presents every 8.34 ms
+work, but the game reaches 87 % speed).
 
 ## Checking
 
@@ -161,13 +207,9 @@ GPU time per frame from timestamps, batch dispatches only, at native resolution:
 
 ## Next
 
-1. **Fewer stalls.** Every VBlank the CPU waits for the GPU and reads back what it drew, for the display and frame
-   dumps. Presenting straight from video memory, and double-buffering the command buffer, removes both.
+1. **4K at 60 fps**: read the in-between pictures back asynchronously as well, and present straight from video
+   memory (no read-back at all); then 120 fps the same way.
 2. **Speed**: coarse binning instead of the per-tile scan; serial primitives (none in the test ranges, but other
    rooms may have some) in a wavefront order.
-3. **Upscaling, next steps.** x4 to full speed with margin: load each primitive once per workgroup (shared
-   memory) instead of per invocation, overlap the GPU with the CPU (double-buffered command buffers). Then 4K
-   output (3840x2160 scaled from the x4 picture, or x8 downsampled), present from video memory, and check
-   the effect passes room by room (any that sample render targets at another scale may need their own offset rule).
-4. **60 fps**: the game logic runs at 30 fps (`docs/frame-timing.md`); 60 needs frame interpolation or a logic
-   change, separate from the renderer.
+3. **Upscaling**: check the effect passes room by room (any that sample render targets at another scale may need
+   their own offset rule); texture replacement.

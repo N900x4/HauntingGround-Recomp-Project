@@ -20,6 +20,25 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### Day 2026-10-15: 60 fps and 4K (the user at work)
+
+- **60 fps works** (`HG_GSVK=1 HG_GSVK_INTERP=1`): each 30 Hz frame is replayed on the GPU with its triangles moved
+  halfway towards the previous frame, into separate copies of local memory, and shown between the real frames.
+  Castle Suite, windowed: 100 % speed, a present every 16.68 ms, every picture once and in order. The game's own
+  memory is untouched (frames identical to `hashA`); `HG_VI_SELFTEST=1` (replay without movement = the real frame)
+  passes 1,496/1,496. How it matches triangles between frames, and the limits: `docs/gpu-renderer.md`, "60 fps".
+- **4K**: `HG_GSVK_SCALE=5` (3200x2240; a 4K screen shows the 4:3 picture at 2880x2160) runs at full speed: the
+  upscaling copies are now made by the GPU, any factor 2-8, and the window's picture is collected one VBlank late
+  instead of waiting for the GPU. x6 78 %.
+- **Not yet**: 4K and 60 fps together (x4: 74 %, x5: 59 %); 120 fps (`HG_GSVK_INTERP=2` works but at 87 % speed,
+  parked at the user's request). The fix for both: read the in-between pictures back asynchronously too, then
+  present from video memory.
+- **Phase 4 (CPU) second part not started**: VU1 whole-program compilation and VU1 on its own thread. Not needed for
+  60 fps (the game logic stays at 30), but it is the CPU headroom for everything else.
+- The window now runs on its own UI thread (input and presents); `play.bat` lists the new options.
+- Speed-up found on the way: `gsvk_prim` read back video memory over PCIe for every primitive; normal GPU rendering
+  9.5 -> 8.4 ms per VBlank.
+
 ### Night 2026-10-15 (unattended): roadmap Phases 4 and 5
 
 - **Phase 4, VIF1 unpack fast path (`341113c`).** `unpack_fast()` in `dmac.c` covers every unpack except
@@ -240,7 +259,8 @@ Since 2026-10-13 the project lives on the user's Windows 11 PC (Ryzen 7 9800X3D,
 
 - The door specks in `ST_020` need PCSX2 in that room: the user saves a state there (about 2 minutes), allows us to
   use their own PCSX2 states, or formats a folder memory card in PCSX2's GUI so our save can be copied in.
-- A playtest with `set HG_GSVK=1` (GPU renderer), and with `set HG_GSVK_SCALE=2` or `4` as well (upscaled).
+- A playtest with `set HG_GSVK=1` (GPU renderer), then `set HG_GSVK_INTERP=1` (60 fps) or `set HG_GSVK_SCALE=5`
+  (4K), F11 for fullscreen.
 - The user's playtest (controls, live sound, saving from our build).
 
 ## Next steps, in order

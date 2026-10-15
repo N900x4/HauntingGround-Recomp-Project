@@ -35,11 +35,12 @@ identical frames). A full decompilation was judged a multi-year job; readable C 
 | CPU side (Phase 4) | VIF unpack fast path done (-12 % EE thread). **VU1 whole-program compile and VU1 thread: not started.** VU1 is about 2/3 of the EE thread (about 6.4 of 8.4 ms per VBlank in the Castle Suite). |
 | Software GS | Exact reference renderer, 4 worker threads, full speed at native resolution. |
 | **GPU GS** (`HG_GSVK=1`) | Vulkan compute rasterizer, **bit-exact** with the software GS: 742,414 primitives checked word for word; frames to VB 4000 identical to `hashA` (702/702); the user's whole recorded session at x4 identical (1,005/1,005). Faster than the software GS. |
-| **Upscaling** (`HG_GSVK_SCALE=2..8`) | Exact native memory (copy 0) + N x N sub-pixel copies (supersampling), made on the GPU. **x5 (3200x2240, 4K screens) at full speed**, x4 full, x6 78 % (GPU-bound). Window limit 4096 px (N <= 6). |
+| **Upscaling** (`HG_GSVK_SCALE=2..8`) | Exact native memory (copy 0) + N x N sub-pixel copies (supersampling), made on the GPU. **x5 (3200x2240, 4K screens) at full speed**, x4 full, x6 78 % (GPU-bound). No window size limit since phase 1 (the SDL path keeps 4096 px). |
 | **60 fps** (`HG_GSVK_INTERP=1`) | Frame interpolation on the GPU: each 30 Hz frame replayed with its triangles moved halfway towards the previous frame, shown between the real frames. **Full speed at native resolution**; presents every 16.68 ms, each picture once, in order. Game memory untouched (hashes identical); self-test 1,496/1,496. |
-| 4K + 60 fps together | **Not yet**: x4 74 %, x5 59 %. |
-| 120 fps (`HG_GSVK_INTERP=2`) | Pictures at 1/4, 1/2, 3/4 correct, presents every 8.34 ms, but 87 % speed: parked. |
-| Window / input | SDL2. A UI thread owns the window (input, presents from a picture queue); the game thread paces emulated time and reads the input. Keyboard and SDL GameController mapping is hard-coded in `recomp/host_sdl.c` (see its header comment). F3 speed overlay, F11 fullscreen, Esc quits. |
+| **4K + 60 fps together** (phase 1, 2026-10-15) | **x5 + 60 fps at full speed in the window** (was 59 %), x4 + 60 full (was 74 %); presents every 16.7 ms, each picture once, in order. x6 + 60: 77 % (GPU-bound, 19.8 ms GPU per VBlank). Details and the table: `docs/gpu-renderer.md`, "Speed, phase 1". |
+| 120 fps (`HG_GSVK_INTERP=2`) | **Full speed at native resolution** (presents every 8.4 ms, 0 repeats); with upscaling GPU-bound (x5: 55 %). |
+| Window / input | SDL2 window and input on a UI thread; with `HG_GSVK=1` the pictures stay in video memory and the UI thread blits them into a **Vulkan swapchain** (mailbox; `HG_VSYNC=1` FIFO, `HG_PRESENT=sdl` the old SDL texture path). The game thread paces emulated time to 59.94 Hz (locking to the display's refresh, roadmap Q14: not done). Keyboard and SDL GameController mapping is hard-coded in `recomp/host_sdl.c` (see its header comment). F3 speed overlay, F11 fullscreen, Esc quits. |
+| Verification kit | `tools/verify`: frozen references (`ref/hashA.md5`, `cs.md5`, `soak.md5`, see `REFERENCES.md`) and the gate scripts `hashcheck.sh`, `gpucheck.sh`, `soak.sh`, `wintest.sh` + `pacing.py`, `picgate.sh` + `piccmp.py`. Picture references for G10 (x5 + 60, native 60) are in `D:\ps2-work\scratch\pic_ref_*` (game pictures: never committed). |
 | Settings | Everything is environment variables (`recomp/play.bat` lists them). No in-game options yet. |
 | Open user decision | Door specks in `ST_020` need PCSX2 in that room (user saves a state there / allows use of their states / formats a folder memory card). |
 
@@ -62,11 +63,16 @@ identical frames). A full decompilation was judged a multi-year job; readable C 
 - **Build** (MSYS2 UCRT64; the plain Bash tool lacks make/cmp on PATH):
   `MSYSTEM=UCRT64 CHERE_INVOKING=1 C:\msys64\usr\bin\bash.exe -lc "cd /d/ps2-work/HauntingGround-Recomp-Project/recomp && make -j8"`
   (from PowerShell). Shaders compile with `glslangValidator` into `gen/gs_*spv.h` (three builds of
-  `vk/gs_sprite.comp`: single, `-DBATCH`, `-DBATCH -DCOPIES`).
+  `vk/gs_sprite.comp`: single, `-DBATCH`, `-DBATCH -DCOPIES`). MSYS2 has no `cmp`/`diff`: the scripts compare with
+  `sort A B | uniq -u`.
 - **Editing**: heredocs in the Bash tool collapse `\\n`; write Python edit scripts to the scratchpad with the Write
   tool and run them. PowerShell `Set-Content -Encoding utf8` adds a BOM (strip it). Don't run make while
   `hgboot.exe` is running (the link fails silently in filtered output; check the exe timestamp).
-- **Exactness checks** (all scripts in `D:\ps2-work\scratch`, run from the MSYS2 shell):
+- **Gate scripts** (since phase 1, in `tools/verify`, see `tools/verify/REFERENCES.md`): `hashcheck.sh TAG` (G1/G1g,
+  `HG_ROUTE=cs` for G2), `gpucheck.sh TAG batch` (G5), `soak.sh` (G3), `wintest.sh TAG env...` then `pacing.py LOG`
+  (G7, speed included), `picgate.sh TAG env...` then `piccmp.py REF NEW` (G10). GPU ms per VBlank are logged every
+  600 VBlanks; `HG_GSVK_TIMING=1` splits them by phase.
+- **Exactness checks** (the older copies in `D:\ps2-work\scratch`, run from the MSYS2 shell):
   - frame hashes: `HG_SCRATCH=/d/ps2-work/scratch sh ../tools/verify/runhash.sh ./hgboot.exe OUT.md5 4000`
     (from `recomp/`), compare with `hashA.md5` (702 frames). Add `HG_GSVK=1` (and `HG_GSVK_INTERP=1`,
     `HG_GSVK_SCALE=N`) to check the GPU paths: copy 0 must stay identical.
@@ -79,7 +85,8 @@ identical frames). A full decompilation was judged a multi-year job; readable C 
   sound muted, F3 overlay, presents logged), then `pacing.py win_TAG.log`; capture with
   `tools/verify/wincap.py "Haunting Ground Recomp" out.png`. `HG_SPEEDLOG=300` prints per-VBlank costs.
 - **Debug switches** of the GPU renderer: see the table in `docs/gpu-renderer.md` ("Switches").
-- Known hazards: `HG_HOSTPROF=1` + GPU modes hung at boot; glslang's `precise` analysis hangs if a function rewrites
+- Known hazards: runs with the Vulkan validation layer loaded hang at process exit and stay unkillable in the task
+  list (the exe is then locked: rename it to build again); `HG_HOSTPROF=1` + GPU modes hung at boot; glslang's `precise` analysis hangs if a function rewrites
   many fields of the global primitive struct (that is why the copies shader is a separate build without `precise`);
   never read back the primitive/CLUT rings (video memory over PCIe: microseconds per read).
 

@@ -10,13 +10,17 @@ Roadmap Phase 5. The goal is a GPU renderer for 4K output at 60 fps. Reached on 
 - **upscaling** (`HG_GSVK_SCALE=2..8`) on top of it, while the native local memory stays exact: since 2026-10-15
   x5 (3200x2240, 4K screens) runs at full speed in the window;
 - **60 fps** by frame interpolation (`HG_GSVK_INTERP=1`), at full speed at native resolution (see 60 fps below).
+- **4K and 60 fps together** (2026-10-15, roadmap phase 1): x5 + 60 fps at full speed in the window, the window
+  presented straight from video memory (see "Presenting the window" and "Speed, phase 1" below); 120 fps at full
+  speed at native resolution.
 
 ## Files
 
 | File | What |
 |---|---|
 | `recomp/vk/gs_sprite.comp` | The compute shader. Built three times: `gen/gs_sprite_spv.h` (one primitive per dispatch), with `-DBATCH` `gen/gs_batch_spv.h` (a list of primitives per dispatch, copy 0) and with `-DBATCH -DCOPIES` `gen/gs_batchc_spv.h` (the upscaling copies of a batch). |
-| `recomp/gsvk.c`, `gsvk.h` | Vulkan set-up, buffers and rings, both pipelines, command recording (primitives, batches, uploads, downloads), GPU timestamps. |
+| `recomp/gsvk.c`, `gsvk.h` | Vulkan set-up, buffers and rings, the pipelines, command recording (primitives, batches, uploads, downloads), GPU timestamps; the picture images and the window's swapchain (presenting from video memory). |
+| `recomp/host_sdl.c` | The UI thread: SDL window and input; presents with `gsvk_present` (GPU renderer) or an SDL texture. |
 | `recomp/gs.c` | The `HG_GSVK*` modes: builds the GPU primitive from the same set-up the CPU uses, decides what may be batched, tracks pages (live), compares (check). |
 
 The build finds Vulkan through `pkg-config vulkan` (MSYS2 packages `mingw-w64-ucrt-x86_64-vulkan-devel` and
@@ -26,14 +30,19 @@ The build finds Vulkan through `pkg-config vulkan` (MSYS2 packages `mingw-w64-uc
 
 | Variable | Effect |
 |---|---|
-| `HG_GSVK=1` | Live: the GPU draws everything, the software GS draws nothing. GS worker threads are off. |
+| `HG_GSVK=1` | Live: the GPU draws everything, the software GS draws nothing. GS worker threads are off. The window is presented from video memory. |
 | `HG_GSVKCHECK=FROM[:TO]` | Check: in those VBlanks every primitive is drawn by the GPU and by the CPU, from the same memory, and the whole 4 MB is compared after each one. Overrides `HG_GSVK`. |
 | `HG_GSVKBATCH=1` | With `HG_GSVKCHECK`: compare after each batch instead (the live mode's batching). |
-| `HG_GSVK_SCALE=N` | With `HG_GSVK=1`: N = 2..8 times the resolution (see Upscaling; the window takes up to 4096 pixels, so N <= 6 there). |
-| `HG_GSVK_INTERP=1` | With `HG_GSVK=1`: 60 fps (see 60 fps). `2`: 120 fps, experimental (87 % speed). |
+| `HG_GSVK_SCALE=N` | With `HG_GSVK=1`: N = 2..8 times the resolution (see Upscaling; up to x5 at full speed with 60 fps). The SDL path (`HG_PRESENT=sdl`) takes up to 4096 pixels, N <= 6. |
+| `HG_GSVK_INTERP=1` | With `HG_GSVK=1`: 60 fps (see 60 fps). `2`: 120 fps (full speed at native resolution, x5 55 %). |
+| `HG_PRESENT=sdl` | With `HG_GSVK=1`: the old window path (pictures read back and copied into an SDL texture). |
+| `HG_VSYNC=1` / `0` | The swapchain's present mode: default mailbox (no tearing, never blocks); `1` FIFO (stalled 60-200 ms at a time in a window on the 120 Hz screen); `0` immediate (may tear). |
+| `HG_GSVK_TIMING=1` | GPU time per phase (exact batches, copies, single primitives, compose, transfers; the replays apart), per VBlank every 600 VBlanks and at the end. Serializes the exact and copies dispatches, so the total grows a little. |
+| `HG_GSVK_EAGER=N` | Submit the command buffer every N batches (default 2; 0: only when a result is needed, as before). |
+| `HG_GSVK_LAG=N` | The GS thread waits at each VBlank until the GPU has finished the work of N VBlanks ago (default 2). |
 | `HG_VI_SELFTEST=1` | With `HG_GSVK_INTERP`: every frame also replayed with no movement and compared with the real one. |
 | `HG_FRAMES_SHOWN=dir:FROM:TO[:PERIOD]` | Dump the pictures handed to the window in those VBlanks (4 every PERIOD). |
-| `HG_PRESENTLOG=S` | Log the time and picture of 600 presents from S seconds on (pacing checks; `D:\ps2-work\scratch\pacing.py`). |
+| `HG_PRESENTLOG=S` | Log the time and picture of 600 presents from S seconds on (pacing checks; `tools/verify/pacing.py`). |
 | `HG_FRAMES_HR=dir` | With `HG_GSVK_SCALE`: dump the upscaled picture (`hr_VVVVVV.ppm`, every `HG_FRAME_EVERY` VBlanks). |
 
 Do not combine `HG_HOSTPROF=1` with the GPU modes: a run with both hung during boot (the sampler suspends threads,
@@ -123,13 +132,19 @@ exact (N = 2, 4 or 8). Interleaving the copies gives a picture N times larger in
 - Uploads cross the bus once (into copy 0 of the set) and are copied on the GPU into the others.
 - The window's picture is composed each VBlank and collected at the next one (command buffers rotate), so the GS
   thread does not wait for the GPU every VBlank; one VBlank of extra delay.
-- A compute pass interleaves the copies' display area (as `display_from()` reads it) into one picture, which is read
-  back and shown in the window. It runs only when something was drawn or uploaded since the last one.
+- A compute pass interleaves the copies' display area (as `display_from()` reads it) into one picture, which goes to
+  the window from video memory (see "Presenting the window"); dumps and the SDL path read it back.
+- **The copies shader works on tiles of the upscaled picture**: invocation (X, Y) of a workgroup draws copy
+  `1 + X%N + (Y%N)*N` at pixel `(X/N, Y/N)`, so a workgroup draws all copies of a small area. A triangle covering a
+  pixel covers it in most copies, so the invocations stay busy together on the small triangles of 3D scenes (one tile
+  per copy left most of them idle): triangle copies 30 % cheaper. A triangle's coverage is tested from its geometry
+  before the whole primitive (about 120 words) is loaded (7 %). Tried and dropped: a tile mask made once per batch
+  for all copies (no gain: the per-tile scan was not the cost), float instead of double Z in the copies (no gain).
 - The copies are for the picture only. Their order analysis uses copy 0's geometry, and they are not
   bit-reproducible between runs: 18 of 4.6M pixels differed by one level at x4.
 
 Speed (Castle Suite, windowed, F3 overlay): x2 (1280x896), x4 (2560x1792) and x5 (3200x2240) 100 %; x6 (3840x2688)
-78 %, limited by the GPU. On a 4K screen (F11) the 4:3 picture is shown at 2880x2160, so x5 is slightly more than
+78 %, limited by the GPU. With 60 fps: x4 and x5 100 %, x6 77 % (phase 1, below). On a 4K screen (F11) the 4:3 picture is shown at 2880x2160, so x5 is slightly more than
 the screen's own resolution.
 
 ## 60 fps (frame interpolation)
@@ -157,13 +172,72 @@ shown for two VBlanks (`docs/frame-timing.md`). With `HG_GSVK_INTERP=1`:
 - **Window.** A UI thread owns the window: it polls input and presents one picture every 1/59.94 s from a queue
   the GS thread fills, so every picture is shown once and in order. Castle Suite, windowed: 100 % speed, presents
   every 16.68 ms (5th-95th percentile 16.50-16.88), in-between and real pictures alternating.
+- **Replays, phase 1.** The last replay of a frame goes straight into the snapshot set S (the next snapshot replaces
+  it anyway), so 60 fps no longer copies S into I first; set I is used only by the 120 fps replays before it and by the
+  self-test. With upscaling the replays leave out the set's exact copy, which the picture does not use.
 
 Found on the way: `gsvk_prim` read back the primitive ring, which lives in video memory over PCIe (microseconds per
 primitive); without that read, normal GPU rendering went from 9.5 to 8.4 ms per VBlank.
 
-Not yet: 60 fps together with upscaling (x4: 74 %, x5: 59 %; the in-between picture is a second full render and is
-read back synchronously), and 120 fps (`HG_GSVK_INTERP=2`: pictures at 1/4, 1/2, 3/4 and presents every 8.34 ms
-work, but the game reaches 87 % speed).
+120 fps (`HG_GSVK_INTERP=2`: pictures at 1/4, 1/2, 3/4, presents every 8.34 ms) runs at full speed at native
+resolution since phase 1; with upscaling it is GPU-bound (three replays per frame: x5 55 %).
+
+## Presenting the window (phase 1)
+
+With the GPU renderer the window's pictures never leave video memory:
+- `gsvk_pic()` (GS thread) composes a picture as before and copies it into one of 12 picture images
+  (`R8G8B8A8`, any size), then submits; the picture queue (`fq` in `gs.c`) holds {image, submission id} instead of
+  28 MB of pixels.
+- Every GS submission signals a timeline semaphore with its id (Vulkan 1.2). The UI thread takes the next picture
+  whose submission is done (else shows the last one again rather than wait), and in its own command buffer, on the
+  queue family's second queue (one queue and a lock if there is only one), clears the swapchain image, blits the
+  picture into the largest 640:448 rectangle (as `SDL_RenderSetLogicalSize(640, 448)` did), blits the F3 overlay
+  (a 176 x 42 image), and presents. A picture image is free again when the UI thread has moved on and its blits are
+  done, or when the picture was dropped unseen.
+- Present mode mailbox (no tearing, never blocks; the UI thread's 59.94 Hz clock decides when). FIFO blocked the UI
+  thread's submissions for 60-200 ms at a time in a window on the 120 Hz screen, even at native resolution.
+- The window is created without an SDL renderer when `HG_GSVK=1`; the UI thread sets up the swapchain once the GPU
+  renderer is ready (first primitive) and falls back to SDL if that fails. `HG_PRESENT=sdl` keeps the old path.
+- At exit the UI thread waits for its queue and drops the swapchain (`host_shutdown`, called by `stop()`).
+- Checked with `VK_LAYER_KHRONOS_validation` (MSYS2 `mingw-w64-ucrt-x86_64-vulkan-validation-layers`,
+  `VK_LAYER_PATH=C:\msys64\ucrt64\bin VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`): no errors in a windowed
+  x5 + 60 fps run to VB 1300. Caution: every run with the layer loaded hung at process exit, after the last log line,
+  and the process then stayed in the task list unkillable ("no running instance"); without the layer the exit is clean.
+
+## Speed, phase 1 (2026-10-15)
+
+Where the time went at x5 + 60 fps (headless, Castle Suite, `HG_GSVK_TIMING=1`, GPU ms per VBlank): 14.0 in all, of
+which the upscaling copies 7.4 for the real frames and 7.2 for the replays (about 60 % of them the full-screen effect
+passes), the exact copy 1.4 + 1.4, transfers 1.2. But the GS thread waited for the GPU almost all that time: work was
+submitted only at read-backs, and three read-backs per VBlank (textures streamed into pages the effect passes had
+drawn) each waited for everything; in the window the in-between picture also waited for the whole queue and crossed
+the bus twice (28 MB at x5). The fixes, in order of gain:
+- image transfers that cover whole pages no longer read those pages back (`full_pages()` in `gs.c`);
+- the per-VBlank read-back of everything (meant for frame dumps only) skipped with upscaling as intended;
+- submissions every 2 batches and when the GS thread runs out of work, 32 command buffers, rings in two halves;
+- the copies shader by upscaled tiles (above);
+- presenting from video memory; replays without the I = S copy and without the exact copy; the GPU kept at most two
+  VBlanks behind.
+
+Window, Castle Suite (LOAD GAME), muted, `tools/verify/wintest.sh` + `pacing.py` (speed from VB 3000; presents from
+58 s: median, 5th-95th percentile; GPU ms per VBlank of emulated time):
+
+| Mode | Before | Speed | Presents | Repeats / out of order | GPU ms |
+|---|---|---|---|---|---|
+| native GPU (`HG_GSVK=1`) | 100 % | 100 % | 16.74, 16.18-17.20 | 0 / 0 | 4.6 |
+| native 60 fps | 100 % | 100 % | 16.73, 16.27-17.09 | 0 / 0 | 3.2 |
+| x5 | 100 % | 100 % | 16.70, 16.13-17.22 | 0 / 0 | 9.8 |
+| x4 + 60 fps | 74 % | 100 % | 16.73, 16.33-17.04 | 0 / 0 | 9.8 |
+| **x5 + 60 fps** | 59 % | **100 %** | 16.73, 16.38-16.97 | 0 / 0 | 14.3 |
+| x6 + 60 fps | - | 77 % | 16.68, 16.46-16.92 | 143 / 0 | 19.8 |
+| native 120 fps | 87 % | 100 % | 8.40, 7.99-8.69 | 0 / 0 | 5.7 |
+| x5 + 120 fps | - | 55 % | 8.34, 8.17-8.49 | 275 / 0 | 28.4 |
+| x5 + 60 fps, `HG_PRESENT=sdl` | 59 % | 77 % | 16.66, 15.15-18.27 | 147 / 0 | 14.3 |
+| software GS (`HG_GSVK=0`) | 100 % | 100 % | 16.68, 16.08-17.32 | 0 / 0 | - |
+
+The present times are logged after the present call, so they include its own variance (about +-0.3 ms); with mailbox
+on the 120 Hz screen the picture is shown at the next refresh anyway. x6 + 60 and x5 + 120 are limited by the GPU
+(budget 16.7 ms per VBlank); headless, x5 + 60 runs at 1.07x and x5 at 1.25x.
 
 ## Checking
 
@@ -207,9 +281,10 @@ GPU time per frame from timestamps, batch dispatches only, at native resolution:
 
 ## Next
 
-1. **4K at 60 fps**: read the in-between pictures back asynchronously as well, and present straight from video
-   memory (no read-back at all); then 120 fps the same way.
-2. **Speed**: coarse binning instead of the per-tile scan; serial primitives (none in the test ranges, but other
-   rooms may have some) in a wavefront order.
+1. **GPU cost** for x6 + 60 and 120 fps with upscaling: the full-screen effect passes are about 60 % of the copies'
+   time (each drawn N x N times); the exact copy is 10 % (one dispatch per batch, `precise`, fp64 Z). Serial
+   primitives (none in the test ranges, but other rooms may have some) in a wavefront order.
+2. **Display rate**: lock the emulated VBlank to the display's refresh within 0.5 % (the user's choice, roadmap Q14),
+   exact 59.94 as a setting; not done (the UI thread still runs its own 59.94 Hz clock and presents with mailbox).
 3. **Upscaling**: check the effect passes room by room (any that sample render targets at another scale may need
    their own offset rule); texture replacement.

@@ -142,6 +142,7 @@ Ranges used (scripts: `D:\ps2-work\scratch\vkcheck.sh TAG` one primitive at a ti
 | One primitive per dispatch | 46,578 sprites, 668,095 triangles | 0 words |
 | Batches | 742,414 primitives in 10,774 batches (27,741 own-pixel triangles among them) | 0 batches |
 | Live, frames to VB 4000 | 702 frames | 0 frames |
+| Live at x4 (copy 0), the user's whole session `20261014-200745` replayed (20,600 VBlanks, 92M primitives) | 1,005 frames, against the software GS | 0 frames |
 
 Speed (headless, per VBlank, VB 3000–4800 in stage 1 and 3200–4400 in the Castle Suite):
 

@@ -40,7 +40,8 @@ Last commit before this doc: `bf60152`.
 - **Phase 5, upscaling, first version** (`HG_GSVK=1 HG_GSVK_SCALE=2|4|8`): N x N sub-pixel copies of local memory
   besides the exact one, interleaved into an N times larger picture; render targets read with the copy's offset.
   Windowed, Castle Suite: x2 (1280x896) 100 % speed, x4 (2560x1792) 96 %. Copy 0 stays exact (frames identical to
-  `hashA` at x4). Pictures: `D:\ps2-work\scratch\castle_suite_x4_2560x1792.png` and
+  `hashA` at x4, and the user's whole recorded session, 20,600 VBlanks, 1,005/1,005 frames identical to the
+  software GS: `D:/ps2-work/scratch/soak.sh`). Pictures: `D:\ps2-work\scratch\castle_suite_x4_2560x1792.png` and
   `castle_suite_native_vs_x4_closeup.png`. Textures stay native; 4K output and more speed are next.
 
 ### Night 2026-10-14/15 (unattended): playtest 1 findings, Castle Suite, frame timing, crash reports

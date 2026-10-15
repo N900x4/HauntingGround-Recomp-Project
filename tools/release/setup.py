@@ -122,7 +122,10 @@ def extract(iso, game, disc):
             if sz != want_size: bad.append(rel); continue
             dst = os.path.join(game, rel); tmp = dst + '.part'
             sha = copy_hashed(f, lba, sz, tmp, lambda n, d0=done: progress(2 + 12 * (d0 + n) / total))
-            if sha != want_sha: bad.append(rel); os.remove(tmp); continue
+            if sha != want_sha:
+                bad.append(rel); os.remove(tmp)
+                if rel == disc['elf']: break     # the wrong game program: no point copying 1.6 GB more
+                continue
             os.replace(tmp, dst); done += sz
             say('  %-22s %12d bytes  sha256 ok' % (rel, sz))
         if bad:

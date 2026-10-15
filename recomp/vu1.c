@@ -34,13 +34,13 @@ static inline const Dec *decoded(uint32_t pc) {
     return d;
 }
 
+uint32_t gif_kick(const uint8_t *mem, uint32_t addr);   /* gs.c: the packets to PATH1, up to the end of one with EOP */
 void vu1_kick(uint32_t addr) {
     n_kicks++;
-    for (int guard = 0; guard < 1024; guard++) {
-        uint64_t q[2]; memcpy(q, vu1_mem + ((addr & 0x3FF) << 4), 16); addr++;
-        if (kick_check) { kick_hash = (kick_hash ^ q[0]) * 0x100000001B3ull; kick_hash = (kick_hash ^ q[1]) * 0x100000001B3ull; }
-        gif_qword(1, q);
-        if (gif_path_done(1)) break;
+    const uint32_t n = gif_kick(vu1_mem, addr);
+    if (kick_check) for (uint32_t i = 0; i < n; i++) {
+        uint64_t q[2]; memcpy(q, vu1_mem + (((addr + i) & 0x3FF) << 4), 16);
+        kick_hash = (kick_hash ^ q[0]) * 0x100000001B3ull; kick_hash = (kick_hash ^ q[1]) * 0x100000001B3ull;
     }
 }
 /* Ahead-of-time compiled programs (gen/vu1_aot_*.c, made by vu1gen.py from the game's 19 VU1 programs). After micro
@@ -115,9 +115,9 @@ void vu1_run(uint32_t start) {
         vu_stall = getenv("HG_VUSTALL") ? atoi(getenv("HG_VUSTALL")) : 1;   /* 4 matches the FMAC pipeline, but stalls are not modelled: off until checked against a reference */
         aot_on = aot_nprogs > 0 && vu_stall == 1 && flag_delay == 0 && !(getenv("HG_VU1AOT") && !strcmp(getenv("HG_VU1AOT"), "0"));
         L("VU1: %d ahead-of-time compiled programs, %s\n", aot_nprogs, aot_on ? "in use" : "not used");
-        for (int m = 0; m < 16; m++) {
-            rev4[m] = (uint8_t)(((m & 1) << 3) | ((m & 2) << 1) | ((m & 4) >> 1) | ((m & 8) >> 3));
-            lane_mask[m] = _mm_setr_epi32(m & 8 ? -1 : 0, m & 4 ? -1 : 0, m & 2 ? -1 : 0, m & 1 ? -1 : 0);
+        for (int m = 0; m < 16; m++) {   /* the constant tables of vu1_core.h, checked once */
+            const __m128i want = _mm_setr_epi32(m & 8 ? -1 : 0, m & 4 ? -1 : 0, m & 2 ? -1 : 0, m & 1 ? -1 : 0);
+            if (rev4[m] != (uint8_t)(((m & 1) << 3) | ((m & 2) << 1) | ((m & 4) >> 1) | ((m & 8) >> 3)) || memcmp(&want, &lane_mask[m], 16)) { L("VU1: bad lane tables\n"); abort(); }
         }
     }
     {   /* HG_VU1DUMP=path:vb writes micro and data memory (code first) at the first run from that VBlank on */

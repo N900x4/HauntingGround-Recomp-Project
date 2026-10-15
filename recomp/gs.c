@@ -2655,6 +2655,28 @@ void gif_qword(int path, const uint64_t q[2]) {
     if (!mtgs) { gif_qword_exec(path, q); return; }
     shadow_qword(path, q); push((uint64_t)(path & 3), q);
 }
+/* XGKICK (vu1.c): the GIF packets at qword addr of VU1 data memory (1024 qwords, wrapping) to PATH1, up to the end of a
+   packet with EOP, at most 1024 qwords; returns how many were sent. The same as gif_qword(1, q) and gif_path_done(1)
+   for each qword, in one call: the ring's head is published every 256 entries (as push() does) and at the end. */
+uint32_t gif_kick(const uint8_t *mem, uint32_t addr) {
+    uint32_t n = 0;
+    if (!mtgs) {
+        while (n < 1024) { uint64_t q[2]; memcpy(q, mem + (((addr + n) & 0x3FF) << 4), 16); n++; gif_qword_exec(1, q); if (gif_path_done(1)) break; }
+        return n;
+    }
+    uint64_t h = atomic_load_explicit(&r_head, memory_order_relaxed);
+    while (n < 1024) {
+        uint64_t q[2]; memcpy(q, mem + (((addr + n) & 0x3FF) << 4), 16); n++;
+        shadow_qword(1, q);
+        if (h - atomic_load_explicit(&r_tail, memory_order_acquire) >= RING - 1) { atomic_store_explicit(&r_head, h, memory_order_release); prod_wait(ring_has_space); }
+        GsEnt *e = &ring[h & (RING - 1)]; e->q[0] = q[0]; e->q[1] = q[1]; e->kind = 1;
+        h++;
+        if ((h & 255) == 0) { atomic_store_explicit(&r_head, h, memory_order_release); wake_consumer(); }
+        if (!shadow[1].in_packet && shadow[1].eop) break;
+    }
+    atomic_store_explicit(&r_head, h, memory_order_release);
+    return n;
+}
 uint64_t gs_display_tag(void) { return front_tag; }   /* the picture gs_display() last returned */
 int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
     if (!mtgs) {

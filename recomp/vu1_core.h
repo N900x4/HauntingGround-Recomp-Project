@@ -54,8 +54,13 @@ AI __m128 vclamp(__m128 x) {
     return _mm_castsi128_ps(_mm_or_si128(_mm_and_si128(m, r), _mm_andnot_si128(m, b)));
 }
 AI Vec *vmem(uint32_t qaddr) { return (Vec *)(vu1_mem + ((qaddr & 0x3FF) << 4)); }
-SHARED __m128i lane_mask[16];   /* dest field (x = bit 3) -> per-lane all-ones mask */
-SHARED uint8_t rev4[16];        /* bit i <-> bit 3-i */
+/* dest field (x = bit 3) -> per-lane all-ones mask; constant, so that a constant dest folds (compiled programs) */
+#define LM_(m) { (long long)((m & 8 ? 0xFFFFFFFFull : 0) | (m & 4 ? 0xFFFFFFFF00000000ull : 0)), \
+                 (long long)((m & 2 ? 0xFFFFFFFFull : 0) | (m & 1 ? 0xFFFFFFFF00000000ull : 0)) }
+static const __m128i lane_mask[16] = { LM_(0), LM_(1), LM_(2), LM_(3), LM_(4), LM_(5), LM_(6), LM_(7),
+                                       LM_(8), LM_(9), LM_(10), LM_(11), LM_(12), LM_(13), LM_(14), LM_(15) };
+#undef LM_
+static const uint8_t rev4[16] = { 0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15 };   /* bit i <-> bit 3-i */
 AI void put_lanes(Vec *d, __m128 v, int dest) {
     const __m128i m = lane_mask[dest];
     d->vi = _mm_or_si128(_mm_and_si128(m, _mm_castps_si128(v)), _mm_andnot_si128(m, d->vi));
@@ -70,6 +75,9 @@ AI void lanes_copy(Vec *dst, const Vec *src, int dest) {
    interpreter does not model stalls (the game only reads clip flags, and stage 1 renders the same either way). */
 typedef struct { uint64_t due; int clip; uint32_t val; } FlagUpd;
 SHARED FlagUpd fq[16]; SHARED int fq_n; SHARED uint64_t vcyc; SHARED int flag_delay INIT(-1);
+#ifndef VU1_FLAG_DELAY
+#define VU1_FLAG_DELAY flag_delay   /* the compiled programs (used only with HG_VUFLAGDELAY=0) define it as 0 */
+#endif
 AI void apply_mac(uint32_t m) {
     mac = m;
     uint32_t s = 0;
@@ -77,7 +85,7 @@ AI void apply_mac(uint32_t m) {
     status = (status & 0xFF0) | s | (s << 6);
 }
 AI void flag_push(int is_clip, uint32_t val) {
-    if (!flag_delay) { if (is_clip) clip = ((clip << 6) | val) & 0xFFFFFF; else apply_mac(val); return; }
+    if (!VU1_FLAG_DELAY) { if (is_clip) clip = ((clip << 6) | val) & 0xFFFFFF; else apply_mac(val); return; }
     if (fq_n == 16) { if (fq[0].clip) clip = ((clip << 6) | fq[0].val) & 0xFFFFFF; else apply_mac(fq[0].val); memmove(fq, fq + 1, sizeof fq[0] * 15); fq_n--; }
     fq[fq_n].due = vcyc + (uint64_t)flag_delay; fq[fq_n].clip = is_clip; fq[fq_n].val = val; fq_n++;
 }
@@ -317,7 +325,6 @@ void vu1_kick(uint32_t addr);   /* XGKICK: the GIF packet at addr to PATH1 */
 /* returns 1 if a branch is taken (target in *tgt). *wvi = VI register written (-1: none) and *wold its previous value */
 SHARED uint64_t lk_count[64];
 AI int lower(const Dec *d, uint32_t pc, int prev_vi, uint16_t prev_old, int *wvi, uint16_t *wold, uint32_t *tgt) {
-    lk_count[d->lk]++;
     const int dest = d->ldest, ft = d->lft, fs = d->lfs, it = d->lit, is = d->lis;
 #define SETVI(r, v) do { const int r_ = (r) & 15; if (r_) { const uint16_t nv_ = (uint16_t)(v); *wold = vi[r_]; *wvi = r_; vi[r_] = nv_; } } while (0)
 #define VIB(r) ((r) == prev_vi ? prev_old : vi[r])     /* branch operand: old value if written by the previous instruction */
@@ -431,7 +438,7 @@ AI int step(const Dec *d, RunSt *s, const uint32_t pc, const int stall) {
     UpRes ur; upper(d, &ur);
     int wvi = -1, taken = 0; uint16_t wold = 0; uint32_t tgt = 0;
     if (d->ibit) memcpy(&i_reg, &d->iimm, 4);           /* I bit: lower word is a float immediate */
-    else taken = lower(d, pc, s->prev_vi, s->prev_old, &wvi, &wold, &tgt);
+    else { lk_count[d->lk]++; taken = lower(d, pc, s->prev_vi, s->prev_old, &wvi, &wold, &tgt); }
     upper_commit(&ur);
     if (stall) note_writes(d);
     vi[0] = 0; vf[0].f[0] = vf[0].f[1] = vf[0].f[2] = 0; vf[0].f[3] = 1.0f;
@@ -442,6 +449,24 @@ AI int step(const Dec *d, RunSt *s, const uint32_t pc, const int stall) {
     if (s->ebit_pending) { vu1_tpc = next; q_commit(); p_commit(); flag_commit(1); return 1; }
     if (d->ebit) s->ebit_pending = 1;                    /* E bit: run the next instruction, then stop */
     s->pc = next; return 0;
+}
+/* one instruction pair without the timing model, for the compiled programs of vu1gen.py: there the arrival of Q and
+   P is decided at build time (vu1timing.py) and committed by the caller where a consumer needs it, a pending Q/P
+   is only a flag (q_wait, p_wait nonzero: q_commit()/p_commit() still commit it), and the VI register written by the
+   previous pair is known (prev_vi, a constant; its old value in *prev_old). VF0 and VI0 need no reset: no op writes
+   register 0 (every writer above checks it). Returns 1 if a branch is taken (target in *tgt). */
+AI int pair_untimed(const Dec *d, const uint32_t pc, const int prev_vi, uint16_t *prev_old, uint32_t *tgt) {
+    if (!d->ibit) { if (d->lk == L_WAITQ) q_commit(); else if (d->lk == L_WAITP) p_commit(); }
+    UpRes ur; upper(d, &ur);
+    int wvi = -1, taken = 0; uint16_t wold = 0;
+    if (d->ibit) memcpy(&i_reg, &d->iimm, 4);
+    else {
+        if (d->lk >= L_FCEQ && d->lk <= L_FCGET) lk_count[d->lk]++;   /* the flag reads counted in the run log */
+        taken = lower(d, pc, prev_vi, *prev_old, &wvi, &wold, tgt);
+    }
+    upper_commit(&ur);
+    *prev_old = wold;
+    return taken;
 }
 /* the instruction pair (lo, up) decoded where it is used: with constant words everything folds at compile time */
 AI void dec_const(Dec *d, uint32_t lo, uint32_t up) {

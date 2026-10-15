@@ -1,99 +1,146 @@
-# Haunting Ground Recomp Project
+# Haunting Ground Recomp
 
-A static recompiler that turns **your own copy** of *Haunting Ground* (PS2, NTSC-U SLUS-21075) into a native PC program, with the long-term goal of a remastered Windows and Linux version: 4K rendering, high-resolution textures, 60 fps, and Hewie voiced with real dog recordings.
+A native Windows version of *Haunting Ground* (PlayStation 2, North American release, SLUS-21075), built on your PC
+from **your own copy of the game**. It is not an emulator: the game's program is translated into C and compiled into
+a Windows program, with a hand-written runtime standing in for the PS2 hardware. It runs at up to 4K, at 60 fps
+(frame interpolation), with native PlayStation and Xbox controller support.
 
-> **Status: early research.** The recompiled game boots through the logos, title and menu into the first room, where Fiona can be walked around. The 3D is drawn by a software GS through a VU1 interpreter. Sound comes from the game's own IOP sound drivers (Capcom SNDDRV, CRI ADX) running on an emulated IOP with an SPU2 core; the stage ambience is bit-exact against an independent decode. Movies play through an emulated IPU running the game's own Sofdec player (pictures match an independent decoder within IDCT rounding; movie sound is bit-exact). Graphics accuracy is not yet checked against reference frames, and 3D runs below real time. It is **not playable** yet. See the [roadmap](#roadmap), [phase 1 notes](docs/phase1-runtime-notes.md) and [audio notes](docs/phase2-audio-notes.md).
+> **Version 0.1 is an early test release.** The opening, the castle grounds and the first rooms of the castle have
+> been tested, and saving and loading work, but most of the game has not been played through on it yet. Expect bugs; reports are
+> very welcome (see [Reporting bugs](#reporting-bugs)).
 
-## How it works
+**Not affiliated with or endorsed by Capcom or Sony.** No game code or game data is included in any download. You
+need your own legally obtained copy of the game, dumped to a disc image (.iso) yourself.
 
-No game code or data is ever distributed. You supply your disc image, and the tool builds the game on your machine:
+## What you need
 
-1. **Ingest** – `tools/ingest.py` reads your ISO read-only, verifies it by SHA-256 of the game executable, and copies the two files the build needs into `game/`.
-2. **Translate** – `recomp/bulk2.py` translates all 11,499 functions of the PS2 executable (MIPS R5900) into C.
-3. **Compile** – the generated C is compiled with gcc or clang.
-4. **Link** – the result is linked with a hand-written runtime that stands in for the PS2 hardware and kernel (`recomp/runtime.c`, `hle.c`, `interp.c`).
-5. **Run** – game assets are read from your `DATA.CVM` at run time.
+- Windows 10 or 11, 64-bit.
+- A graphics card with Vulkan (any NVIDIA, AMD or Intel GPU from roughly the last ten years) is recommended. Without
+  Vulkan the game uses its software renderer, which is exact but slower and has no upscaling or 60 fps.
+- A disc image of the **North American** disc, *Haunting Ground*, **SLUS-21075**, as a plain `.iso` file that you
+  made from your own disc (for example with ImgBurn or any DVD dumping tool). European and Japanese (Demento) discs
+  are not supported in 0.1. Compressed images (.chd, .cso, .zip, .7z) must be turned back into a plain .iso first.
+- About 2 GB of free disk space and a few minutes for the first start.
 
-## What works today
+Nothing has to be installed: the download includes the compiler and Python it needs to build the game. Nothing is
+downloaded while it runs.
 
-Measured in the [boot test](docs/boot-test-report.md):
+## How to start
 
-- The recompiled code runs natively from the PS2 entry point. It gets through the C++ static constructors, `main` and the loading of all 12 IOP modules, mounts `DATA.CVM`, and reads real game files from it.
-- Controller (DBCMAN/libpad2) and memory card (MCSERV/libmc, backed by a host folder) are emulated at the IOP level. Input is scripted for now (`HG_PAD`).
-- Movies (logo, intro, opening cinematic) play: the game's own CRI Sofdec player runs on an emulated IPU with its DMA channels ([movie notes](docs/movies-ipu.md)). `HG_MOVIES=skip` skips them.
-- A software GS renders the logos, title, menu and, through a VU1 interpreter running the game's own microprograms, the 3D of stage 1 with its full-screen effect passes. Rendering runs on its own thread with AVX2 paths; in stage 1 the build runs at about half of real time on a 2-core VM ([renderer performance](docs/renderer-performance.md)).
-- Sound comes from the game's own IOP drivers on an emulated IOP and SPU2: sound effects, CRI ADX streams (bit-exact against an independent decode) and SNDDRV background music (every note checked against the sequence and bank; see the [audio notes](docs/phase2-audio-notes.md)).
+1. Unzip `HauntingGround-Recomp-0.1-win64.zip` into a folder of your choice, for example `C:\Games\HauntingGround`.
+   Use a folder whose path has only plain English letters, digits and spaces, and that you can write to (not
+   `C:\Program Files`).
+2. Double-click **`HauntingGround.exe`**. Windows may warn that the program is from an unknown publisher (it is not
+   code-signed): choose "More info", then "Run anyway".
+3. Click **Choose disc image...** and pick your `.iso`. The launcher checks that it is the right disc and that it is
+   undamaged, copies the 1.6 GB the game needs into the `game` folder, translates and compiles the game (about 1.5
+   minutes on a fast PC, several minutes on a slower one), and starts it. Your disc image is only read, never changed.
+4. From then on, double-clicking `HauntingGround.exe` starts the game directly.
 
-## Building (Linux, experimental)
+If you unzip a newer release over this folder, the next start builds the game again without asking for the disc.
+Start `HauntingGround.exe --setup` (for example from a shortcut) to rebuild it yourself.
 
-```sh
-python3 tools/ingest.py /path/to/your/HauntingGround.iso game   # NTSC-U v1.01 only for now
-# or, to use files already extracted elsewhere: export HG_GAME_DIR=/path/with/SLUS_210.75+DATA.CVM
-cd recomp
-python3 bulk2.py gen 16          # generate C, including the 19 VU1 programs (~15–40 s)
-make -j2                         # compile (~1–3 min)
-mkdir -p /tmp/frames
-HG_FRAMES=/tmp/frames HG_MAXVB=16000 HG_PAD=1500:start,1800:start,2100:cross \
-  ./hgboot -q -t 3000 > run.log  # skip the intro, New Game, opening cinematic, stage 1; frames go to /tmp/frames
-```
+## Playing
 
-### Windows (MSYS2 UCRT64, experimental)
-
-Install [MSYS2](https://www.msys2.org/), then in an MSYS2 shell: `pacman -S make mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-SDL2 mingw-w64-ucrt-x86_64-pkgconf`. Ingest and generate with any Python 3 as above, then build and run from the **UCRT64** shell (it puts `SDL2.dll` on the `PATH`):
-
-```sh
-cd recomp
-make -j16                        # builds hgboot.exe
-./hgboot.exe                     # window with live input; HG_WINDOW=0 ./hgboot.exe -q for headless runs
-```
-
-The Windows build replaces the Linux-only calls in `compat.c`: fibers instead of ucontext, a timer thread instead of SIGPROF/SIGALRM (the profile samples wall time, not CPU time), VirtualAlloc, and its own glob matcher for memory-card directory listings.
-
-With SDL2 installed (`libsdl2-dev`) the build opens a window and takes live input; just run `./hgboot` (no time limit when windowed, Esc quits, F11 toggles fullscreen). `HG_WINDOW=0` forces headless mode.
-
-| PS2 | Keyboard | Gamepad |
+| PS2 | Keyboard (default) | Controller |
 |---|---|---|
 | D-pad | arrow keys | D-pad |
-| Cross / Circle / Square / Triangle | X / C / Z / S | A / B / X / Y |
-| Start / Select | Enter / Right Shift | Start / Back |
-| L1 / R1 / L2 / R2 | Q / E / 1 / 3 | shoulders / triggers |
-| Left stick | I J K L | left stick (right stick too) |
+| Left stick | I J K L | left stick (the right stick works too) |
+| Cross / Circle / Square / Triangle | X / C / Z / S | the same buttons (PlayStation) or A / B / X / Y (Xbox) |
+| Start / Select | Enter / Right Shift | Options / Create (or touchpad click) on PlayStation, Menu / View on Xbox |
+| L1 / R1 / L2 / R2 | Q / E / 1 / 3 | the shoulder buttons and triggers |
 
-Requirements: Python 3 (with numpy for the format tools), gcc or clang, optionally SDL2, about 2 GB of free disk space. No PS2 BIOS is needed.
+**F11** switches between window and full screen, **F3** shows the speed overlay, **Esc** quits.
 
-## Roadmap
+DualSense, DualShock 4 and Xbox controllers work over USB or Bluetooth. The game's vibration reaches the controller,
+and a DualSense's light bar glows dim amber (both can be changed). The first controller to press a button is player
+one. If Steam is running with "PlayStation Controller Support" on and the controller acts like an Xbox pad, see
+[docs/controller.md](docs/controller.md), "Steam Input".
 
-| Phase | Goal | Gate |
-|---|---|---|
-| 1 | Title screen: controller and memory card, CRI logo movie, 2D graphics | Title screen renders with controller input (**reached**: window with keyboard/gamepad input) |
-| 2 | First controllable room: VU1, full 3D graphics, ADX streaming, Capcom sound driver | Fiona walks in the first room |
-| 3 | One-click tool: launcher for Windows and Linux that picks the ISO, builds and runs, plus a mod hook system | A stock Windows PC builds from its own ISO |
-| 4 | Full playthrough, then remaster features: 4K and effect rewrites, 60 fps through render interpolation, texture and audio replacement | Credits roll and saves load |
+## Settings
 
-## Repository layout
+In the game: **Options**, then press Down past *Screen Position* to reach the extra rows:
 
-| Path | Contents |
+- **Renderer**: GPU (Vulkan) or Software. Takes effect at the next start. The launcher picks GPU when your PC has a
+  working Vulkan graphics card.
+- **Resolution**: native (640x448), x2 to x6, or auto (fills your screen). x5 is about 4K. Changes at once.
+- **Frame rate**: 30 (the original), 60 or 120 (120 at native resolution only). 60 and 120 add about 17 ms of delay.
+- **Display**: window or full screen; **V-Sync**: Fast (no tearing, the default), On (waits for the display), or Off
+  (may tear).
+- **Keyboard** and **Controller**: remap every button (press the key or button you want). The controller page also
+  sets the vibration strength and the light bar colour.
+
+Everything is saved in `hg.ini` in the game folder; you can also edit it with Notepad while the game is closed.
+Delete it to return to the defaults.
+
+## Where things are
+
+Everything stays in the folder you unzipped:
+
+| Folder or file | What it holds |
 |---|---|
-| `recomp/` | Translator (`rec2.py`, `bulk2.py`, `r5900.py`), function-discovery scans, and the runtime (C): CPU glue and kernel (`runtime.c`, `hle.c`, `interp.c`), controller and memory card (`iop_pad_mc.c`), GS and DMA (`gs.c`, `dmac.c`), game-function overrides (`overrides.c`) |
-| `data/` | Per-version metadata: function starts, jump tables, syscall map. Addresses only, no game bytes |
-| `tools/ingest.py` | Disc reader and verifier |
-| `tools/formats/` | Format tools: Sony HD/BD sound banks (`hdbd.py`, `vagenc.py`), CRI ADX (`adx.py`), textures (`tex_hg.py`) |
-| `tools/research/` | Analysis scripts from the feasibility study. Their paths assume the original research layout |
-| `docs/` | Feasibility findings: executable structure, hardware use, audio, textures, boot test, C vs C# |
-| `game/` | **Your** game files go here. Git-ignored and never committed |
+| `memcards\port0\` | **Your saves** (the memory card). Back this folder up to keep your progress, and copy it into a new release's folder to carry your saves over. |
+| `hg.ini` | Your settings |
+| `logs\` | `launcher.log` (the first start and every start), `play.log` (the last session), `play.prev.log` (the one before) |
+| `recordings\` | The controller input of your last 20 sessions, so a bug can be replayed exactly |
+| `crashes\` | Created only if the game crashes |
+| `game\`, `bin\` | Files built from your disc: the game data and the compiled game. **Never share these.** |
+| `engine\` | The sources, the compiler and Python used for the build |
+
+## Known issues
+
+The full list is in [docs/known-issues.md](docs/known-issues.md). The main ones:
+
+- Only the opening areas and the first rooms of the castle have been tested in depth; later chapters may have
+  graphics or sound problems, or stop.
+- 0.1 has been tested on one PC (Windows 11, AMD Ryzen, NVIDIA RTX). Other GPUs (AMD, Intel), Windows 10 and
+  slower PCs have not been tried yet.
+- 4K together with 60 fps needs a strong GPU; x6 with 60 fps and x5 with 120 fps do not reach full speed even on an RTX
+  5090.
+- 60 fps is made by frame interpolation: fast movement can show small glitches in the in-between pictures.
+- Changing the renderer needs a restart; the analog sticks cannot be remapped.
+- A few dark specks flicker near a door in one room of the castle; it is not yet known whether the original does the same.
+
+## Reporting bugs
+
+Please open an issue on the GitHub page (or reply to the Reddit post) with:
+
+1. what happened, and what you did just before (the room, what Fiona was doing);
+2. your PC: Windows version, CPU, graphics card;
+3. these files from the game folder: **`logs\play.log`** (if the game stopped, the reason and, after a crash, a crash
+   report are at its end), **`logs\launcher.log`** (for problems with the first start), and, if you can, the latest
+   folder in **`recordings\`** without its `card` and `replay_card` folders (only `pad.txt`: your button presses, so
+   the bug can be replayed exactly).
+
+Do not attach anything from `game\`, `bin\` or `crashes\` (the `.dmp` files there hold parts of the game's memory), and
+do not attach your disc image. The log files contain no game data, but they do contain folder paths, which may include
+your Windows user name. More detail: [docs/release/crash-reports.md](docs/release/crash-reports.md).
+
+## For developers
+
+Building from source, the recompiler, the runtime and the verification tools: [docs/building.md](docs/building.md),
+[docs/handoff.md](docs/handoff.md) and the other notes in [docs/](docs/). How the release and its launcher are made:
+[tools/release/README.md](tools/release/README.md).
 
 ## Legal
 
-- This project contains **no** Capcom or Sony code, assets or BIOS files, and none may be contributed.
-- You need your own legally obtained copy of the game. PS2 discs are not encrypted, and the tool circumvents no copy protection.
-- Generated code and build outputs are derived from your disc and stay on your machine. Never upload them.
+- This project contains **no** Capcom or Sony code, assets or BIOS files, and none may be contributed. No PS2 BIOS is
+  needed.
+- You need your own legally obtained copy of the game. PS2 discs are not encrypted; the tool circumvents no copy
+  protection.
+- Everything built from your disc (the `game` and `bin` folders, generated code) is derived from your copy and stays
+  on your PC. Never upload or share it.
 - *Haunting Ground* is a trademark of Capcom. This project is not affiliated with or endorsed by Capcom or Sony.
 
-## Credits and prior art
+## Credits
 
-- [PCSX2](https://github.com/PCSX2/pcsx2): the reference for PS2 behaviour. Future runtime components may reuse PCSX2 code under GPL-3.0, with full attribution. This is not an official PCSX2 project; please don't report bugs from this project to them.
-- Static recompilation projects that showed the way: N64Recomp/Zelda64Recomp, XenonRecomp/UnleashedRecomp, PS2Recomp, and DQ8-Recompiled.
+- [PCSX2](https://github.com/PCSX2/pcsx2) was the visual reference for PS2 behaviour; no PCSX2 code is used. This is
+  not a PCSX2 project; please don't report its bugs to them.
+- Static recompilation projects that showed the way: N64Recomp/Zelda64Recomp, XenonRecomp/UnleashedRecomp,
+  PS2Recomp, and DQ8-Recompiled.
+- The release bundles GCC, binutils, MinGW-w64, SDL2, the Vulkan loader and Python; see `THIRD_PARTY_NOTICES.txt`.
 
 ## Licence
 
-GPL-3.0. See [LICENSE](LICENSE).
+GPL-3.0 (see [LICENSE](LICENSE)). The bundled third-party components keep their own licences
+(`THIRD_PARTY_NOTICES.txt`, `engine\licenses\`).

@@ -11,6 +11,9 @@ Findings from the October 2026 feasibility studies. Claims are tagged [OBS] (obs
 | [audio.md](audio.md) | Sound bank formats, Hewie's sound IDs and samples, the replacement plan |
 | [textures.md](textures.md) | Texture formats, the upload path, the replacement plan |
 | [handoff.md](handoff.md) | **Start here when resuming:** current state, rules, next steps, verification scripts |
+| [building.md](building.md) | Building from source (Windows MSYS2, Linux), repository layout |
+| [known-issues.md](known-issues.md) | Known issues of the current release |
+| [release/](release/) | Release 0.1: bug and crash report notes, the GitHub release text, Reddit drafts |
 
 ## Verdict (summary)
 

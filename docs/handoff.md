@@ -22,6 +22,21 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### 2026-10-15 (night): release 0.1, the launcher and the release docs
+
+- Distribution option (a): the zip holds no game code or data. `tools/release/` (README there): `HauntingGround.exe`
+  (`launcher.c`, Win32) runs `setup.py` with a bundled Python 3.14: the ISO is read-only, checked (ISO 9660,
+  `SYSTEM.CNF`, region, SHA-256 of every file it needs, `disc.json`), those files copied to `game/`; `bulk2.py`
+  translates; `hgbuild.py` (rules checked against the Makefile) compiles with a bundled gcc 16.2 on all cores; the
+  launcher writes `hg.ini` (GPU when Vulkan works) and starts the game from `bin/` with logs in `logs/`.
+  `mkrelease.py` builds the folder and zip outside the repository (`D:/ps2-work/scratch/release-0.1`): 94 MB, zip
+  36.5 MB.
+- End to end with no MSYS2 on PATH: first start 87-89 s on the 9800X3D (check and copy 3.5 s, translation 20 s,
+  compilation 64 s); the exe it built: G1 702/702 identical in the four modes; the launcher's game start, stop
+  reasons and crash report checked headless.
+- Docs: the README is now for players (developer steps in `docs/building.md`), `docs/known-issues.md`,
+  `docs/release/` (crash-report notes, GitHub release text, Reddit drafts), `.github/ISSUE_TEMPLATE/bug_report.md`.
+
 ### 2026-10-15 (night): release 0.1, saving verified
 
 - `tools/verify/savetest.sh` (headless, about 90 s): LOAD GAME of the user's save 02 from a copy of the card, Circle at

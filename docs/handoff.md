@@ -22,6 +22,25 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### 2026-10-16 (evening, playtest 3): the slowdown was the GS thread's image-transfer bookkeeping
+
+- **Symptom** (`hgboot_test.exe`, x4 + 60, display-locked, full screen): severe slowdown, sound cutting out; the log
+  had the display's ticks at 60 a second but the game at 35-50 VBlanks a second ("not ready" 150-185 per 10 s, the
+  phase at its limit, ~22 underruns per 10 s) with the GPU at 8-11 of 16.7 ms.
+- **Cause**: `c578752`'s masked partial transfers. `gsvk_xfer_touch` runs for every qword of every image transfer
+  and walked 8 x 64 page bits each time (three times per qword while a masked transfer was on, which also went pixel
+  by pixel). Exit summary: "GS image transfers ~100.4 s" of 173.8 s (17 s before), "GS producer waits: ring full
+  (88.2 s)": the EE thread waited on the GS ring for half the session, inside VU1's XGKICK (VU1 time "doubled") and
+  VIF DIRECT (DMA/VIF). The stage-2 measurements had compared GPU ms only.
+- **Workaround the user confirmed**: `HG_GSVK_XMASK=0` (279 s, 0 not ready, 1 underrun at the start, "much smoother").
+- **Fix** (`gs.c`): the touch returns at once when it would change nothing; set bits only; the T8 / T4 / CT32 block
+  paths record the transfer's mask themselves. Headless A/B, interleaved (`D:\ps2-work\scratch\perf\ab.sh`), in
+  `docs/gpu-renderer.md` "Speed, stage 2": as fast as `HG_GSVK_XMASK=0` or faster, transfers back to `7686b74`'s.
+- Gates: G1/G1g 702/702 (sw, gpu, interp, x5), G2 742/742, G3 soak x4 with `HG_VU1CHECK` 1005/1005 identical to
+  `ref/soak.md5` (17.6 M runs, 0 mismatches), G5 0 batches differ, G6 selftest 0 differ, G10 n60 and x5i 24/24.
+  Note: the gate scripts run in `recomp/` and read the user's `hg.ini` (now x4) unless `HG_INI=off`; the picture
+  gate must have it (it failed on picture size only, the first time).
+
 ### 2026-10-15 (night, playtest 2 follow-up): the constant beep and the scratches were the SPU2
 
 - **Symptom** (New Game, intro skipped, the guest room): a constant beep and scratches, with a healthy host queue.

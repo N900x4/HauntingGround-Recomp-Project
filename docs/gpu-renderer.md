@@ -303,6 +303,16 @@ about 30 %. Changes (copy 0 untouched: the exact builds of the shader compile to
   sends them as (word, value, mask) triples that a single-primitive dispatch (`prim 5`, binding 6) merges into every
   copy; the pages stay the GPU's. Logged for the replays of interpolation too (op 3). Read-backs per VBlank 2.3 -> 1.0
   (x4, 184308) and 3.0 -> 1.1 (x5, 181554); what is left are CLUT loads from pages the GPU drew.
+  **The CPU side of it was a regression** (found in the user's third playtest, 2026-10-16): `gsvk_xfer_touch` runs
+  for every qword of every image transfer and its new bookkeeping walked 8 x 64 page bits each time (three times per
+  qword, and pixel by pixel instead of the block fast paths, while a masked transfer was on). The GS thread spent
+  100 s of a 174 s session in image transfers (17 s before), the EE thread waited on a full GS ring for 88 s (counted
+  inside VU1's XGKICK and VIF DIRECT time: "VU1 doubled"), and the game made 35-50 VBlanks a second against 60 ticks
+  (pictures not ready, sound underruns). Fixed: the touch returns at once when it would change nothing, walks only set
+  bits, and the T8 / T4 / CT32 fast paths record the mask themselves. Headless, x4 + 60, user's recordings
+  (interleaved runs while a film played on the PC): 184200 to VB 7200 wall 61.7 / 73.2 s (fix) against 68.5 / 68.1
+  (`HG_GSVK_XMASK=0`), 133-135 (before the fix) and 66.7 / 69.5 (`7686b74`); transfers 10.8 s against 13.6-13.9, 90.8
+  and 10.4-10.6. 185539 to VB 16400: 163.7 / 196.6 (the second run beside a build) against 179.9 / 182.2 and 176.9.
 - Tried and dropped: a build of the copies without the triangle code (fewer registers: no gain), one tile per copy for
   sprite batches (coalesced writes: 25 % slower), the CLUT bits a transfer wrote counted as the CPU's (fewer read-backs
   but 12 times more merges: slower).

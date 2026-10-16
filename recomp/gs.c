@@ -1333,12 +1333,23 @@ static uint64_t xfer_pg[8], xfer_full[8];
 static void gsvk_xfer_touch(void) {
     if (vkb_open && !vk_live) { gsvk_batch_close(); return; }
     if (!vk_live) return;
+    {   /* called for every qword of a transfer: return at once when this call would change nothing (no page of the
+           transfer the GPU holds, every page outside xm_pg already marked as the CPU's and not a render target; the
+           same state as after a full pass). The full pass per qword was most of the GS thread's time in the user's
+           rooms (2026-10-16: transfers 17 s -> 100+ s, the EE thread waiting on a full ring half the session). */
+        uint64_t chg = 0;
+        for (int i = 0; i < 8; i++) {
+            const uint64_t wr = xfer_pg[i] & ~xm_pg[i];
+            chg |= ((xfer_pg[i] | xfer_full[i]) & pg_gpu[i]) | (wr & ~pg_cpu[i]) | (wr & pg_rt[i]) | (xm_pg[i] & pg_rt[i]);
+        }
+        if (!chg) return;
+    }
     uint64_t need[8]; for (int i = 0; i < 8; i++) need[i] = xfer_pg[i] & ~xfer_full[i];
     if (xm_ok < 0) xm_ok = !(getenv("HG_GSVK_XMASK") && !atoi(getenv("HG_GSVK_XMASK")));
     if (xm_ok && (xmask || (xmask = calloc(1u << 20, 4)))) {   /* the GPU's pages written in part: their bits merged on the GPU (see xm_flush) */
         for (int i = 0; i < 8; i++) {
-            const uint64_t m = need[i] & (pg_gpu[i] | xm_pg[i]), fresh = m & ~xm_pg[i];
-            for (int b = 0; b < 64; b++) if (fresh >> b & 1) memset(xmask + (uint32_t)(i * 64 + b) * 2048, 0, 8192);
+            const uint64_t m = need[i] & (pg_gpu[i] | xm_pg[i]);
+            for (uint64_t fresh = m & ~xm_pg[i]; fresh; fresh &= fresh - 1) memset(xmask + (uint32_t)(i * 64 + __builtin_ctzll(fresh)) * 2048, 0, 8192);
             xm_pg[i] |= m; need[i] &= ~m; if (m) xm_on = 1;
         }
     }
@@ -2327,7 +2338,7 @@ static void xfer_qword(const uint64_t q[2]) {
     const int X = xfer.sx + xfer.x, Y = xfer.sy + xfer.y;
     const uint8_t *b = (const uint8_t *)q;
 #ifdef HAVE_VULKAN
-    if (xm_on) { hwreg_write(q[0]); hwreg_write(q[1]); return; }   /* (pixel by pixel: the written bits are recorded) */
+    const int xm = xm_on;   /* the written bits are recorded (xm_flush): in the fast paths below too, as mask_px does */
 #endif
     if (xfer.y < xfer.h) switch (xfer.psm) {
     case T8:
@@ -2336,6 +2347,9 @@ static void xfer_qword(const uint64_t q[2]) {
             const uint32_t blk = (xfer.bp + page * 32 + blockTable8[(Y >> 4) & 3][(X >> 4) & 7]) * 256;
             const uint8_t *ct = columnTable8[Y & 15];
             for (int i = 0; i < 16; i++) VM8[(blk + ct[i]) & 0x3FFFFF] = b[i];
+#ifdef HAVE_VULKAN
+            if (xm) { for (int i = 0; i < 16; i++) { const uint32_t a = (blk + ct[i]) & 0x3FFFFF; xmask[a >> 2] |= 0xFFu << ((a & 3) * 8); } xm_dirty = 1; }
+#endif
             goto advance16;
         }
         break;
@@ -2347,7 +2361,13 @@ static void xfer_qword(const uint64_t q[2]) {
             for (int i = 0; i < 32; i++) {
                 const uint32_t a = (blk + ct[i]) & 0x7FFFFF; const uint8_t v = (b[i >> 1] >> ((i & 1) * 4)) & 15;
                 uint8_t *p = &VM8[a >> 1]; *p = (a & 1) ? (*p & 0x0F) | (v << 4) : (*p & 0xF0) | v;
+#ifdef HAVE_VULKAN
+                if (xm) xmask[a >> 3] |= 0xFu << ((a & 7) * 4);
+#endif
             }
+#ifdef HAVE_VULKAN
+            if (xm) xm_dirty = 1;
+#endif
             xfer.x += 32; goto rowend;
         }
         break;
@@ -2355,6 +2375,9 @@ static void xfer_qword(const uint64_t q[2]) {
         if (xfer.x + 4 <= xfer.w) {
             const uint32_t base = xfer.bp * 64 + (uint32_t)(Y >> 5) * xfer.bw * 2048; const uint32_t *xo = xoff32[Y & 31];
             for (int i = 0; i < 4; i++) { uint32_t v; memcpy(&v, b + 4 * i, 4); vm[(base + xo[(X + i) & 2047]) & 0xFFFFF] = v; }
+#ifdef HAVE_VULKAN
+            if (xm) { for (int i = 0; i < 4; i++) xmask[(base + xo[(X + i) & 2047]) & 0xFFFFF] = ~0u; xm_dirty = 1; }
+#endif
             xfer.x += 4; goto rowend;
         }
         break;

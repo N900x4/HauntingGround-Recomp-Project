@@ -1,4 +1,5 @@
 #!/bin/sh
+export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
 # The Options menu's extra rows (phase 3), scripted: New Game card, main menu -> OPTIONS, Up past Controller Type
 # (into the new rows) and back, down through the game's rows into the new ones, then every new row changed once:
 # Renderer (and back), Resolution x3, Frame rate 60, Display full screen, V-Sync on, a key captured on the keyboard

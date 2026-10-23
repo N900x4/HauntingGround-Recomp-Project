@@ -618,7 +618,7 @@ const uint32_t *gsvk_check_end(double *ms) {
    own command buffers and submits to its own queue. A picture image is free again (pic_free) once the UI thread has
    moved on to a newer picture and its blits of it are done, or when the picture is dropped unseen. No picture crosses
    the bus, and the GS thread never waits for the GPU because of the window. */
-enum { NPIC = 12, NFR = 3, OVW = 176, OVH = 42 };
+enum { NPIC = 12, NFR = 3, OVW = 176, OVH = 54 };
 static struct { VkImage img; VkDeviceMemory mem; int w, h; } pic[NPIC];
 static _Atomic uint32_t pic_free = (1u << NPIC) - 1;
 static _Atomic int pres_ok;

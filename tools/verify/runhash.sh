@@ -1,4 +1,5 @@
 #!/bin/sh
+export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
 # usage: runhash.sh BINARY OUT.md5 MAXVB [GSDRAW]  -> frames every 5 VBlanks hashed (md5 of the PPM) and deleted as they appear
 # Route: New Game on an empty card (reference ref/hashA.md5, MAXVB 4000); HG_ROUTE=cs: LOAD GAME from the default card
 # (../memcards) into the Castle Suite (reference ref/cs.md5, MAXVB 4200).

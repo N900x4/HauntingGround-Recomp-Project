@@ -457,6 +457,7 @@ void spu2_run(uint64_t samples) {
     tprof[3] += host_now() - t0;
     n_samples += samples;
 }
+uint64_t spu2_sample_count(void) { return n_samples; }   /* 48 kHz samples mixed so far: emulated time (host_sdl.c, A/V) */
 void spu2_dump_stats(void) {
     int active = 0; for (int c = 0; c < 2; c++) for (int n = 0; n < 24; n++) active += voice[c][n].phase != PH_OFF;
     L("SPU2: %llu samples, %llu key-ons, %d voices active, %llu IRQs, DMA core0 %llu / core1 %llu halfwords\n", (unsigned long long)n_samples,

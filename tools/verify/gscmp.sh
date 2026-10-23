@@ -1,4 +1,5 @@
 #!/bin/sh
+export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
 # usage: gscmp.sh BINARY OUTDIR  -> renders VB 2380-2520 of stage 1, compares with ref1
 S=${HG_SCRATCH:-${TMPDIR:-/tmp}}
 export HG_GAME_DIR="${HG_GAME_DIR:-$(cd "$(dirname "$0")/../../game" && pwd)}"

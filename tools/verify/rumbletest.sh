@@ -1,4 +1,5 @@
 #!/bin/sh
+export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
 # Phase 4 (DualSense): the game's vibration as the pad HLE decodes it (HG_RUMBLELOG=1), scripted and headless.
 # New Game card, main menu -> OPTIONS, Vibration row: Cross, Right (Off), Right (On: the game plays its test
 # vibration, small motor and big motor 128 for 4 frames each), Cross; then the same in the controller page of our

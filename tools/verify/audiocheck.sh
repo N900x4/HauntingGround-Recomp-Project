@@ -1,4 +1,5 @@
 #!/bin/sh
+export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
 # Sound regression check: replay a recorded session headless (no drawing) with the SPU2's mixed output written to a
 # WAV, then audiocheck.py looks for stuck tones, DC and clicks (see its header). The recording is copied to scratch
 # first (a replay writes replay_card into the recording's folder); the WAV is deleted afterwards (--keep keeps it).

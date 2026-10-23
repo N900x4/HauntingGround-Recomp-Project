@@ -1,4 +1,5 @@
 #!/bin/sh
+export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
 # Gate G7: a windowed run to the Castle Suite (LOAD GAME from ../memcards), sound muted, F3 overlay, presents logged
 # from PL seconds on (default 1), speed lines every 300 VBlanks; ends by itself at HG_MAXVB (default 3900).
 # usage: [PL=SECONDS] wintest.sh TAG [env...]   then: python pacing.py $HG_SCRATCH/win_TAG.log

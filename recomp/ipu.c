@@ -491,6 +491,7 @@ void ipu_init(uint8_t *hw) {
     }
     for (int x = 0; x < 8; x++) for (int u = 0; u < 8; u++) idct_c[x][u] = (u ? sqrt(2.0 / 8) : sqrt(1.0 / 8)) * cos((2 * x + 1) * u * M_PI / 16);
 }
+uint64_t ipu_bdec_count(void) { return n_cmds[2]; }   /* macroblocks decoded so far (a movie is playing while it grows) */
 void ipu_dump_stats(void) {
     static const char *nm[16] = { "BCLR", "IDEC", "BDEC", "VDEC", "FDEC", "SETIQ", "SETVQ", "CSC", "PACK", "SETTH" };
     int any = 0; for (int i = 0; i < 16; i++) any |= n_cmds[i] != 0; if (!any) return;

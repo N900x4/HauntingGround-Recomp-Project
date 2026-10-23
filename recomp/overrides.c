@@ -39,6 +39,18 @@ static int ov_mwply_get_stat(Ctx *c) {
     c->r[2].u64[0] = i < MAXH && polls[i]++ < 30 ? 2 : 3; return 1;
 }
 
+/* movies that play (the default): only noted, for the smoothness and A/V logs (host_sdl.c); the game's own code runs */
+char movie_now[64]; volatile int movie_on;
+static int ov_mwply_note_start(Ctx *c) {
+    const uint32_t name = c->r[5].u32[0];
+    snprintf(movie_now, sizeof movie_now, "%s", name ? (char *)gptr(name) : "?"); movie_on = 1;
+    L("movie: \"%s\" starts at VBlank %llu\n", movie_now, (unsigned long long)hle_vblank_count());
+    return 0;
+}
+static int ov_mwply_note_stop(Ctx *c) {
+    (void)c; if (movie_on) L("movie: \"%s\" stopped at VBlank %llu\n", movie_now, (unsigned long long)hle_vblank_count());
+    movie_on = 0; return 0;
+}
 void overrides_init(void) {
     extern void options_init(void); options_init();
     const char *m = getenv("HG_MOVIES");
@@ -48,5 +60,5 @@ void overrides_init(void) {
         set_hook(0x23b618, ov_mwply_start_fname);
         set_hook(0x23b8e8, ov_mwply_stop);
         set_hook(0x23c9a8, ov_mwply_get_stat);
-    }
+    } else { set_hook(0x23b618, ov_mwply_note_start); set_hook(0x23b8e8, ov_mwply_note_stop); }
 }

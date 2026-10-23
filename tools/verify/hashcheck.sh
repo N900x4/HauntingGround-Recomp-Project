@@ -1,4 +1,5 @@
 #!/bin/sh
+export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
 # Gates G1/G1g (and G2 with HG_ROUTE=cs): frame hashes of the software GS and the GPU modes against the frozen
 # reference (ref/hashA.md5, or ref/cs.md5 for the Castle Suite route). Runs two at a time.
 # usage: hashcheck.sh TAG            (from anywhere; outputs in $HG_SCRATCH, default D:/ps2-work/scratch)

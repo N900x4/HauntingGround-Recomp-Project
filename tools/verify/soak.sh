@@ -1,4 +1,5 @@
 #!/bin/sh
+export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
 # Gate G3: replay the user's session recordings/20261014-200745 to its end (VB ~20600), hashing a frame every 20
 # VBlanks; compare with ref/soak.md5 (software GS). usage: soak.sh TAG [env...]   e.g. soak.sh x4 HG_GSVK=1 HG_GSVK_SCALE=4
 V=$(cd "$(dirname "$0")" && pwd); R=$(cd "$V/../.." && pwd); S=${HG_SCRATCH:-/d/ps2-work/scratch}

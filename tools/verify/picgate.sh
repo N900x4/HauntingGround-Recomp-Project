@@ -1,4 +1,5 @@
 #!/bin/sh
+export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
 # Gate G10 (pictures): dumps the pictures handed to the window (HG_FRAMES_SHOWN, real and in-between) in two ranges,
 # stage 1 (VB 3300-3311) and the Castle Suite (VB 3600-3611), headless, into $HG_SCRATCH/pic_TAG/{st1,cs}; compare
 # two such sets with piccmp.py. usage: picgate.sh TAG [env...]   e.g. picgate.sh x5i HG_GSVK=1 HG_GSVK_SCALE=5 HG_GSVK_INTERP=1

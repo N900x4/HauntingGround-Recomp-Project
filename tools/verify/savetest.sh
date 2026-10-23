@@ -1,4 +1,5 @@
 #!/bin/sh
+export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
 # Saving from our build (release 0.1), scripted and headless. Needs the user's card with save 02 at the Castle Suite clock
 # (the card the G2 route uses: ../memcards, or SAVETEST_CARD=DIR holding port0/); that card is only ever copied.
 # The game's clock is fixed (HG_CLOCK), so the saves and their dates repeat from run to run.

@@ -1,4 +1,5 @@
 #!/bin/sh
+export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
 # Gate G5: the GPU against the CPU word for word over the four ranges (menus, stage 1, Castle Suite, ST_020).
 # usage: gpucheck.sh TAG [batch]   (batch: HG_GSVKBATCH=1, compare after each batch; else one primitive at a time)
 V=$(cd "$(dirname "$0")" && pwd); R=$(cd "$V/../.." && pwd); S=${HG_SCRATCH:-/d/ps2-work/scratch}

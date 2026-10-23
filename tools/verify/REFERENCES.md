@@ -15,7 +15,9 @@ The New Game route uses `HG_MOVIES=skip` and a fixed `HG_PAD` timeline; LOAD GAM
 
 ## Gate scripts (roadmap section 3.0)
 
-All take outputs into `$HG_SCRATCH` (default `D:/ps2-work/scratch`) and run from the MSYS2 UCRT64 shell. Every
+All take outputs into `$HG_SCRATCH` (default `../scratch` next to the repository: `D:/ps2-work/scratch`) and run
+from bash: the MSYS2 UCRT64 shell on Windows, any shell on Linux (they then run `hgboot`; the hashes are written
+with `md5sum -b`, as the references are, on both). Every
 script sets `HG_INI=off` unless `HG_INI` is already set, so the user's `recomp/hg.ini` (the player's resolution,
 frame rate, renderer) never changes a gate's result (on 2026-10-16 it made G10 compare x4 pictures with native ones).
 

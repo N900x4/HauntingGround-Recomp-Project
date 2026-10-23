@@ -111,7 +111,15 @@ void stop(const char *fmt, ...) {
     char buf[512]; va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
     fprintf(stderr, "STOP: %s\n", buf);
     host_shutdown();   /* a swapchain left presenting into a window torn down by exit() kept the process from ending */
-    dump_stats(buf); exit(0);
+    dump_stats(buf);
+#ifdef _WIN32
+    exit(0);
+#else
+    /* not exit(): it runs the libraries' destructors while the GS thread and the driver's threads still live, and
+       NVIDIA's (libGLX_nvidia, the Vulkan driver) could wait forever on a lock there (seen twice with
+       HG_GSVK_INTERP=1: the stats written, then a 100-minute hang until -t). The WAV is closed (spu2_dump_stats). */
+    fflush(NULL); _exit(0);
+#endif
 }
 void rec_first(int i) { if (n_first < MAXF) first_order[n_first++] = i; }
 

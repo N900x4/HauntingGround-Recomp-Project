@@ -44,6 +44,8 @@ identical frames). A full decompilation was judged a multi-year job; readable C 
 | Verification kit | `tools/verify`: frozen references (`ref/hashA.md5`, `cs.md5`, `soak.md5`, see `REFERENCES.md`) and the gate scripts `hashcheck.sh`, `gpucheck.sh`, `soak.sh`, `wintest.sh` + `pacing.py`, `picgate.sh` + `piccmp.py`. Picture references for G10 (x5 + 60, native 60) are in `D:\ps2-work\scratch\pic_ref_*` (game pictures: never committed). |
 | **Settings** (phase 3, 2026-10-15) | **Native extra rows in the game's own Options menu** (Down past Screen Position): Renderer (next start), Resolution (native, x2-x6, auto), Frame rate (30/60/120, 120 at native), Display, V-Sync, and keyboard and controller mapping pages (press a key / a button; PlayStation names for PS pads, Xbox names otherwise). Drawn and driven by the game's own functions through two hooks (`recomp/game/options.c`, `docs/options-menu.md`). Values in `hg.ini` next to the exe (`recomp/settings.c`); environment variables still override; resolution, frame rate, vsync, full screen and mappings change live. Recordings carry the settings and host-side changes. |
 | **Controllers / DualSense** (phase 4, 2026-10-15) | The game's DualShock 2 vibration decoded from libvib's `sceVibSetActParam` RPC and played on the controller (both motors; the HLE's actuator profile answer fixed from `0x01` to `0x03`, all gates identical); strength setting (Off/Low/Medium/High), static light bar (dim amber, setting), touchpad click = Select, first controller to press is player 1, dead zone in `hg.ini`, `gamecontrollerdb.txt`, PS5 names ("DualSense"). `HG_RUMBLELOG=1`. The user's DualSense was detected over USB (HIDAPI, type PS5) with Steam running. **Waiting**: the user's hardware checklist, USB and Bluetooth (`docs/controller.md` section 8). |
+| **Linux** (2026-10-23) | Builds and runs on CachyOS (`docs/building.md`); every gate gives the Windows results (`docs/handoff.md`, 2026-10-23); the Vulkan window works through SDL's surface (tested in headless gamescope). Waiting: a playtest on the real screen, the DualSense on Linux. |
+| Open user decision | IOP `strtol`: the console wraps `0xFFFFFFFF` (SNDDRV's argument), our builds clamp it to `0x7FFFFFFF` as Windows always did; `HG_STRTOL=hw` for an A/B listen (it would change every reference). |
 | Open user decision | Door specks in `ST_020` need PCSX2 in that room (user saves a state there / allows use of their states / formats a folder memory card). |
 
 ## 4. Rules (from the user; they override defaults)
@@ -62,6 +64,8 @@ identical frames). A full decompilation was judged a multi-year job; readable C 
 
 ## 5. How to work here (tools, checks, gotchas)
 
+- **Build on Linux**: `cd recomp && make -j8`; gates as below from any shell (outputs in `../scratch`). Window tests
+  with the display off: `gamescope --backend headless -W 3840 -H 2160 -r 120 -- sh tools/verify/wintest.sh ...`.
 - **Build** (MSYS2 UCRT64; the plain Bash tool lacks make/cmp on PATH):
   `MSYSTEM=UCRT64 CHERE_INVOKING=1 C:\msys64\usr\bin\bash.exe -lc "cd /d/ps2-work/HauntingGround-Recomp-Project/recomp && make -j8"`
   (from PowerShell). Shaders compile with `glslangValidator` into `gen/gs_*spv.h` (three builds of

@@ -3,13 +3,16 @@ CC ?= gcc
 GENFLAGS = -O1 -w -fno-strict-aliasing -I. -Igen
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
 SDL_LIBS := $(shell pkg-config --libs sdl2 2>/dev/null)
+# objects per OS (obj, obj-linux), so a drive shared by Windows and Linux keeps both builds
 ifneq ($(findstring mingw,$(shell $(CC) -dumpmachine)),)
 # MSYS2 UCRT64: keep the console (no -mwindows) and our own main() (no SDL2main)
 SDL_LIBS := $(filter-out -mwindows -lSDL2main,$(SDL_LIBS))
 EXE = hgboot.exe
+O = obj
 LDFLAGS_OS =
 else
 EXE = hgboot
+O = obj-linux
 LDFLAGS_OS = -rdynamic
 endif
 ifneq ($(SDL_LIBS),)
@@ -19,61 +22,61 @@ endif
 VK_LIBS := $(shell pkg-config --libs vulkan 2>/dev/null)
 ifneq ($(VK_LIBS),)
 VK_CFLAGS = -DHAVE_VULKAN
-VK_OBJ = obj/gsvk.o
+VK_OBJ = $(O)/gsvk.o
 endif
 RTFLAGS = -O1 -g -Wall -Wno-unused -fno-strict-aliasing -I. -Igen
 GENSRC = $(wildcard gen/part*.c) gen/table.c $(wildcard gen/vu1_aot_*.c)
-GENOBJ = $(patsubst gen/%.c,obj/%.o,$(GENSRC))
+GENOBJ = $(patsubst gen/%.c,$(O)/%.o,$(GENSRC))
 all: $(EXE)
 # VU1 programs compiled ahead of time (vu1gen.py): the flags of vu1.c, whose semantics they inline
-obj/vu1_aot_%.o: gen/vu1_aot_%.c vu1_core.h ee_runtime.h hle.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -ffp-contract=off -g0 -c $< -o $@
-obj/%.o: gen/%.c ee_runtime.h
-	@mkdir -p obj
+$(O)/vu1_aot_%.o: gen/vu1_aot_%.c vu1_core.h ee_runtime.h hle.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -O2 -ffp-contract=off -g0 -c $< -o $@
+$(O)/%.o: gen/%.c ee_runtime.h
+	@mkdir -p $(O)
 	$(CC) $(GENFLAGS) -c $< -o $@
-obj/runtime.o: runtime.c ee_runtime.h hle.h compat.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/hle.o: hle.c ee_runtime.h hle.h compat.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/iop_pad_mc.o: iop_pad_mc.c ee_runtime.h hle.h compat.h settings.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/overrides.o: overrides.c ee_runtime.h hle.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/options.o: game/options.c game/guest.h ee_runtime.h hle.h settings.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/gs.o: gs.c ee_runtime.h hle.h compat.h gsvk.h settings.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) $(VK_CFLAGS) -O2 -ffp-contract=off -c $< -o $@
+$(O)/runtime.o: runtime.c ee_runtime.h hle.h compat.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(O)/hle.o: hle.c ee_runtime.h hle.h compat.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(O)/iop_pad_mc.o: iop_pad_mc.c ee_runtime.h hle.h compat.h settings.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(O)/overrides.o: overrides.c ee_runtime.h hle.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(O)/options.o: game/options.c game/guest.h ee_runtime.h hle.h settings.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(O)/gs.o: gs.c ee_runtime.h hle.h compat.h gsvk.h settings.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) $(VK_CFLAGS) -O2 -ffp-contract=off -c $< -o $@
 gen/gs_sprite_spv.h: vk/gs_sprite.comp
 	glslangValidator -V --target-env vulkan1.1 --vn gs_sprite_spv -o $@ $<
 gen/gs_batch_spv.h: vk/gs_sprite.comp
 	glslangValidator -V --target-env vulkan1.1 -DBATCH --vn gs_batch_spv -o $@ $<
 gen/gs_batchc_spv.h: vk/gs_sprite.comp
 	glslangValidator -V --target-env vulkan1.1 -DBATCH -DCOPIES --vn gs_batchc_spv -o $@ $<
-obj/gsvk.o: gsvk.c gsvk.h gen/gs_sprite_spv.h gen/gs_batch_spv.h gen/gs_batchc_spv.h ee_runtime.h hle.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/dmac.o: dmac.c ee_runtime.h hle.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/settings.o: settings.c settings.h hle.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) $(SDL_CFLAGS) -c $< -o $@
-obj/host_sdl.o: host_sdl.c ee_runtime.h hle.h gsvk.h settings.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) $(SDL_CFLAGS) $(VK_CFLAGS) -c $< -o $@
-obj/vu1.o: vu1.c vu1_core.h ee_runtime.h hle.h vu1_state.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -ffp-contract=off -c $< -o $@
-obj/ipu.o: ipu.c ee_runtime.h hle.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -c $< -o $@
-obj/vu1_ref.o: vu1_ref.c ee_runtime.h hle.h vu1_state.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -ffp-contract=off -c $< -o $@
-obj/iop_cpu.o: iop_cpu.c ee_runtime.h hle.h iop.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -c $< -o $@
-obj/iop_kernel.o: iop_kernel.c ee_runtime.h hle.h iop.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -c $< -o $@
-obj/spu2.o: spu2.c ee_runtime.h hle.h iop.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -O2 -c $< -o $@
-obj/interp.o: interp.c ee_runtime.h hle.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-obj/compat.o: compat.c compat.h ee_runtime.h hle.h
-	@mkdir -p obj; $(CC) $(RTFLAGS) -c $< -o $@
-$(EXE): $(GENOBJ) obj/runtime.o obj/hle.o obj/interp.o obj/iop_pad_mc.o obj/overrides.o obj/options.o obj/settings.o obj/gs.o obj/dmac.o obj/host_sdl.o obj/vu1.o obj/vu1_ref.o obj/ipu.o obj/iop_cpu.o obj/iop_kernel.o obj/spu2.o obj/compat.o $(VK_OBJ)
+$(O)/gsvk.o: gsvk.c gsvk.h gen/gs_sprite_spv.h gen/gs_batch_spv.h gen/gs_batchc_spv.h ee_runtime.h hle.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(O)/dmac.o: dmac.c ee_runtime.h hle.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(O)/settings.o: settings.c settings.h hle.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) $(SDL_CFLAGS) -c $< -o $@
+$(O)/host_sdl.o: host_sdl.c ee_runtime.h hle.h gsvk.h settings.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) $(SDL_CFLAGS) $(VK_CFLAGS) -c $< -o $@
+$(O)/vu1.o: vu1.c vu1_core.h ee_runtime.h hle.h vu1_state.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -O2 -ffp-contract=off -c $< -o $@
+$(O)/ipu.o: ipu.c ee_runtime.h hle.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -O2 -c $< -o $@
+$(O)/vu1_ref.o: vu1_ref.c ee_runtime.h hle.h vu1_state.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -O2 -ffp-contract=off -c $< -o $@
+$(O)/iop_cpu.o: iop_cpu.c ee_runtime.h hle.h iop.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -O2 -c $< -o $@
+$(O)/iop_kernel.o: iop_kernel.c ee_runtime.h hle.h iop.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -O2 -c $< -o $@
+$(O)/spu2.o: spu2.c ee_runtime.h hle.h iop.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -O2 -c $< -o $@
+$(O)/interp.o: interp.c ee_runtime.h hle.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(O)/compat.o: compat.c compat.h ee_runtime.h hle.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(EXE): $(GENOBJ) $(O)/runtime.o $(O)/hle.o $(O)/interp.o $(O)/iop_pad_mc.o $(O)/overrides.o $(O)/options.o $(O)/settings.o $(O)/gs.o $(O)/dmac.o $(O)/host_sdl.o $(O)/vu1.o $(O)/vu1_ref.o $(O)/ipu.o $(O)/iop_cpu.o $(O)/iop_kernel.o $(O)/spu2.o $(O)/compat.o $(VK_OBJ)
 	$(CC) $(LDFLAGS_OS) -o $@ $^ -lm -lpthread $(SDL_LIBS) $(VK_LIBS)
 clean:
-	rm -rf obj hgboot hgboot.exe
+	rm -rf $(O) $(EXE)

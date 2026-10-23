@@ -15,8 +15,8 @@ P=$!
 : > $2.tmp
 while kill -0 $P 2>/dev/null; do
   sleep 2
-  n=$(ls $D | wc -l); if [ $n -gt 1 ]; then ls $D | sort | head -n $((n-1)) | while read f; do (cd $D && md5sum $f >> $2.tmp && rm -f $f); done; fi
+  n=$(ls $D | wc -l); if [ $n -gt 1 ]; then ls $D | sort | head -n $((n-1)) | while read f; do (cd $D && md5sum -b $f >> $2.tmp && rm -f $f); done; fi
 done
-(cd $D && ls | sort | while read f; do md5sum $f; done >> $2.tmp)
+(cd $D && ls | sort | while read f; do md5sum -b $f; done >> $2.tmp)
 sort -k2 $2.tmp > $2; rm -rf $D $M $2.tmp
 grep -E "host time" $2.log; wc -l < $2

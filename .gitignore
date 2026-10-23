@@ -33,6 +33,7 @@ SLPM_*
 # Generated code and build outputs (derived from the game executable)
 recomp/gen/
 recomp/obj/
+recomp/obj-linux/
 recomp/hgboot
 recomp/hgboot.*
 *.o

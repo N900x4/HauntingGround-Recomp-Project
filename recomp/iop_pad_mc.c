@@ -127,6 +127,8 @@ static void rr_init(void) {
     static int done; if (done) return; done = 1;
     settings_init();
     const char *rec = getenv("HG_PADREC"), *play = getenv("HG_PADPLAY");
+    if (rec && !*rec) rec = 0;   /* empty is unset: the scripts' HG_PADREC= means no recording (it wrote /pad.txt) */
+    if (play && !*play) play = 0;
     char p[1100];
     if (play) {
         snprintf(p, sizeof p, "%s/pad.txt", play);

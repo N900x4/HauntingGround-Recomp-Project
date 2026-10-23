@@ -42,6 +42,9 @@ double host_idle;   /* seconds slept to pace the window to real time (HG_SPEEDLO
 #define SDL_MAIN_HANDLED          /* our own main(): no SDL2main, and the console stays */
 #include <SDL.h>
 #include <SDL_syswm.h>
+#if defined HAVE_VULKAN && !defined _WIN32
+#include <SDL_vulkan.h>
+#endif
 #ifdef HAVE_VULKAN
 #include "gsvk.h"
 #endif
@@ -189,7 +192,11 @@ static int host_init(void) {   /* on the UI thread */
         if (f) { fclose(f); const int n = SDL_GameControllerAddMappingsFromFile(p); L("host: %s: %d controller mappings%s%s\n", p, n, n < 0 ? ": " : "", n < 0 ? SDL_GetError() : ""); }
     }
     const int scale = settings()->window_scale;   /* HG_SCALE, window_scale */
-    win = SDL_CreateWindow("Haunting Ground Recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640 * scale, 448 * scale, SDL_WINDOW_RESIZABLE);
+    Uint32 wflags = SDL_WINDOW_RESIZABLE;
+#if defined HAVE_VULKAN && !defined _WIN32
+    if (settings()->renderer) wflags |= SDL_WINDOW_VULKAN;   /* Linux: SDL makes the GPU renderer's surface (ui_mksurf) */
+#endif
+    win = SDL_CreateWindow("Haunting Ground Recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640 * scale, 448 * scale, wflags);
     if (!win) { L("host: no window: %s (running headless)\n", SDL_GetError()); SDL_Quit(); return 0; }
 #ifdef HAVE_VULKAN   /* the GPU renderer presents itself once it is set up (at the first primitive): no SDL renderer on the window */
     const char *pp = getenv("HG_PRESENT");
@@ -370,6 +377,12 @@ static const uint32_t *ov_build(void) {
     return ov;
 }
 static uint64_t pres_tag;   /* the picture the window shows (gs_display_tag of the last one taken) */
+#if defined HAVE_VULKAN && !defined _WIN32
+static int ui_mksurf(void *inst, void *surf) {   /* gsvk_present_init_with: the window's surface on Wayland or X11 */
+    if (SDL_Vulkan_CreateSurface(win, (VkInstance)inst, (VkSurfaceKHR *)surf)) return 1;
+    L("host: SDL_Vulkan_CreateSurface: %s\n", SDL_GetError()); return 0;
+}
+#endif
 static uint64_t ui_present(void) {   /* the timer's way: the next picture (or the last again); the present's id (GPU path) */
 #ifdef HAVE_VULKAN
     if (vkmode == 1) {   /* the GPU renderer: set up yet? */
@@ -378,6 +391,8 @@ static uint64_t ui_present(void) {   /* the timer's way: the next picture (or th
             SDL_SysWMinfo wi; SDL_VERSION(&wi.version); r = -1;
 #ifdef _WIN32
             if (SDL_GetWindowWMInfo(win, &wi) && gsvk_present_init(wi.info.win.hinstance, wi.info.win.window)) { vkmode = 2; r = 1; }
+#else
+            (void)wi; if (gsvk_present_init_with(ui_mksurf)) { vkmode = 2; r = 1; }
 #endif
         }
         if (r < 0) { vkmode = 0; sdl_renderer(); L("host: presenting with SDL\n"); }

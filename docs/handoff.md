@@ -22,6 +22,44 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### 2026-10-23 (unattended): the Linux port (CachyOS), every gate gives the Windows results
+
+The user moved to CachyOS Linux (same PC: Ryzen 7 9800X3D, RTX 5090, driver 615.78; the repo on the shared NTFS
+drive, `/mnt/NewVolume/ps2-work`, which is Windows' `D:`). Commits `634cd5e` (the A/V log work left uncommitted on
+Windows, checked here) and the Linux port after it. Build: `make -j8` in `recomp/` (gcc 16, SDL2 through
+sdl2-compat, Vulkan 1.4), about 70 s; objects in `obj-linux/` so the Windows `obj/` stays.
+
+- **The one real difference was the IOP's `strtol`.** SNDDRV is started with the argument `0xFFFFFFFF`, which the
+  HLE parsed with the host's `strtol`: 32-bit `long` on Windows saturates to `0x7FFFFFFF`, 64-bit `long` on Linux
+  gave `0xFFFFFFFF`, and the sound driver set SPU2 core 0 up differently (ATTR `0xc0c0` vs `0xc000`, effects area
+  `0xfdbe0` vs `0xefff8`, one SPU2 IRQ vs none). IOP timing follows the sound state, so 271 of `hashA`'s 702 frames
+  came one VBlank late in every renderer. Found by running the Windows `hgboot.exe` under Wine (the MSYS2 DLLs from
+  the C: drive) and diffing the two logs at VBlank 600. `f_strtol` now saturates to 32 bits on every host.
+  **Accuracy note, the user's decision:** the console's own SYSCLIB `strtol` (BIOS export 36, disassembled) does not
+  saturate (it accumulates in 32 bits), so a real PS2 gets `0xFFFFFFFF`, the Linux value. `HG_STRTOL=hw` does that
+  (VB 600: 4680 GIF tags instead of 4674); it changes the sound setup and would need every reference re-frozen.
+- **Exit hang (Linux only):** `exit()` ran NVIDIA's library destructors while our GS thread and the driver's threads
+  were alive, and twice (with `HG_GSVK_INTERP=1`) the main thread waited forever on a driver lock after the stats were
+  written, until `-t` ended it 100 minutes later. `stop()` now flushes and calls `_exit()` on Linux (as the time
+  limit always did; Windows unchanged). Not reproduced in 14 tries before the fix, none since.
+- **`HG_PADREC=` (empty) recorded to `/pad.txt`.** `wintest.sh` passes it to mean "no recording"; the runtime took
+  the empty string as a directory, so every Windows window test since 2026-10-15 wrote `D:\pad.txt` (still there:
+  the user's to delete). Empty now means unset, for `HG_PADPLAY` too.
+- **Window:** the GPU renderer presents through SDL's Vulkan surface (`gsvk_present_init_with`, Wayland or X11) from
+  video memory, with present timing; tested in gamescope's headless backend (a virtual 4K display, the user's monitor
+  off), not yet on the user's screen.
+- Gate scripts: the scratch default is `../scratch` next to the repo, `hgboot` on Linux, `pwd -W` only on MSYS2,
+  `python3` first, and hashes written with `md5sum -b` (the references' `*name` form) on both systems.
+
+Gates on Linux (2026-10-23): G1/G1g (sw, gpu, interp, x5: 702/702 identical to `hashA`), G2 (742/742 to `cs.md5`, all
+four), G3 (CPU and GPU x4: 1005/1005 to `soak.md5`), G5 (742,000 primitives one at a time and 10,774 batches: 0
+differing words), G4 (`HG_VU1CHECK=1`: 2,000,000 runs, 0 mismatches), G6 (1717 frames, 0 differ), G10 (n60 and x5i: 24/24, not one pixel different from the Windows
+pictures), savetest PASS (card files identical to `ref/save.md5`), optionstest and rumbletest (two runs and a
+recorded replay identical; rumble lines as on Windows), audiocheck PASS; the user's card unchanged throughout. G7 in
+gamescope's virtual display (exact timer, so the game's own pacing): x4 + 60 at 60 Hz median 16.66 ms (p5-p95
+16.54-16.83), x5 + 60 at 60 Hz 16.67 (16.54-16.80), 120 fps at 120 Hz 8.34 (7.74-8.94); 0 repeats, 0 out of order,
+1.00x in all.
+
 ### 2026-10-16 (evening, playtest 3): the slowdown was the GS thread's image-transfer bookkeeping
 
 - **Symptom** (`hgboot_test.exe`, x4 + 60, display-locked, full screen): severe slowdown, sound cutting out; the log
@@ -471,6 +509,9 @@ and `20261015-181554` (x5) replayed from **scratch copies** (a replay writes `re
 ## Paths
 
 Since 2026-10-13 the project lives on the user's Windows 11 PC (Ryzen 7 9800X3D, RTX 5090); the Linux VM is shut down.
+Since 2026-10-23 the user works on CachyOS Linux on the same PC: the repo is `/mnt/NewVolume/ps2-work/HauntingGround-Recomp-Project`
+(the same NTFS drive, `D:` on Windows), scratch `/mnt/NewVolume/ps2-work/scratch`, build and gates from any shell
+(`docs/building.md`, Linux). PCSX2 there is the Flatpak (`net.pcsx2.PCSX2`, 2.8.2). The Windows paths below still hold.
 
 - Repo: `D:\ps2-work\HauntingGround-Recomp-Project`. Game files: ingested into `game/` (the default; no
   `HG_GAME_DIR` needed). Disc image: `D:\PS2 Games\Haunting Ground (USA)\Haunting Ground (USA).iso`.
@@ -483,6 +524,11 @@ Since 2026-10-13 the project lives on the user's Windows 11 PC (Ryzen 7 9800X3D,
 
 ## Waiting on the user
 
+- (2026-10-23, Linux) A playtest on the real screen (the window was only tested in gamescope's virtual display), the
+  DualSense on Linux (USB and Bluetooth; Steam's udev rule covers it), and an A/B listen with `HG_STRTOL=hw` (the
+  console's own `strtol` result, see 2026-10-23 above): keeping it would mean re-freezing every reference.
+- `D:\pad.txt` (`/mnt/NewVolume/pad.txt`) is a stray recording the window tests wrote on Windows; safe to delete.
+- Next Windows boot: build and run `hashcheck.sh` there once, to confirm the Linux commits changed nothing there.
 - The door specks in `ST_020` need PCSX2 in that room: the user saves a state there (about 2 minutes), allows us to
   use their own PCSX2 states, or formats a folder memory card in PCSX2's GUI so our save can be copied in.
 - A playtest with `set HG_GSVK=1` (GPU renderer), then `set HG_GSVK_INTERP=1` (60 fps) or `set HG_GSVK_SCALE=5`

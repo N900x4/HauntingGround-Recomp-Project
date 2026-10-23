@@ -128,17 +128,25 @@ int gsvk_init(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *ta
 static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t *tables, int ncopies) {
     state = -1;
     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "hgboot", .apiVersion = VK_API_VERSION_1_2 };
-    const char *iext[3] = { "VK_KHR_surface", "VK_KHR_win32_surface", "VK_KHR_get_surface_capabilities2" }; uint32_t niext = 0;   /* for the window (gsvk_present_init) */
+    /* for the window (gsvk_present_init): the surface, the window system's surface (Linux: whichever SDL may use) and
+       the surface capabilities 2 (present timing), those the loader has */
 #ifdef _WIN32
+    static const char *sext[] = { "VK_KHR_surface", "VK_KHR_get_surface_capabilities2", "VK_KHR_win32_surface" };
+#else
+    static const char *sext[] = { "VK_KHR_surface", "VK_KHR_get_surface_capabilities2", "VK_KHR_wayland_surface", "VK_KHR_xcb_surface", "VK_KHR_xlib_surface" };
+#endif
+    const int nsext = (int)(sizeof sext / sizeof *sext);
+    const char *iext[8]; uint32_t niext = 0;
     { uint32_t ne = 0; vkEnumerateInstanceExtensionProperties(0, &ne, 0); VkExtensionProperties *ep = calloc(ne + 1, sizeof *ep);
       if (ep) {
           vkEnumerateInstanceExtensionProperties(0, &ne, ep); int h = 0;
-          for (uint32_t i = 0; i < ne; i++) h |= (strcmp(ep[i].extensionName, iext[0]) ? 0 : 1) | (strcmp(ep[i].extensionName, iext[1]) ? 0 : 2) | (strcmp(ep[i].extensionName, iext[2]) ? 0 : 4);
-          if ((h & 3) == 3) niext = 2;
-          if (h == 7) { niext = 3; have_caps2 = 1; }
+          for (uint32_t i = 0; i < ne; i++) for (int w = 0; w < nsext; w++) if (!strcmp(ep[i].extensionName, sext[w])) h |= 1 << w;
+          if ((h & 1) && (h >> 2)) {   /* a surface on some window system: niext >= 2 */
+              for (int w = 0; w < nsext; w++) if (h >> w & 1) iext[niext++] = sext[w];
+              have_caps2 = h >> 1 & 1;
+          }
           free(ep);
       } }
-#endif
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app, .enabledExtensionCount = niext, .ppEnabledExtensionNames = iext };
     if (vkCreateInstance(&ici, 0, &inst)) { L("GSVK: no Vulkan instance\n"); return 0; }
     uint32_t n = 0; vkEnumeratePhysicalDevices(inst, &n, 0);
@@ -752,6 +760,15 @@ static int mk_swapchain(void) {
     for (uint32_t i = 0; i < scn; i++) vkCreateSemaphore(dev, &sci, 0, &scdone[i]);
     sc_stale = 0; return 1;
 }
+static int present_init_(void);
+#ifndef _WIN32
+/* UI thread (Linux): a swapchain on the surface mksurf makes for the window (SDL_Vulkan_CreateSurface) */
+int gsvk_present_init_with(int (*mksurf)(void *inst, void *surf)) {
+    if (gsvk_ready() <= 0 || !can_present) return 0;
+    if (!mksurf(inst, &surf)) { L("GSVK: no surface for the window\n"); return 0; }
+    return present_init_();
+}
+#endif
 /* UI thread: a swapchain on the window (Windows: its HINSTANCE and HWND); 0 if presenting from video memory is not
    possible (the caller then draws with SDL) */
 int gsvk_present_init(void *hinstance, void *hwnd) {
@@ -768,6 +785,9 @@ int gsvk_present_init(void *hinstance, void *hwnd) {
 #else
     (void)hinstance; (void)hwnd; return 0;
 #endif
+    return present_init_();
+}
+static int present_init_(void) {
     VkBool32 sup = 0; vkGetPhysicalDeviceSurfaceSupportKHR(phys, ufam, surf, &sup);
     if (!sup) { L("GSVK: the queue cannot present to the window\n"); return 0; }
     VkSurfaceFormatKHR fm[64]; uint32_t nf = 64; vkGetPhysicalDeviceSurfaceFormatsKHR(phys, surf, &nf, fm);

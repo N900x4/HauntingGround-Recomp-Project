@@ -1,5 +1,6 @@
 #!/bin/sh
 export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=FILE to use one)
+case $(uname -s) in MINGW*|MSYS*|CYGWIN*) HGEXE=hgboot.exe;; *) HGEXE=hgboot;; esac   # the runtime on this OS
 # Saving from our build (release 0.1), scripted and headless. Needs the user's card with save 02 at the Castle Suite clock
 # (the card the G2 route uses: ../memcards, or SAVETEST_CARD=DIR holding port0/); that card is only ever copied.
 # The game's clock is fixed (HG_CLOCK), so the saves and their dates repeat from run to run.
@@ -14,9 +15,9 @@ export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=
 # byte-identical to the user's card, which PCSX2 wrote); after loading, every frame in the room (VBlank 2610 on) of l1, l2,
 # l3 is identical to l0, and Fiona's stage and position are those at the moment of saving; the card files' md5 sums
 # match ref/save.md5 (the save data is deterministic with the fixed clock).
-# usage: savetest.sh TAG        outputs in $HG_SCRATCH/save_TAG (default HG_SCRATCH D:/ps2-work/scratch); run from the
-#                               MSYS2 UCRT64 shell; about 1-2 minutes. HG_GSVK=0 for the software renderer.
-V=$(cd "$(dirname "$0")" && pwd); R=$(cd "$V/../.." && pwd); S=${HG_SCRATCH:-/d/ps2-work/scratch}
+# usage: savetest.sh TAG        outputs in $HG_SCRATCH/save_TAG (default HG_SCRATCH ../scratch next to the repo); run from bash
+#                               (MSYS2 UCRT64 on Windows); about 1-2 minutes. HG_GSVK=0 for the software renderer.
+V=$(cd "$(dirname "$0")" && pwd); R=$(cd "$V/../.." && pwd); S=${HG_SCRATCH:-$(cd "$R/.." && pwd)/scratch}
 T=${1:-x}; CARD=${SAVETEST_CARD:-$R/memcards}; W=$S/save_$T
 [ -f "$CARD/port0/BASLUS-21075HG/BASLUS-21075HG" ] || { echo "savetest: no Haunting Ground save on $CARD/port0"; exit 1; }
 rm -rf $W; mkdir -p $W; cd $R/recomp
@@ -26,8 +27,8 @@ card() { rm -rf $W/c_$1; mkdir -p $W/c_$1; cp -a $2/port0 $W/c_$1/; }
 run() {   # NAME MAXVB PAD: card $W/c_NAME, frames every 10 VBlanks hashed into $W/NAME.md5
   n=$1; mv=$2; p=$3; mkdir -p $W/f_$n
   env HG_GAME_DIR="$R/game" HG_MOVIES=skip HG_MEMCARD_DIR=$W/c_$n HG_INI=off HG_CLOCK=$CLOCK HG_GSVK=${HG_GSVK:-1} \
-      HG_PAD=$LOAD$p HG_POSLOG=300 HG_MAXVB=$mv HG_FRAMES=$W/f_$n HG_FRAME_EVERY=10 HG_WINDOW=0 ./hgboot.exe -q -t 6000 > $W/$n.log 2>&1
-  (cd $W/f_$n && md5sum *.ppm) | sort -k2 > $W/$n.md5; rm -rf $W/f_$n
+      HG_PAD=$LOAD$p HG_POSLOG=300 HG_MAXVB=$mv HG_FRAMES=$W/f_$n HG_FRAME_EVERY=10 HG_WINDOW=0 ./$HGEXE -q -t 6000 > $W/$n.log 2>&1
+  (cd $W/f_$n && md5sum -b *.ppm) | sort -k2 > $W/$n.md5; rm -rf $W/f_$n
 }
 SAVE=,3060:circle,3150:cross,3250:cross,3450:cross
 card s1 $CARD; card s2 $CARD; card l0 $CARD

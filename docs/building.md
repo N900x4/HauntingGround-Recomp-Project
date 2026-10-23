@@ -47,21 +47,37 @@ SIGPROF/SIGALRM, VirtualAlloc, and its own glob matcher for memory-card director
 If you change the Makefile's compile or link rules, make the same change in `tools/release/hgbuild.py`
 (`tools/release/mkrelease.py` checks that they agree before it builds a release).
 
-## Linux (experimental, developers only)
+## Linux (developers; CachyOS / Arch, 2026-10-23)
+
+Packages (Arch names): `gcc make python sdl2` (or `sdl2-compat`), `vulkan-headers vulkan-icd-loader glslang`, a
+Vulkan driver; for the gates `python-numpy python-pillow`, and `gamescope` for window tests without a screen.
 
 ```sh
-python3 tools/ingest.py /path/to/your/HauntingGround.iso game
+python3 tools/ingest.py "/path/to/Haunting Ground (USA).iso" game    # NTSC-U v1.01 only
 cd recomp
 python3 bulk2.py gen 16
-make -j8
-mkdir -p /tmp/frames
-HG_FRAMES=/tmp/frames HG_MAXVB=16000 HG_PAD=1500:start,1800:start,2100:cross \
-  ./hgboot -q -t 3000 > run.log   # skip the intro, New Game, opening cinematic, stage 1; frames go to /tmp/frames
+make -j8                        # builds hgboot (about 70 s from clean on 8 threads)
+./hgboot                        # window with live input; HG_WINDOW=0 ./hgboot -q for headless runs
 ```
 
-With SDL2 installed (`libsdl2-dev`) the build opens a window and takes live input (`HG_WINDOW=0` forces headless
-mode); with the Vulkan development files and glslang it also builds the GPU renderer. The Linux build has not been
-re-checked since the move to Windows (2026-10-13); there is no Linux release.
+The objects go to `recomp/obj-linux/` (`obj/` on Windows), so a drive shared by both systems keeps both builds. The
+window uses SDL's Vulkan surface (Wayland or X11, whichever SDL picks), presented from video memory like the
+Windows build. On a 64-bit Linux `long` is 64 bits (32 on Windows): the IOP's `strtol` is clamped to 32 bits so that
+both builds set up the sound chip the same way (`recomp/iop_kernel.c`, `f_strtol`); without that, 271 of the 702
+frames of `hashA` came one VBlank late.
+
+All gate scripts in `tools/verify` run from bash on Linux as on MSYS2 (`hgboot` instead of `hgboot.exe`, scratch
+`../scratch` next to the repository unless `HG_SCRATCH` is set); every gate gave the frozen Windows results on
+2026-10-23 (see `handoff.md`). Window tests without a screen (the display off):
+
+```sh
+PL=58 gamescope --backend headless -W 3840 -H 2160 -r 120 -- sh tools/verify/wintest.sh TAG HG_GSVK=1
+python3 tools/verify/pacing.py ../scratch/win_TAG.log
+```
+
+gamescope's virtual display keeps exact time (a timer), so its numbers show the game's own pacing, not a monitor's.
+The DualSense needs no extra udev rule on systems with Steam's (`/usr/lib/udev/rules.d/60-steam-input.rules`,
+USB and Bluetooth). There is no Linux release yet: `tools/release` builds the Windows one.
 
 ## Requirements
 

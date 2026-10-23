@@ -377,7 +377,19 @@ static void f_strncmp(void) { int r = 0; for (uint32_t i = 0; i < R[6]; i++) { i
 static void f_strncpy(void) { uint32_t i = 0; for (; i < R[6]; i++) { uint8_t c = iop_read(R[5] + i, 1); iop_write(R[4] + i, c, 1); if (!c) break; } for (; i < R[6]; i++) iop_write(R[4] + i, 0, 1); R[2] = R[4]; }
 static void f_strrchr(void) { uint32_t r = 0, p = R[4]; uint8_t c; do { c = iop_read(p, 1); if (c == (R[5] & 0xFF)) r = p; p++; } while (c); R[2] = r; }
 static void f_strstr(void) { const char *h = istr(R[4]), *n = istr(R[5]); const char *f = strstr(h, n); R[2] = f ? R[4] + (uint32_t)(f - h) : 0; }
-static void f_strtol(void) { const char *s = istr(R[4]); char *e; long v = strtol(s, &e, R[6]); if (R[5]) WR32(R[5], R[4] + (uint32_t)(e - s)); R[2] = (uint32_t)v; }
+/* A 32-bit long on every host: out of range saturates to INT32_MAX / INT32_MIN, so SNDDRV's "0xFFFFFFFF" argument reads
+   as 0x7FFFFFFF, as it always did on Windows (the frozen references and the playtests have it; a 64-bit long gave
+   0xFFFFFFFF and a different sound setup: SPU2 core 0 reverb and IRQ off). The BIOS's own SYSCLIB strtol does not
+   saturate: it accumulates value * base + digit in 32 bits, so the console gets 0xFFFFFFFF. HG_STRTOL=hw does that
+   (to compare; it changes the sound setup and every reference). */
+static void f_strtol(void) {
+    const char *s = istr(R[4]); char *e; long long v;
+    static int hw = -1; if (hw < 0) hw = getenv("HG_STRTOL") && !strcmp(getenv("HG_STRTOL"), "hw");
+    if (hw) { const unsigned long long u = strtoull(s, &e, R[6]); v = (long long)(uint32_t)u; }   /* wraps like the console's (for inputs that fit 64 bits) */
+    else { v = strtoll(s, &e, R[6]); if (v > INT32_MAX) v = INT32_MAX; else if (v < INT32_MIN) v = INT32_MIN; }
+    if (R[5]) WR32(R[5], R[4] + (uint32_t)(e - s));
+    R[2] = (uint32_t)v;
+}
 static void f_wmemcopy(void) { for (uint32_t i = 0; i < R[6]; i += 4) WR32(R[4] + i, RD32(R[5] + i)); R[2] = R[4]; }
 static void f_wmemset(void) { for (uint32_t i = 0; i < R[6]; i += 4) WR32(R[4] + i, R[5]); R[2] = R[4]; }
 /* ---- ioman (not used by the boot path; logged) */

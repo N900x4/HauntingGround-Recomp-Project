@@ -51,7 +51,26 @@ static int ov_mwply_note_stop(Ctx *c) {
     (void)c; if (movie_on) L("movie: \"%s\" stopped at VBlank %llu\n", movie_now, (unsigned long long)hle_vblank_count());
     movie_on = 0; return 0;
 }
+/* HG_FRAMEPROF (hle.c): the game frame's start (frame_begin 0x1b86a0) and end (frame_end 0x1b8750), docs/frame-timing.md */
+static int ov_frame_mark(Ctx *c, const char *what) {
+    (void)c; extern FILE *hle_prof(void); extern uint64_t ee_cycles, hle_idle_cycles; extern int hle_cur_thread(void);
+    FILE *f = hle_prof(); if (f) fprintf(f, "%s %llu %llu %llu %d\n", what, (unsigned long long)hle_vblank_count(), (unsigned long long)ee_cycles, (unsigned long long)hle_idle_cycles, hle_cur_thread());
+    return 0;
+}
+/* sceSifCallRpc (0x2700e8): the client (its server's id at client->server+0x?), the function number and the caller */
+static int ov_rpc_call(Ctx *c) {
+    extern FILE *hle_prof(void); extern uint64_t ee_cycles; extern int hle_cur_thread(void);
+    FILE *f = hle_prof(); if (!f) return 0;
+    const uint32_t cl = c->r[4].u32[0], srv = cl ? *(uint32_t *)gptr(cl + 0x24) : 0;   /* client->server (sceSifClientData.server) */
+    const uint32_t sid = srv ? *(uint32_t *)gptr(srv + 0x0) : 0;
+    fprintf(f, "RPC %llu %llu %d client %x server %x sid %x fno %u mode %u ra %x\n", (unsigned long long)hle_vblank_count(), (unsigned long long)ee_cycles,
+            hle_cur_thread(), cl, srv, sid, c->r[5].u32[0], c->r[6].u32[0], c->r[31].u32[0]);
+    return 0;
+}
+static int ov_frame_begin(Ctx *c) { return ov_frame_mark(c, "FB"); }
+static int ov_frame_end(Ctx *c) { return ov_frame_mark(c, "FE"); }
 void overrides_init(void) {
+    { extern FILE *hle_prof(void); if (hle_prof()) { set_hook(0x1b86a0, ov_frame_begin); set_hook(0x1b8750, ov_frame_end); set_hook(0x2700e8, ov_rpc_call); } }
     extern void options_init(void); options_init();
     const char *m = getenv("HG_MOVIES");
     movie_skip = m && !strcmp(m, "skip");   /* movies play (IPU emulation); HG_MOVIES=skip skips them */

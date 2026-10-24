@@ -36,6 +36,16 @@ typedef struct { int used, cause, enabled; uint32_t handler, arg, gp; } Handler;
 static Handler intc[64], dmac[64];
 static uint32_t intc_mask, dmac_mask;
 static uint64_t vblank_count, idle_ticks;
+/* HG_FRAMEPROF=FILE: where emulated time goes (logging only): cycles skipped while no EE thread could run, and each
+   wait of a thread on a semaphore or in SleepThread longer than a quarter VBlank ("WAIT vb thread kind id cycles").
+   The frame hooks in overrides.c add the frame's start and end. */
+uint64_t hle_idle_cycles;
+FILE *hle_prof(void) { static FILE *f; static int init; if (!init) { init = 1; const char *e = getenv("HG_FRAMEPROF"); if (e && *e) f = fopen(e, "w"); } return f; }
+int hle_cur_thread(void);
+static void prof_wait(int kind, int id, uint64_t c0, uint32_t ra) {
+    extern uint64_t ee_cycles, ee_vb_period; FILE *f = hle_prof();
+    if (f && ee_cycles - c0 > ee_vb_period / 4) fprintf(f, "WAIT %llu %d %s %d %llu ra %x\n", (unsigned long long)vblank_count, cur, kind ? "sleep" : "sema", id, (unsigned long long)(ee_cycles - c0), ra);
+}
 static uint32_t vsync_flag_addr, vsync_data_addr;
 static uint32_t heap_start, heap_end = 0x01F00000;
 static uint32_t sif_reg[256];
@@ -253,7 +263,18 @@ static void idle_advance(void) {
     if (timing_wall) { fire_vblank(); return; }
     if (!vb_init) { vb_init = 1; vb_deadline = ee_next_vb; }
     plan_events();
-    if (ee_cycles < ee_next_vb) ee_cycles = ee_next_vb;
+    {   /* HG_IOPSYNC (iop_kernel.c): the IOP's events before the EE's next one, one at a time, until an EE thread can run */
+        extern int iop_sync_on(void); extern uint64_t iop_next_event_ee(uint64_t); extern void iop_sync_to_ee(uint64_t);
+        if (iop_sync_on()) for (int k = 0; k < 256; k++) {
+            const uint64_t e = iop_next_event_ee(ee_next_vb);
+            if (!e) break;
+            if (e > ee_cycles) { hle_idle_cycles += e - ee_cycles; ee_cycles = e; }
+            iop_sync_to_ee(ee_cycles);
+            iop_flush_idle();
+            if (pick()) return;
+        }
+    }
+    if (ee_cycles < ee_next_vb) { hle_idle_cycles += ee_next_vb - ee_cycles; ee_cycles = ee_next_vb; }
     service_events();
 }
 
@@ -520,7 +541,7 @@ void rec_syscall(Ctx *ctx, uint32_t pc) {
         ret = st; quiet = 1; break; }
     case 0x32: /* SleepThread */
         if (th[cur].wakeup > 0) { th[cur].wakeup--; ret = cur; break; }
-        th[cur].status = THS_WAIT; th[cur].wait_type = WT_SLEEP; schedule(); ctx->r[2].s64[0] = cur; return;
+        th[cur].status = THS_WAIT; th[cur].wait_type = WT_SLEEP; { const uint64_t c0 = ee_cycles; const uint32_t ra = ctx->r[31].u32[0]; schedule(); prof_wait(1, 0, c0, ra); } ctx->r[2].s64[0] = cur; return;
     case 0x33: case -0x34: { int id = a0; if (!th[id].used) { ret = -1; break; }
         if (th[id].status == THS_WAIT && th[id].wait_type == WT_SLEEP) make_ready(id); else th[id].wakeup++;
         ctx->r[2].s64[0] = id; if (num > 0) schedule(); return; }
@@ -539,7 +560,10 @@ void rec_syscall(Ctx *ctx, uint32_t pc) {
     case 0x44: { int id = a0; if (id <= 0 || id >= MAXS || !sem[id].used) { ret = -1; break; }  /* WaitSema */
         if (sem[id].count > 0) { sem[id].count--; ret = id; quiet = 1; break; }
         th[cur].status = THS_WAIT; th[cur].wait_type = WT_SEMA; th[cur].wait_id = id; th[cur].seq = seqno++; sem[id].nwait++;
-        schedule(); ctx->r[2].s64[0] = id; return; }
+        { const uint64_t c0 = ee_cycles; const uint32_t ra = ctx->r[31].u32[0];
+          if (hle_prof() && getenv("HG_RPCWAIT")) { extern int iop_rpc_open(void); fprintf(hle_prof(), "BLOCK %llu %d sema %d replies queued %d, IOP open %d, int %s\n", (unsigned long long)vblank_count, cur, id, iopq_n, iop_rpc_open(), (cop0_status & 0x10000u) ? "on" : "off"); }
+          schedule(); prof_wait(0, id, c0, ra); }
+        ctx->r[2].s64[0] = id; return; }
     case 0x45: case -0x46: { int id = a0; if (id <= 0 || id >= MAXS || !sem[id].used) { ret = -1; break; }
         if (sem[id].count > 0) { sem[id].count--; ret = id; } else ret = -1; quiet = 1; break; }
     case 0x47: case -0x48: { int id = a0; if (!sem[id].used) { ret = -1; break; }
@@ -698,3 +722,4 @@ void hle_run_main(uint32_t entry) {
     host_fiber_switch(&boot, &t->fib);
     stop("unexpected return to boot context");
 }
+int hle_cur_thread(void) { return cur; }

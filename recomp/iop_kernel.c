@@ -15,6 +15,7 @@
 #define TRAP(n) (IOP_HLE_BASE + 8u * (n))
 enum { T_CALLRET = 0, T_THREADEXIT = 1, T_RPCRET = 2, T_UNRESOLVED = 3, T_FIRST_FN = 8 };
 static uint64_t now;                     /* IOP time in 36.864 MHz cycles */
+static int ee_rpc_open;                  /* (debug, HG_RPCWAIT) EE requests not answered yet */
 static uint64_t vblanks;
 #define R iop.r
 static uint32_t RD32(uint32_t a) { return iop_read(a, 4); }
@@ -323,7 +324,7 @@ static void rpc_return(void) {             /* server function returned: v0 = rep
     Req *r = &serving[cur]; uint32_t data = R[2];
     if (r->recv && r->rsize && data) { uint8_t *p = iop_ptr(data); if (p) memcpy(gptr(r->recv), p, r->rsize); }
     hle_iop_rpc_end(r->endpkt);
-    n_iop_rpc++;
+    n_iop_rpc++; if (ee_rpc_open > 0) ee_rpc_open--;
     if (GETENV_ONCE("HG_RPCLOG")) L("IOP: RPC done sid 0x%08x fn 0x%x (thread %d) reply 0x%x -> %08x\n", srv[r->srv].sid, r->fno, cur, data, data ? RD32(data) : 0);
     serve_next(cur);
 }
@@ -575,6 +576,43 @@ static void iop_run_until(uint64_t target, long budget) {
     }
 }
 
+/* HG_IOPSYNC=1: the IOP's time follows the EE's (8 EE cycles per IOP cycle) instead of running a VBlank ahead at
+   each VBlank. Without it an RPC whose answer needs an IOP event later in the VBlank (SNDDRV's sound tick, a
+   DelayThread) is answered only in the next VBlank's slice, and the EE thread waiting for it loses that VBlank (the
+   game's 3-VBlank frames, docs/frame-timing.md). With it, hle.c's idle loop runs the IOP to its next event while the
+   EE waits, and the answer comes at the time it would on the console. */
+static int iop_sync = -1; static int64_t ee_off; static int ee_off_set;   /* (debug) EE requests not answered yet */
+int iop_rpc_open(void) { return ee_rpc_open; }
+int iop_sync_on(void) { if (iop_sync < 0) iop_sync = getenv("HG_IOPSYNC") && atoi(getenv("HG_IOPSYNC")); return iop_sync; }
+static uint64_t ee_to_iop(uint64_t eec) {
+    if (!ee_off_set) { ee_off = (int64_t)now - (int64_t)(eec / 8); ee_off_set = 1; }
+    const int64_t t = (int64_t)(eec / 8) + ee_off; return t < 0 ? 0 : (uint64_t)t;
+}
+static uint64_t iop_to_ee(uint64_t t) { const int64_t e = ((int64_t)t - ee_off) * 8; return e < 0 ? 0 : (uint64_t)e; }
+void iop_sync_to_ee(uint64_t eec) {   /* run the IOP up to the EE's time (never ahead of it) */
+    if (!nmods) return;
+    const uint64_t t = ee_to_iop(eec);
+    double t0 = host_now();
+    if (t > now) iop_run_until(t, 8000000);
+    if (pick_thread()) iop_run_until(now, 2000000);   /* what that time woke (iop_run_until stops at the target before running it) */
+    tprof[2] += host_now() - t0;
+}
+uint64_t iop_next_event_ee(uint64_t ee_limit) {   /* the EE is idle until ee_limit: the IOP's next event before it, in EE cycles; 0 if none */
+    if (!nmods || !ee_off_set) return 0;
+    uint64_t e = pick_thread() ? now : next_event();
+    const uint64_t x = e == ~0ull ? ~0ull : iop_to_ee(e);
+    if (x >= ee_limit && GETENV_ONCE("HG_RPCWAIT") && vblanks >= (uint64_t)atol(GETENV_ONCE("HG_RPCWAIT"))) {   /* (debug) nothing before the EE's VBlank */
+        static int nl; if (ee_rpc_open > 0 && nl++ < 40) {
+            L("IOP idlewait vb %llu: %d open, %d queued, next IOP event %s; threads:", (unsigned long long)vblanks, ee_rpc_open, nrq, e == ~0ull ? "none" : "after the VBlank");
+            for (int i = 1; i < MAXTH; i++) if (th[i].status != TS_FREE && th[i].status != TS_DORMANT)
+                L(" [%d %s w%d/%d pc %x]", i, th[i].status == TS_READY ? "R" : "W", th[i].wait, th[i].wait_id, th[i].ctx.pc);
+            L(" timers:"); for (int i = 0; i < 6; i++) if (tmr[i].running) L(" %d:%s%.2fms", i, tmr[i].handler ? "h " : "", tmr[i].next > now ? (tmr[i].next - now) / 36864.0 : 0.0);
+            L(" adma %d\n", spu2_adma_active());
+        }
+    }
+    return x < ee_limit ? x : 0;
+}
+
 /* ================================================================== interface for hle.c */
 static int is_emulated(const char *name) {
     static const char *const set[] = { "LIBSD", "MODHSYN", "MODMIDI", "MODMSIN", "SNDDRV", "CRI_ADXI", 0 };
@@ -630,9 +668,20 @@ int iop_rpc_call(uint32_t sd, uint32_t fno, uint32_t size, uint32_t recv, uint32
     if (GETENV_ONCE("HG_RPCLOG")) L("IOP: RPC queued sid 0x%08x fn 0x%x size %u rsize %u  [%08x %08x %08x %08x] vb %llu\n", srv[s].sid, fno, size, rsize,
         RD32(srv[s].buf), RD32(srv[s].buf + 4), RD32(srv[s].buf + 8), RD32(srv[s].buf + 12), (unsigned long long)vblanks);
     if (GETENV_ONCE("HG_RPCLOG")) { L("    words 4-11:"); for (int k = 4; k < 12; k++) L(" %08x", RD32(srv[s].buf + 4 * k)); L("\n"); }
+    if (iop_sync_on()) { extern uint64_t ee_cycles; iop_sync_to_ee(ee_cycles); }
+    ee_rpc_open++;
     Req *r = &rq[nrq++]; r->srv = s; r->fno = fno; r->size = size; r->recv = recv; r->rsize = rsize; memcpy(r->endpkt, endpkt, 32);
     for (int i = 1; i < MAXTH; i++) if (th[i].status == TS_WAIT && th[i].wait == W_RPC && th[i].rpc_qd == srv[s].qd) { serve_next(i); break; }
+    const uint64_t done0 = n_iop_rpc;
     iop_run_until(now, 2000000);
+    if (GETENV_ONCE("HG_RPCWAIT") && n_iop_rpc == done0 && vblanks >= (uint64_t)atol(GETENV_ONCE("HG_RPCWAIT"))) {   /* (debug) not answered at once (from VBlank N): what the IOP waits on */
+        static int nl; if (nl++ < 60) {
+            L("IOP rpcwait: sid 0x%08x fn 0x%x not done at once (vb %llu, IOP time %.3f ms into the VBlank slice); threads:", srv[s].sid, fno, (unsigned long long)vblanks, 0.0);
+            for (int i = 1; i < MAXTH; i++) if (th[i].status != TS_FREE && th[i].status != TS_DORMANT)
+                L(" [%d %s w%d/%d pc %x ra %x]", i, th[i].status == TS_READY ? "R" : "W", th[i].wait, th[i].wait_id, th[i].ctx.pc, th[i].ctx.r[31]);
+            L("\n");
+        }
+    }
     return 1;
 }
 void iop_vblank(void) {
@@ -640,6 +689,7 @@ void iop_vblank(void) {
     vblanks++;
     for (int i = 1; i < MAXTH; i++) if (th[i].status == TS_WAIT && th[i].wait == W_VBLANK) make_ready(i);
     iop_raise_irq(IOP_IRQ_VBLANK);
+    if (iop_sync_on()) { extern uint64_t ee_cycles; iop_sync_to_ee(ee_cycles); return; }
     static uint64_t vtarget; if (!vtarget) vtarget = now;
     vtarget += (uint64_t)(IOP_CLOCK / 59.94);
     double t0 = host_now();

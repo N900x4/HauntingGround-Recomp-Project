@@ -65,9 +65,10 @@ int gsvk_pic(const GsVkSprite *s, uint64_t *id);         /* GS thread: as gsvk_c
 void gsvk_pic_release(int k);                            /* any thread: picture image k is not needed (dropped unseen) */
 int gsvk_present_init(void *hinstance, void *hwnd);      /* UI thread: a swapchain on the window; 0: not possible */
 #ifndef _WIN32
-int gsvk_present_init_with(int (*mksurf)(void *inst, void *surf));   /* the same with a surface made by mksurf (SDL, Linux) */
+int gsvk_present_init_with(int (*mksurf)(void *inst, void *surf), void (*size)(int *w, int *h));   /* the same with a surface made by mksurf
+                                                         (SDL, Linux); size: the window's size in pixels, for surfaces that leave it to us (Wayland) */
 #endif
-uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, uint64_t rel_ns);   /* UI thread: show picture k (k < 0: the last again), overlay 176 x 54 or 0,
+uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, int ovw, int ovh, uint64_t rel_ns);   /* UI thread: show picture k (k < 0: the last again), overlay ovw x ovh (at most 320 x 176) or 0,
                                                          rel_ns (if gsvk_present_timed()): ns after the previous one; the present's id (0: not presented) */
 int gsvk_present_timed(void);                            /* UI thread: presents can be timed (VK_EXT_present_timing, relative) */
 double gsvk_present_refresh(void);                       /* UI thread: the refresh period the swapchain reports, s (0: unknown) */

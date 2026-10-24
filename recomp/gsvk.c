@@ -626,7 +626,7 @@ const uint32_t *gsvk_check_end(double *ms) {
    own command buffers and submits to its own queue. A picture image is free again (pic_free) once the UI thread has
    moved on to a newer picture and its blits of it are done, or when the picture is dropped unseen. No picture crosses
    the bus, and the GS thread never waits for the GPU because of the window. */
-enum { NPIC = 12, NFR = 3, OVW = 176, OVH = 54 };
+enum { NPIC = 12, NFR = 3, OVW = 320, OVH = 176 };   /* (the overlay's largest size) */
 static struct { VkImage img; VkDeviceMemory mem; int w, h; } pic[NPIC];
 static _Atomic uint32_t pic_free = (1u << NPIC) - 1;
 static _Atomic int pres_ok;
@@ -704,6 +704,7 @@ static VkPresentModeKHR pick_mode(int v) {
 }
 static const char *mode_name(VkPresentModeKHR m) { return m == VK_PRESENT_MODE_FIFO_KHR ? "vsync" : m == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : "immediate"; }
 static uint32_t scn; static VkImage scimg[8]; static VkSemaphore scdone[8]; static int sc_stale;
+static void (*win_size)(int *w, int *h); static int sc_free;   /* the window's size (Linux); the surface leaves the size to us (Wayland: 0xFFFFFFFF) */
 static uint64_t pres_id; static _Atomic int sc_gen; double gsvk_present_ms[5];   /* the last present's steps (debugging): fence, acquire, record, submit, present */   /* present ids (VK_KHR_present_id, increasing over all swapchains); swapchains made */
 static VkCommandPool upool; static VkCommandBuffer ucb[NFR]; static VkFence ufence[NFR]; static VkSemaphore uacq[NFR]; static int ufr, usub[NFR], uslot[NFR];
 static int ucur = -1, uref[NPIC]; static uint64_t ucur_id;
@@ -711,6 +712,13 @@ static Buf ovbuf; static VkImage ovimg; static VkDeviceMemory ovmem;
 static void ui_unref(int k) { if (k >= 0 && --uref[k] == 0) gsvk_pic_release(k); }
 static int mk_swapchain(void) {
     VkSurfaceCapabilitiesKHR cap; if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phys, surf, &cap)) return 0;
+    sc_free = cap.currentExtent.width == 0xFFFFFFFFu;
+    if (sc_free) {   /* Wayland: the swapchain's size is the window's */
+        int w = 0, h = 0; if (win_size) win_size(&w, &h);
+        if (w <= 0 || h <= 0) return 0;
+        cap.currentExtent.width = (uint32_t)w < cap.minImageExtent.width ? cap.minImageExtent.width : (uint32_t)w > cap.maxImageExtent.width ? cap.maxImageExtent.width : (uint32_t)w;
+        cap.currentExtent.height = (uint32_t)h < cap.minImageExtent.height ? cap.minImageExtent.height : (uint32_t)h > cap.maxImageExtent.height ? cap.maxImageExtent.height : (uint32_t)h;
+    }
     if (!cap.currentExtent.width || !cap.currentExtent.height) return 0;   /* minimized */
     if (!(cap.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) { L("GSVK: the window's images cannot be blitted into\n"); return 0; }
     if (shared_q) pthread_mutex_lock(&qmx);
@@ -737,7 +745,8 @@ static int mk_swapchain(void) {
     const int fse = use_fse && fse_mon && atomic_load(&fse_want);
     if (fse) { fx.pNext = (void *)&fw; fw.pNext = ci.pNext; ci.pNext = &fx; }
     VkSwapchainKHR nsc;
-    if (vkCreateSwapchainKHR(dev, &ci, 0, &nsc)) { L("GSVK: no swapchain\n"); return 0; }
+    { const VkResult r = vkCreateSwapchainKHR(dev, &ci, 0, &nsc);
+      if (r) { static int nl; if (nl++ < 4) L("GSVK: no swapchain (%d; %ux%u, %u images, format %d/%d, mode %d, flags 0x%x, usage 0x%x)\n", (int)r, ci.imageExtent.width, ci.imageExtent.height, n, (int)scfmt, (int)sccs, (int)pmode, (unsigned)ci.flags, (unsigned)cap.supportedUsageFlags); return 0; } }
     atomic_store(&fse_have, 0);
     if (fse) { const VkResult fr = fse_acquire(dev, nsc); atomic_store(&fse_have, fr == VK_SUCCESS); static int nl; if (nl++ < 8) L("GSVK: full-screen exclusive: %s (%d)\n", fr == VK_SUCCESS ? "acquired" : "not acquired", (int)fr); }
     sc_ptim = 0; if (!ptim) sc_prel = 0;
@@ -763,7 +772,8 @@ static int mk_swapchain(void) {
 static int present_init_(void);
 #ifndef _WIN32
 /* UI thread (Linux): a swapchain on the surface mksurf makes for the window (SDL_Vulkan_CreateSurface) */
-int gsvk_present_init_with(int (*mksurf)(void *inst, void *surf)) {
+int gsvk_present_init_with(int (*mksurf)(void *inst, void *surf), void (*size)(int *w, int *h)) {
+    win_size = size;
     if (gsvk_ready() <= 0 || !can_present) return 0;
     if (!mksurf(inst, &surf)) { L("GSVK: no surface for the window\n"); return 0; }
     return present_init_();
@@ -814,7 +824,8 @@ static int present_init_(void) {
 }
 /* UI thread: show picture k (k < 0: the current one again) once GS submission id is done, with the overlay ov
    (OVW x OVH, 0x00BBGGRR, or 0) at the picture's top left */
-uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, uint64_t rel_ns) {
+uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, int ovw, int ovh, uint64_t rel_ns) {
+    if (ovw <= 0 || ovh <= 0 || ovw > OVW || ovh > OVH) ov = 0;
     if (!atomic_load(&pres_ok)) return 0;
     if (k >= 0 && k < NPIC) { uref[k]++; ui_unref(ucur); ucur = k; ucur_id = id; }
     const int f = ufr;
@@ -835,6 +846,7 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, uint64_t rel_ns) {
     { const int w = atomic_load(&pm_want);   /* vsync changed (the Options menu): a new swapchain in that mode */
       if (w != pm_set) { pm_set = w; const VkPresentModeKHR m = pick_mode(w); if (m != pmode) { pmode = m; sc_stale = 1; L("GSVK: presenting with %s\n", mode_name(m)); } } }
     if (use_fse && atomic_load(&fse_want) != atomic_load(&fse_have)) { static int last = -1; const int w = atomic_load(&fse_want); if (w != last) { last = w; sc_stale = 1; } }
+    if (sc && sc_free && win_size) { int w = 0, h = 0; win_size(&w, &h); if (w > 0 && h > 0 && ((uint32_t)w != scext.width || (uint32_t)h != scext.height)) sc_stale = 1; }   /* resized (Wayland never says so) */
     if (sc_stale || !sc) { if (!mk_swapchain()) return 0; }
     uint32_t ii;
     VkResult r = vkAcquireNextImageKHR(dev, sc, 100000000ull, uacq[f], VK_NULL_HANDLE, &ii);
@@ -860,14 +872,14 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, uint64_t rel_ns) {
         vkCmdBlitImage(cb, pic[ucur].img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
     }
     if (ov) {   /* the F3 overlay: 4 picture pixels from the corner, scaled with the picture */
-        memcpy((uint8_t *)ovbuf.p + (size_t)f * OVW * OVH * 4, ov, (size_t)OVW * OVH * 4);
+        memcpy((uint8_t *)ovbuf.p + (size_t)f * OVW * OVH * 4, ov, (size_t)ovw * ovh * 4);
         imgbar(cb, ovimg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        VkBufferImageCopy r2 = { .bufferOffset = (VkDeviceSize)f * OVW * OVH * 4, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { OVW, OVH, 1 } };
+        VkBufferImageCopy r2 = { .bufferOffset = (VkDeviceSize)f * OVW * OVH * 4, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { (uint32_t)ovw, (uint32_t)ovh, 1 } };
         vkCmdCopyBufferToImage(cb, ovbuf.b, ovimg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r2);
         imgbar(cb, ovimg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         const double k2 = rw / 640.0; const int ox = x0 + (int)(4 * k2), oy = y0 + (int)(4 * k2);
-        VkImageBlit b = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffsets = { { 0, 0, 0 }, { OVW, OVH, 1 } },
-                          .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstOffsets = { { ox, oy, 0 }, { ox + (int)(OVW * k2), oy + (int)(OVH * k2), 1 } } };
+        VkImageBlit b = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffsets = { { 0, 0, 0 }, { ovw, ovh, 1 } },
+                          .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstOffsets = { { ox, oy, 0 }, { ox + (int)(ovw * k2), oy + (int)(ovh * k2), 1 } } };
         vkCmdBlitImage(cb, ovimg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_NEAREST);
     }
     imgbar(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);

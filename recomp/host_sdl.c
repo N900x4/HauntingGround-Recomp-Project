@@ -222,18 +222,21 @@ static const struct { char c; uint8_t r[5]; } glyphs[] = {
     {'6',{7,4,7,5,7}},{'7',{7,1,1,1,1}},{'8',{7,5,7,5,7}},{'9',{7,5,7,1,7}},{'.',{0,0,0,0,2}},{'%',{5,1,2,4,5}},
     {'A',{2,5,7,5,5}},{'D',{6,5,5,5,6}},{'E',{7,4,6,4,7}},{'I',{7,2,2,2,7}},{'K',{5,5,6,5,5}},{'M',{5,7,7,5,5}},
     {'O',{7,5,5,5,7}},{'P',{6,5,6,4,4}},{'R',{6,5,6,5,5}},{'S',{7,4,7,1,7}},{'U',{5,5,5,5,7}},{'W',{5,5,7,7,5}},
-    {'X',{5,5,2,5,5}},{'-',{0,0,7,0,0}},{'+',{0,2,7,2,0}},{'F',{7,4,6,4,4}},{'H',{5,5,7,5,5}},{'N',{5,7,7,7,5}},{'V',{5,5,5,5,2}},
+    {'X',{5,5,2,5,5}},{'-',{0,0,7,0,0}},{'+',{0,2,7,2,0}},{'F',{7,4,6,4,4}},{'H',{5,5,7,5,5}},{'N',{6,5,5,5,5}},{'V',{5,5,5,5,2}},
+    {'B',{6,5,6,5,6}},{'C',{7,4,4,4,7}},{'G',{7,4,5,5,7}},{'J',{1,1,1,5,7}},{'L',{4,4,4,4,7}},{'Q',{7,5,5,7,1}},{'T',{7,2,2,2,2}},
+    {'Y',{5,5,2,2,2}},{'Z',{7,1,2,4,7}},{':',{0,2,0,2,0}},{'/',{1,1,2,4,4}},{'=',{0,7,0,7,0}},
 };
-static void ov_text(uint32_t *fb, int w, int h, int x, int y, const char *s) {
+static void ov_textc(uint32_t *fb, int w, int h, int x, int y, const char *s, uint32_t col) {
     for (; *s; s++, x += 8) {
         const uint8_t *g = 0;
         for (size_t i = 0; i < sizeof glyphs / sizeof glyphs[0]; i++) if (glyphs[i].c == *s) g = glyphs[i].r;
         if (!g) continue;
         for (int r = 0; r < 10; r++) for (int c = 0; c < 6; c++)
-            if ((g[r / 2] >> (2 - c / 2)) & 1 && x + c < w && y + r < h) fb[(y + r) * w + x + c] = 0x00FFFFFF;
+            if ((g[r / 2] >> (2 - c / 2)) & 1 && x + c < w && y + r < h) fb[(y + r) * w + x + c] = col;
     }
 }
-static int overlay = -1; static char ov_line[3][40]; static char ov_smooth[40], ov_av[16];   /* written on the game thread (the last two: the UI thread, sm_tick), painted on the UI thread */
+static void ov_text(uint32_t *fb, int w, int h, int x, int y, const char *s) { ov_textc(fb, w, h, x, y, s, 0x00FFFFFF); }
+static int overlay = -1; static char ov_line[4][40]; static char ov_smooth[40], ov_av[16];   /* written on the game thread (the last two: the UI thread, sm_tick), painted on the UI thread */
 static void ov_stats(void) {
     static double t0, idle0, worst, last, last_idle; static uint64_t n; char (*line)[40] = ov_line;
     const double now = host_now();
@@ -253,6 +256,13 @@ static void ov_stats(void) {
 #endif
         snprintf(line[1], sizeof line[1], "WORK %.1f MS MAX %.1f", busy / n * 1000, worst * 1000);
         snprintf(line[2], sizeof line[2], "AUDIO %.0f MS", adev ? ar_n / 48.0 : 0.0);
+#ifdef HAVE_VULKAN
+        {   /* the full overlay: GPU ms per VBlank and the GS thread's waits for it, in that second */
+            static double g0, w0; uint64_t ns, nd; double g, wt; gsvk_stats(&ns, &nd, &g, &wt);
+            if (g > 0) snprintf(line[3], sizeof line[3], "GPU %.1f MS GS WAIT %.1f", (g - g0) / n, (wt - w0) / n); else line[3][0] = 0;
+            g0 = g; w0 = wt;
+        }
+#endif
         t0 = now; idle0 = host_idle; n = 0; worst = 0;
     }
 }
@@ -331,7 +341,7 @@ static void ui_events(void) {
             (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) pad_pressed(e.caxis.which);
         if (capture_event(&e)) continue;   /* (Esc then cancels the capture instead of quitting) */
         if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) SDL_AtomicSet(&ui_quit, 1);
-        if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F3 && !e.key.repeat) overlay = !(overlay > 0);
+        if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F3 && !e.key.repeat) overlay = overlay > 0 ? (overlay + 1) % 3 : 1;   /* off, compact, full (GPU renderer) */
         if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
             /* the setting (recorded, so a replay shows the same value in the menu); a replay flips the window only */
             if (settings_replaying()) fs_flip ^= 1;
@@ -367,10 +377,13 @@ static void ui_settings(void) {
 #endif
     }
 }
-/* the F3 overlay for the GPU path (176 x 54), or 0 when it is off */
-static const uint32_t *ov_build(void) {
+static const uint32_t *ov_full(int *w, int *h);
+/* the F3 overlay for the GPU path (176 x 54, or the full one), or 0 when it is off */
+static const uint32_t *ov_build(int *w, int *h) {
     static uint32_t ov[176 * 54];   /* 4 pixels from the picture's corner */
     if (overlay <= 0) return 0;
+    if (overlay == 2) return ov_full(w, h);
+    *w = 176; *h = 54;
     for (int i = 0; i < 176 * 54; i++) ov[i] = 0x00181818;
     char l2[64]; snprintf(l2, sizeof l2, "%s%s", ov_line[2], ov_av);
     for (int i = 0; i < 4; i++) ov_text(ov, 176, 54, 4, 4 + 12 * i, i == 2 ? l2 : i == 3 ? ov_smooth : ov_line[i]);
@@ -382,6 +395,7 @@ static int ui_mksurf(void *inst, void *surf) {   /* gsvk_present_init_with: the 
     if (SDL_Vulkan_CreateSurface(win, (VkInstance)inst, (VkSurfaceKHR *)surf)) return 1;
     L("host: SDL_Vulkan_CreateSurface: %s\n", SDL_GetError()); return 0;
 }
+static void ui_size(int *w, int *h) { SDL_Vulkan_GetDrawableSize(win, w, h); }   /* the swapchain's size where the surface leaves it to us (Wayland) */
 #endif
 static uint64_t ui_present(void) {   /* the timer's way: the next picture (or the last again); the present's id (GPU path) */
 #ifdef HAVE_VULKAN
@@ -392,7 +406,7 @@ static uint64_t ui_present(void) {   /* the timer's way: the next picture (or th
 #ifdef _WIN32
             if (SDL_GetWindowWMInfo(win, &wi) && gsvk_present_init(wi.info.win.hinstance, wi.info.win.window)) { vkmode = 2; r = 1; }
 #else
-            (void)wi; if (gsvk_present_init_with(ui_mksurf)) { vkmode = 2; r = 1; }
+            (void)wi; if (gsvk_present_init_with(ui_mksurf, ui_size)) { vkmode = 2; r = 1; }
 #endif
         }
         if (r < 0) { vkmode = 0; sdl_renderer(); L("host: presenting with SDL\n"); }
@@ -402,7 +416,8 @@ static uint64_t ui_present(void) {   /* the timer's way: the next picture (or th
         int s; uint64_t id = 0;
         if (!gs_display_gpu(&s, &id)) s = -1;   /* none new: the last one again */
         else pres_tag = gs_display_tag();
-        return gsvk_present(s, id, ov_build(), 0);
+        int ow = 0, oh = 0; const uint32_t *ov = ov_build(&ow, &oh);
+        return gsvk_present(s, id, ov, ow, oh, 0);
     }
 #endif
     int w, h;
@@ -481,19 +496,21 @@ static volatile double cb_t; static volatile int cb_frames;   /* audio thread: t
 static uint64_t aud_in;      /* game thread: frames given to host_audio_push so far (= the SPU2's samples pushed) */
 static volatile uint64_t ar_drops; static uint64_t ar_underruns_total(void);
 /* A/V alignment (HG_AV, default 1; 0: the fixed 120 ms cushion and the 1024-frame device buffer of before). The sound's
-   delay is the ring's level, which the resampler holds at a target: the larger of a floor against underruns (50 ms,
-   20 ms more after each underrun, 5 ms less after each 30 s without one, at most 150 ms) and what the A/V control
+   delay is the ring's level, which the resampler holds at a target: the larger of a floor against underruns (35 ms,
+   HG_AUDIO_FLOOR_MS; 20 ms more after each underrun the host caused, none for one while the game itself ran slow,
+   e.g. a stall at a loading point; 10 ms less after each 10 s without one; at most 150 ms) and what the A/V control
    asks. The picture's delay is the game's phase against the display's ticks (display-locked: ui_refresh's ph, the
    game earlier -> its pictures wait longer). Every 2 s the mean offset, corrected for where the ring is heading
    (level - target), decides: the sound late by more than 12 ms -> the ring's target down if above the floor, else
    the game a quarter VBlank earlier (pictures later); the picture late by more than 12 ms -> the game a quarter
    VBlank later if no picture was missing for 20 s, else the ring's target up. */
 static int av_on = -1;
-static volatile int ar_floor = 48000 * 50 / 1000, ar_avwant = 0;   /* frames: the underrun floor (game thread), the A/V control's wish (UI thread) */
+static volatile int ar_floor = -1, ar_avwant = 0;   /* frames: the underrun floor (game thread), the A/V control's wish (UI thread) */
 static volatile double ar_lvl_ms, ar_tgt_ms;   /* game thread: the ring's smoothed level and target, ms */
 static double av_c_sum; static int av_c_n;     /* UI thread: offsets (corrected) since the last control step */
-static int ar_target(void) { if (!av_on) return 48000 * 12 / 100; const int f = ar_floor, w = ar_avwant; return w > f ? w : f; }
-static void av_init(void) { if (av_on < 0) { const char *e = getenv("HG_AV"); av_on = !(e && !atoi(e)); } }
+static int ar_floor0(void) { static int f = -1; if (f < 0) { const char *e = getenv("HG_AUDIO_FLOOR_MS"); const int ms = e ? atoi(e) : 35; f = 48 * (ms < 10 ? 10 : ms > 150 ? 150 : ms); } return f; }   /* frames */
+static int ar_target(void) { if (!av_on) return 48000 * 12 / 100; if (ar_floor < 0) ar_floor = ar_floor0(); const int f = ar_floor, w = ar_avwant; return w > f ? w : f; }
+static void av_init(void) { if (av_on < 0) { const char *e = getenv("HG_AV"); av_on = !(e && !atoi(e)); } if (ar_floor < 0) ar_floor = ar_floor0(); }
 /* the A/V control's audio side: lower (dir < 0) or raise the ring's target by about ms; 0 if it is at its limit */
 static int av_audio_move(double ms, int dir) {
     const int f = ar_floor, cur = ar_target(), step = (int)((ms > 20 ? 20 : ms) * 48);
@@ -533,12 +550,20 @@ static double av_offset(uint64_t vb, double t_pic, double *vlat, double *alat) {
     return (t_pic - t_snd) * 1e3;
 }
 static void sm_tick(int final);
+/* The full overlay (F3 twice, or HG_OVERLAY=2; GPU renderer): the last OVG pictures' times on the screen (from the
+   one before it to it, at first scanout where the driver reports it) as a graph, and the numbers of the last second
+   (or 10 s). UI thread. */
+enum { OVG = 128, OFW = 296, OFH = 172 };
+static struct { float ms; uint8_t h, real; } ovg[OVG]; static double ovg_t[OVG]; static int ovg_i, ovg_n;
+static double ovl_sum; static int ovl_n; static char ov_fl[3][48];   /* latency (VBlank begun -> on the screen) of the second; the lines sm_tick writes */
+static void ovg_add(double ms, int h, int real, double t) { ovg[ovg_i].ms = (float)ms; ovg[ovg_i].h = (uint8_t)(h > 255 ? 255 : h); ovg[ovg_i].real = (uint8_t)real; ovg_t[ovg_i] = t; ovg_i = (ovg_i + 1) % OVG; if (ovg_n < OVG) ovg_n++; }
 /* a new picture reached the screen at t (src 1: first scanout, 0: present wait) */
 static void sm_shown(uint64_t tag, double t, int src) {
     if (src) sm_scan_seen = 1; else if (sm_scan_seen > 0) return;
     const uint64_t vb = tag >> 2;
     if (sm_last_t > 0 && t > sm_last_t) {
         const int h = (int)((t - sm_last_t) / sm_rp + 0.5);
+        ovg_add((t - sm_last_t) * 1e3, h, !(tag & 1), t);
         sm_cur.pics++;
         if (h == sm_expect) sm_cur.h_ok++;
         else {
@@ -550,6 +575,7 @@ static void sm_shown(uint64_t tag, double t, int src) {
     if (!(tag & 1)) {   /* a real picture (not an in-between one): A/V */
         double vl = 0, al = 0; const double o = av_offset(vb, t, &vl, &al);
         if (!isnan(o)) {
+            ovl_sum += vl; ovl_n++;
             if (!sm_cur.av_n || o < sm_cur.av_min) sm_cur.av_min = o;
             if (!sm_cur.av_n || o > sm_cur.av_max) sm_cur.av_max = o;
             sm_cur.av_n++; sm_cur.av_sum += o;
@@ -578,6 +604,20 @@ static void sm_tick(int final) {   /* UI thread, every refresh: events polled, t
     SmStat w; memset(&w, 0, sizeof w); for (int i = 0; i < 10; i++) if (!final || !sm_sec_i || i < sm_sec_i) sm_add(&w, &sm_sec[i]);   /* the last 10 s (at exit: since the last line) */
     snprintf(ov_smooth, sizeof ov_smooth, "%d-REFRESH %.1f%% NR %llu", sm_expect, w.pics ? 100.0 * w.h_ok / w.pics : 0.0, (unsigned long long)w.notready);
     if (w.av_n) snprintf(ov_av, sizeof ov_av, " AV %+.0f", w.av_sum / w.av_n); else ov_av[0] = 0;
+    {   /* the full overlay: the last second's pictures */
+        int np = 0, nr = 0; double mn = 1e9, mx = 0, sum = 0; const double tl = ovg_n ? ovg_t[(ovg_i + OVG - 1) % OVG] : 0;
+        for (int i = 0; i < ovg_n; i++) { const int j = (ovg_i + OVG - 1 - i) % OVG; if (ovg_t[j] <= tl - 1) break;
+            np++; nr += ovg[j].real; sum += ovg[j].ms; if (ovg[j].ms < mn) mn = ovg[j].ms; if (ovg[j].ms > mx) mx = ovg[j].ms; }
+        snprintf(ov_fl[0], sizeof ov_fl[0], "FPS %.1f GAME %.1f DISPLAY %.0f HZ", sum > 0 ? np * 1e3 / sum : 0.0, sum > 0 ? nr * 1e3 / sum : 0.0, 1 / sm_rp);   /* (per second of the pictures' own times) */
+        if (np) snprintf(ov_fl[1], sizeof ov_fl[1], "FRAME %.1f MS MIN %.1f MAX %.1f", sum / np, mn, mx); else snprintf(ov_fl[1], sizeof ov_fl[1], "FRAME -");
+        snprintf(ov_fl[2], sizeof ov_fl[2], "VBLANK TO SCREEN %.0f MS", ovl_n ? ovl_sum / ovl_n : 0.0); ovl_sum = 0; ovl_n = 0;
+        static char ov_10[2][48];
+        snprintf(ov_10[0], sizeof ov_10[0], "10 S: %.1f%% EXACT, NOT READY %llu", w.pics ? 100.0 * w.h_ok / w.pics : 0.0, (unsigned long long)w.notready);
+        snprintf(ov_10[1], sizeof ov_10[1], "SHORT %llu LONG %llu LONGER %llu SKIP %llu", (unsigned long long)w.h_short, (unsigned long long)w.h_long1, (unsigned long long)w.h_long2, (unsigned long long)w.skipped);
+        static char ov_snd[80]; snprintf(ov_snd, sizeof ov_snd, "%s%s UNDER %llu", ov_line[2], ov_av, (unsigned long long)w.underruns);
+        extern const char *ov_full_lines[8]; ov_full_lines[0] = ov_fl[0]; ov_full_lines[1] = ov_fl[1]; ov_full_lines[2] = ov_10[0]; ov_full_lines[3] = ov_10[1];
+        ov_full_lines[5] = ov_snd; ov_full_lines[7] = ov_fl[2];
+    }
     if (sm_sec_i == 0 || final) {   /* every 10 s (and the rest at exit) */
         L("smooth: %.0f s: %llu pictures, held %d refreshes %.1f %% (%llu), %d: %llu, %d: %llu, more: %llu; in-between left out %llu; not ready %llu; sound underruns %llu, drops %llu; "
           "A/V %s%+.0f ms (%+.0f..%+.0f, + picture later); stage %x%s\n", now - sm_t0, (unsigned long long)w.pics, sm_expect, w.pics ? 100.0 * w.h_ok / w.pics : 0.0, (unsigned long long)w.h_ok,
@@ -601,6 +641,34 @@ static void sm_report(void) {   /* at exit: the session's table and hitches (too
         L("smooth hitch: %.3f s VB %llu stage %x%s: %s %d\n", sm_hit[i].t, (unsigned long long)sm_hit[i].vb, sm_hit[i].stage, sm_hit[i].movie ? " movie" : "",
           sm_hit[i].kind == 'H' ? "held" : sm_hit[i].kind == 'N' ? "not ready" : sm_hit[i].kind == 'U' ? "underrun" : sm_hit[i].kind == 'D' ? "drop" : "left out", sm_hit[i].val);
     if (sm_hit_lost) L("smooth hitch: %llu more not kept\n", (unsigned long long)sm_hit_lost);
+}
+const char *ov_full_lines[8];   /* (sm_tick's lines; 4, 6: the game thread's) */
+static const uint32_t *ov_full(int *w, int *h) {
+    static uint32_t ov[OFW * OFH]; *w = OFW; *h = OFH;
+    for (int i = 0; i < OFW * OFH; i++) ov[i] = 0x00181818;
+    static char cpu[96], sp[40]; snprintf(sp, sizeof sp, "%s", ov_line[0]); { char *k = strstr(sp, " SKIP"); if (k) *k = 0; }
+    snprintf(cpu, sizeof cpu, "CPU %.30s %.30s", ov_line[1][0] ? ov_line[1] + 5 : "-", sp);   /* the game thread's work per VBlank, the speed */
+    const char *ln[8]; for (int i = 0; i < 8; i++) ln[i] = ov_full_lines[i] ? ov_full_lines[i] : "";
+    ln[4] = ov_line[3]; ln[6] = cpu;
+    for (int i = 0; i < 8; i++) ov_text(ov, OFW, OFH, 4, 4 + 12 * i, ln[i]);
+    /* the graph: each bar a picture's time on the screen (40 ms full height); the line where it should be; under
+       each bar white for a real picture, grey for an in-between one */
+    const int gx = 4, gy = 104, gh = 48; const double per = gh / 40.0;
+    for (int y = gy; y < gy + gh; y++) for (int x = gx; x < gx + 2 * OVG; x++) ov[y * OFW + x] = 0x00242424;
+    const int ty = gy + gh - 1 - (int)(sm_expect * sm_rp * 1e3 * per + 0.5);
+    for (int x = gx; x < gx + 2 * OVG; x += 2) if (ty >= gy) ov[ty * OFW + x] = 0x00A0A0A0;
+    for (int i = 0; i < ovg_n; i++) {
+        const int j = (ovg_i + OVG - ovg_n + i) % OVG, x = gx + 2 * (OVG - ovg_n + i);
+        const int h = ovg[j].h;   /* RGBA in memory: 0xAABBGGRR */
+        const uint32_t col = h == sm_expect ? 0x0040E040 : h < sm_expect ? 0x00FFC040 : h == sm_expect + 1 ? 0x0000E0FF : 0x004040FF;
+        int bh = (int)(ovg[j].ms * per + 0.5); if (bh > gh) bh = gh; if (bh < 1) bh = 1;
+        for (int y = gy + gh - bh; y < gy + gh; y++) ov[y * OFW + x] = col;
+        for (int y = gy + gh + 1; y < gy + gh + 3; y++) ov[y * OFW + x] = ovg[j].real ? 0x00FFFFFF : 0x00686868;
+    }
+    ov_textc(ov, OFW, OFH, gx + 2 * OVG + 4, gy, "40", 0x00A0A0A0);
+    { char t[16]; snprintf(t, sizeof t, "%.1f", sm_expect * sm_rp * 1e3); ov_textc(ov, OFW, OFH, gx + 2 * OVG + 4, ty - 4 < gy ? gy : ty - 4, t, 0x00A0A0A0); }
+    ov_textc(ov, OFW, OFH, 4, gy + gh + 6, "GREEN EXACT YELLOW +1 RED +2 BLUE -1", 0x00A0A0A0);
+    return ov;
 }
 #ifdef HAVE_VULKAN
 /* the picture of each present (by id), for the log; scanout times (VK_EXT_present_timing) logged as "SCAN" */
@@ -700,7 +768,8 @@ static int ui_refresh(int x2) {
     sm_rp = rp; sm_expect = locked ? hold : (int)(1 / (rp * 59.94 * m) + 0.5); if (sm_expect < 1) sm_expect = 1;
     sm_tick(0);
     const double t_pc = host_now();
-    const uint64_t pid = gsvk_present(s, id, ov_build(), timed ? (uint64_t)(hold * rp * 1e9 + 0.5) : 0);
+    int ow = 0, oh = 0; const uint32_t *ov = ov_build(&ow, &oh);
+    const uint64_t pid = gsvk_present(s, id, ov, ow, oh, timed ? (uint64_t)(hold * rp * 1e9 + 0.5) : 0);
     const double t_pr = host_now();
     if (!pid) { if (s >= 0) { } SDL_Delay(8); t_last = 0; lock_set(0, 0, 0, 0, 0); locked = 0; return 1; }   /* (minimized, the swapchain being made again) */
     note_present(pid, tag, kind[0] == 'n');
@@ -868,7 +937,7 @@ void host_vblank(uint64_t vb) {
     if (SDL_AtomicGet(&ui_quit)) stop("window closed");
     const uint32_t an = (uint32_t)SDL_AtomicGet(&in_an); const uint8_t a4[4] = { (uint8_t)an, (uint8_t)(an >> 8), (uint8_t)(an >> 16), (uint8_t)(an >> 24) };
     pad_set_input((uint16_t)SDL_AtomicGet(&in_held), a4);
-    if (overlay < 0) overlay = getenv("HG_OVERLAY") && atoi(getenv("HG_OVERLAY"));
+    if (overlay < 0) { overlay = getenv("HG_OVERLAY") ? atoi(getenv("HG_OVERLAY")) : 0; if (overlay < 0 || overlay > 2) overlay = 1; }
     ov_stats();
 }
 void host_shutdown(void) {
@@ -982,11 +1051,18 @@ void host_audio_push(const int16_t *s, int frames) {
         if (!ar_playing) st = 1;   /* (filling the cushion, or after an underrun) */
         if (av_on) {   /* the floor against underruns */
             static uint64_t u0; static double t_ok; const double tn = host_now(); const uint64_t u = ar_underruns;
+            /* the game's own pace: the samples it gave per second over the last quarter seconds (48,000 at full speed) */
+            static double rt[3] = { 48000, 48000, 48000 }, t_r; static uint64_t a_r;
+            if (!t_r) { t_r = tn; a_r = aud_in; }
+            else if (tn - t_r >= 0.25) { rt[2] = rt[1]; rt[1] = rt[0]; rt[0] = (double)(aud_in - a_r) / (tn - t_r); t_r = tn; a_r = aud_in; }
+            const double pace = (rt[0] < rt[1] ? rt[0] < rt[2] ? rt[0] : rt[2] : rt[1] < rt[2] ? rt[1] : rt[2]) / 48000;
             if (!t_ok) { t_ok = tn; u0 = u; }
-            if (u > u0 && u0) { int f = ar_floor + 48000 * 20 / 1000; if (f > 48000 * 150 / 1000) f = 48000 * 150 / 1000; ar_floor = f; t_ok = tn;
+            if (u > u0 && u0 && pace < 0.9) { t_ok = tn;   /* the game fell behind: a larger ring would not have helped */
+                static int nl; if (nl++ < 50) L("host audio: underrun while the game ran at %.0f %% speed: the ring's floor stays %d ms\n", pace * 100, ar_floor / 48); }
+            else if (u > u0 && u0) { int f = ar_floor + 48000 * 20 / 1000; if (f > 48000 * 150 / 1000) f = 48000 * 150 / 1000; ar_floor = f; t_ok = tn;
                 static int nl; if (nl++ < 50) L("host audio: underrun: the ring's floor now %d ms\n", f / 48); }
             else if (u > u0) t_ok = tn;   /* (the first: the start) */
-            else if (tn - t_ok >= 30 && ar_floor > 48000 * 50 / 1000) { ar_floor -= 48000 * 5 / 1000; t_ok = tn; }
+            else if (tn - t_ok >= 10 && ar_floor > ar_floor0()) { int f = ar_floor - 48000 * 10 / 1000; if (f < ar_floor0()) f = ar_floor0(); ar_floor = f; t_ok = tn; }
             u0 = u;
         }
         rs_step = st < 0.994 ? 0.994 : st > 1.006 ? 1.006 : st; rs_sum += rs_step; rs_cnt++;

@@ -97,3 +97,20 @@ once with a target time (`VK_EXT_present_timing`, relative, `HG_PRESENT_TIMED=1`
 showed 1 hold of 3 in 323. Overnight measurement stopped when the monitor went to sleep (with the display off no
 scanout happens, and presents fall to one per 80-100 ms): the 20-minute soak and the windowed numbers wait for the
 display.
+
+## The 3-VBlank frames (2026-10-25)
+
+Measured with `HG_FRAMEPROF=FILE` on the user's session `recordings/20261025-005118`, VB 3,000-8,000: 131 of 2,431
+frames took 3 VBlanks (the picture held 50 ms, 1-2 times a second). An EE twice as fast (`HG_EE_MIPS=600`) changed
+nothing, and DMA/VU1 take no emulated time (`sceGsSyncPath` in `frame_begin` never waits). In every long frame the
+frame thread waited about one VBlank in `sceSifCallRpc` (0x2700e8) for SNDDRV's command 0x26 (client 0x19756c0, from
+0x21fb70). SNDDRV's server thread answers after a semaphore signalled by its DelayThread tick. The emulated IOP ran a
+whole VBlank ahead at each VBlank (`iop_vblank`), so a request made during the VBlank found the IOP at the end of
+its slice: the tick, and the answer, came in the next slice, while the idle EE jumped to the next VBlank.
+
+`HG_IOPSYNC=1` (off by default): the IOP's time follows the EE's (8 EE cycles per IOP cycle); an RPC first catches
+the IOP up; while no EE thread can run, `idle_advance` runs the IOP to each of its events before the EE's next one
+and delivers the answers. Result: 0 frames of 3 VBlanks (2,499 of 2 from VB 3,000 to 8,000; G2 route 51 -> 0),
+audiocheck PASS. It changes the emulation's timing (G1 706 frames, G2 746, different from the references; all four
+renderers still identical to each other), so making it the default means re-freezing every reference and making new
+test recordings.

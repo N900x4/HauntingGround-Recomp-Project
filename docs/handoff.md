@@ -22,6 +22,40 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### 2026-10-24/25 (playtests 4 and 5, then overnight): Wayland window, overlay, A/V, the 3-VBlank frames, textures
+
+- **Window on KDE Wayland** (`d03e5f8`): the surface reports its size as 0xFFFFFFFF; the swapchain took it and failed,
+  so no window appeared. **F3** cycles off / compact / full: the full overlay graphs each picture's time on screen
+  (green exact, yellow +1, red +2 refreshes) with fps, frame times, GPU/CPU, sound, A/V and latency. **F9** marks the
+  moment in the log (`mark N: F9 at game VBlank V`), for reports such as the pop-in.
+- **Sound** (`d03e5f8`, `4ff03e5`): an underrun while the game itself ran slow no longer grows the ring's floor (one
+  stall had taken it to 145 ms and the sound stayed 100-140 ms late); floor 35 ms, back 10 ms per 10 s. Linux: the
+  sound card's own queue is measured from /proc/asound (16 ms on the user's HDMI output, BenQ EX480UZ) and counted;
+  `audio_offset` in hg.ini (HG_AUDIO_OFFSET_MS) for what cannot be measured; the A/V control may hold pictures up to 4
+  VBlanks. Playtest 5: A/V within about 15 ms all session; the user: "audio still slightly behind" (before the
+  hardware-queue fix), "the game does feel smoother".
+- **The game's 3-VBlank frames** (`4b6e687`, details in `docs/frame-timing.md`): 5 % of frames held 50 ms because
+  SNDDRV's RPC (sceSifCallRpc, command 0x26) was answered a VBlank late: the emulated IOP ran a VBlank ahead.
+  `HG_IOPSYNC=1` keeps the IOP's time with the EE's: 131 -> 0 such frames in the user's session, 51 -> 0 on the G2
+  route, audiocheck PASS. **Off by default: it changes the emulation's timing, so every reference (hashA, cs, soak,
+  pictures) must be re-frozen and old recordings no longer replay the same after about VB 3,000. The user decides.**
+- **Pop-in** (still seen in playtest 5): not a texture swap, late upload or texture LOD (HG_TEXLOG_ALL: the characters'
+  textures never change within a shot; `DNL_000H.TEX` is a recoloured costume). Left: a geometry LOD or something only
+  in the live window. Needs an F9 mark.
+- **Textures** (`7120ec2`, `8a838bc`, docs/textures.md section 6): `tools/textures/texdump.py` extracts all 1,398
+  textures with ids (crc32 of indices _ crc32 of CLUT); `HG_TEXLOG` + `texmatch.py` confirm every upload and every
+  paletted setup drawn maps to a disc id. Upscaled tonight with chaiNNer's engine (`upscale.py`): all 1,398 with
+  **4xHDcube3** (licence loosened 2026-10-19: outputs free) and **4x-PBRify_UpscalerV4** (CC0), in
+  `D:\ps2-work\texwork\up_*`; review page `texwork/review/index.html`. PBRify is the more faithful on faces (HDcube3
+  invents speckles on skin); HDcube3 is cleaner on lace and patterns; alpha (4xHDcube-Alpha) clean on both.
+- **rea + Ghidra** for the EE: `tools/rea/README.md` (user-local Ghidra 12.1.4 with ghidra-emotionengine-reloaded;
+  rea refuses the PS2's ELF flags, so a patched scratch copy; MCP servers `rea` and `rea-ps2`).
+- **Smoothness B** (40 fps while not locked): only in playtest 4, while the window's surface was recreated three
+  times (resizing under KWin); not in playtest 5, not reproduced in gamescope. **C** (the stall in ST_020): not the
+  disc reads; ST_020 is GPU/GS-heavy at x4 + 60 (real-time replay at 4K: host 12-18 ms per VBlank, the GS thread
+  waiting on the interpolation replays, the EE on the full GS ring). Next renderer step: replays submitted without
+  the GS thread waiting.
+
 ### 2026-10-23 (unattended): the Linux port (CachyOS), every gate gives the Windows results
 
 The user moved to CachyOS Linux (same PC: Ryzen 7 9800X3D, RTX 5090, driver 615.78; the repo on the shared NTFS

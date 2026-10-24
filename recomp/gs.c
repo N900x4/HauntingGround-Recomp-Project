@@ -2309,10 +2309,11 @@ static FILE *tl_f; static int tl_on = -1;
 static struct { uint32_t crc, n, want; } tl;
 static struct { uint32_t crc, psm, w, h; } tl_at[16384][4];   /* the last upload at each base pointer: full words, 8H, 4HL, 4HH */
 static int tl_cls(uint32_t psm) { return psm == 0x1B ? 1 : psm == 0x24 ? 2 : psm == 0x2C ? 3 : 0; }
-static uint64_t tl_seen[1 << 16];
+static uint64_t tl_seen[1 << 16]; static uint64_t tl_seen_vb[1 << 16]; static int tl_all;   /* HG_TEXLOG_ALL=1: a USE line per VBlank (setups drawn with, each once per VBlank) */
 static uint32_t tl_tab[256];
 static void tl_init(void) {
     const char *e = getenv("HG_TEXLOG"); tl_on = e && *e && (tl_f = fopen(e, "w")) != 0;
+    tl_all = getenv("HG_TEXLOG_ALL") && atoi(getenv("HG_TEXLOG_ALL"));
     for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1; tl_tab[i] = c; }
 }
 static void tl_begin(void) {
@@ -2338,8 +2339,9 @@ static void tl_use(uint64_t t) {
     const uint32_t img = tl_at[tbp][tl_cls(BITS(t, 20, 6))].crc, clut = tl_at[cbp][0].crc;
     uint64_t k = t ^ ((uint64_t)img << 13) ^ ((uint64_t)clut << 29) ^ (t >> 31) * 0x9E3779B97F4A7C15ull; if (!k) k = 1;
     for (uint32_t i = (uint32_t)(k * 0x9E3779B97F4A7C15ull >> 48), n = 0; n < (1u << 16); i = (i + 1) & 0xFFFF, n++) {
+        if (tl_all && tl_seen_vb[i] != cur_vb + 1) { tl_seen[i] = k; tl_seen_vb[i] = cur_vb + 1; break; }   /* (an older VBlank's slot is free) */
         if (tl_seen[i] == k) return;
-        if (!tl_seen[i]) { tl_seen[i] = k; break; }
+        if (!tl_seen[i]) { tl_seen[i] = k; tl_seen_vb[i] = cur_vb + 1; break; }
     }
     fprintf(tl_f, "USE %llu %u %u 0x%x %u %u %u 0x%x %u %08x %08x\n", (unsigned long long)cur_vb, tbp, (unsigned)BITS(t, 14, 6), (unsigned)BITS(t, 20, 6),
             1u << BITS(t, 26, 4), 1u << BITS(t, 30, 4), cbp, (unsigned)BITS(t, 51, 4), (unsigned)BITS(t, 56, 5), img, clut);

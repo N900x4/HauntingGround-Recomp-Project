@@ -9,7 +9,8 @@
 
    Keyboard and controller mappings come from the settings (settings.c: hg.ini, changed in the game's Options menu).
    The defaults: arrows = D-pad, X = Cross, C = Circle, Z = Square, S = Triangle, Enter = Start, Right Shift = Select,
-             Q/E = L1/R1, 1/3 = L2/R2, I/J/K/L = left stick; F11 = fullscreen, F3 = overlay, Esc = quit.
+             Q/E = L1/R1, 1/3 = L2/R2, I/J/K/L = left stick; F11 = fullscreen, F3 = overlay, F9 = mark the moment in the
+             log (for reporting what was seen), Esc = quit.
    Gamepad (SDL GameController): A/B/X/Y = Cross/Circle/Square/Triangle, shoulders = L1/R1, triggers = L2/R2,
              sticks = analog sticks (not mapped), stick clicks = L3/R3, Back = Select, Start = Start; on a
              PlayStation controller the same buttons by their own names (Cross = Cross ...), Create/Share = Select,
@@ -236,6 +237,8 @@ static void ov_textc(uint32_t *fb, int w, int h, int x, int y, const char *s, ui
     }
 }
 static void ov_text(uint32_t *fb, int w, int h, int x, int y, const char *s) { ov_textc(fb, w, h, x, y, s, 0x00FFFFFF); }
+static int mark_n; static double mark_t;   /* F9 marks (UI thread) */
+static void mark_now(void);
 static int overlay = -1; static char ov_line[4][40]; static char ov_smooth[40], ov_av[16];   /* written on the game thread (the last two: the UI thread, sm_tick), painted on the UI thread */
 static void ov_stats(void) {
     static double t0, idle0, worst, last, last_idle; static uint64_t n; char (*line)[40] = ov_line;
@@ -342,6 +345,9 @@ static void ui_events(void) {
         if (capture_event(&e)) continue;   /* (Esc then cancels the capture instead of quitting) */
         if (e.type == SDL_QUIT || (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) SDL_AtomicSet(&ui_quit, 1);
         if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F3 && !e.key.repeat) overlay = overlay > 0 ? (overlay + 1) % 3 : 1;   /* off, compact, full (GPU renderer) */
+        if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F9 && !e.key.repeat) {   /* a mark: the game frame and the picture on screen now */
+            mark_now();
+        }
         if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11 && !e.key.repeat) {
             /* the setting (recorded, so a replay shows the same value in the menu); a replay flips the window only */
             if (settings_replaying()) fs_flip ^= 1;
@@ -381,9 +387,12 @@ static const uint32_t *ov_full(int *w, int *h);
 /* the F3 overlay for the GPU path (176 x 54, or the full one), or 0 when it is off */
 static const uint32_t *ov_build(int *w, int *h) {
     static uint32_t ov[176 * 54];   /* 4 pixels from the picture's corner */
-    if (overlay <= 0) return 0;
-    if (overlay == 2) return ov_full(w, h);
+    const int marked = mark_n && host_now() - mark_t < 2;
+    char mk[24]; if (marked) snprintf(mk, sizeof mk, "MARK %d", mark_n);
+    if (overlay <= 0 && !marked) return 0;
+    if (overlay == 2) { const uint32_t *o = ov_full(w, h); if (marked) ov_textc((uint32_t *)o, *w, *h, 200, 4, mk, 0x0000E0FF); return o; }
     *w = 176; *h = 54;
+    if (overlay <= 0) { for (int i = 0; i < 176 * 54; i++) ov[i] = 0x00181818; ov_textc(ov, 176, 54, 4, 4, mk, 0x0000E0FF); return ov; }
     for (int i = 0; i < 176 * 54; i++) ov[i] = 0x00181818;
     char l2[64]; snprintf(l2, sizeof l2, "%s%s", ov_line[2], ov_av);
     for (int i = 0; i < 4; i++) ov_text(ov, 176, 54, 4, 4 + 12 * i, i == 2 ? l2 : i == 3 ? ov_smooth : ov_line[i]);
@@ -551,6 +560,11 @@ static double av_offset(uint64_t vb, double t_pic, double *vlat, double *alat) {
     return (t_pic - t_snd) * 1e3;
 }
 static void sm_tick(int final);
+static void mark_now(void) {
+    mark_n++; mark_t = host_now();
+    L("mark %d: F9 at game VBlank %llu, picture on screen from VBlank %llu%s, %.1f s into the session\n", mark_n, (unsigned long long)vb_last,
+      (unsigned long long)(pres_tag >> 2), pres_tag & 1 ? " (in-between)" : "", sm_t0 > 0 ? mark_t - sm_t0 : 0.0);
+}
 /* The full overlay (F3 twice, or HG_OVERLAY=2; GPU renderer): the last OVG pictures' times on the screen (from the
    one before it to it, at first scanout where the driver reports it) as a graph, and the numbers of the last second
    (or 10 s). UI thread. */

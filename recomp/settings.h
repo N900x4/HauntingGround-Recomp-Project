@@ -53,6 +53,7 @@ typedef struct {
     uint32_t lightbar;  /* 0xRRGGBB: the light bar of PlayStation controllers (0: off) */
     int deadzone;       /* the analog sticks' dead zone, percent of full travel (0-50) */
     int touchpad_select;   /* 1: a click of the touchpad is Select too (unless the touchpad is mapped) */
+    int audio_offset;   /* ms the sound reaches the ear later than the A/V control can measure (speakers, TV), -200..200 */
 } Settings;
 
 void settings_init(void);                 /* load, apply the environment, log; once, at start */

@@ -836,7 +836,13 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, int ovw, int ovh, 
         if (use_cal && !vkGetQueryPoolResults(dev, uqp, 2 * (uint32_t)f, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT)) {
             if (p0 - cal_t > 1) {   /* the GPU's clock against QueryPerformanceCounter */
                 VkCalibratedTimestampInfoKHR ci2[2] = { { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, .timeDomain = VK_TIME_DOMAIN_DEVICE_KHR },
-                                                        { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, .timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR } };
+                                                        { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR, .timeDomain =
+#ifdef _WIN32
+                                                          VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR
+#else   /* host_now() is CLOCK_MONOTONIC there (host_qpc_seconds: ns) */
+                                                          VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR
+#endif
+                                                        } };
                 uint64_t v[2], dv; if (!get_cal(dev, 2, ci2, v, &dv)) { cal_off = host_qpc_seconds(v[1]) - v[0] * tsperiod * 1e-9; cal_t = p0; }
             }
             const int j = (int)(upid[f] & 63); ugt[j].pid = upid[f]; ugt[j].beg = ts[0] * tsperiod * 1e-9 + cal_off; ugt[j].end = ts[1] * tsperiod * 1e-9 + cal_off;
@@ -922,7 +928,7 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, int ovw, int ovh, 
         VkPastPresentationTimingPropertiesEXT pp = { .sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_PROPERTIES_EXT, .presentationTimingCount = 16, .pPresentationTimings = pt };
         const VkResult q = pt_past(dev, &pii, &pp);
         if (q == VK_SUCCESS || q == VK_INCOMPLETE)
-            for (uint32_t i = 0; i < pp.presentationTimingCount; i++) if (pt[i].reportComplete && st[i].stage) {
+            for (uint32_t i = 0; i < pp.presentationTimingCount; i++) if (pt[i].reportComplete && st[i].stage && st[i].time) {   /* (a 0 time: no scanout reported) */
                 if (pt_n < 256) { pt_ring[pt_n].pid = pt[i].presentId; pt_ring[pt_n].t = pt_qpc ? host_qpc_seconds(pt[i].pPresentStages[0].time) : pt[i].pPresentStages[0].time * 1e-9; pt_n++; }
             }
     }

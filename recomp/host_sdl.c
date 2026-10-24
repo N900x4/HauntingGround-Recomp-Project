@@ -492,6 +492,7 @@ static uint64_t vb_samp[1024], vb_samp_vb[1024];   /* game thread: the SPU2's sa
 static volatile uint32_t sm_stage; static volatile int sm_movie;   /* game thread: stage number; a movie playing */
 static SDL_SpinLock av_lock; static uint64_t av_in_end; static double av_t_end, av_step = 1; static int av_valid;   /* under av_lock */
 static double av_dev = -1;   /* the device's latency beyond the frames SDL holds (s) */
+static volatile double av_hw = 0, av_user = 0;   /* the sound card's own queue (Linux, measured: av_probe_hw), and audio_offset (s) */
 static volatile double cb_t; static volatile int cb_frames;   /* audio thread: the last callback's time and size */
 static uint64_t aud_in;      /* game thread: frames given to host_audio_push so far (= the SPU2's samples pushed) */
 static volatile uint64_t ar_drops; static uint64_t ar_underruns_total(void);
@@ -559,6 +560,7 @@ static double ovl_sum; static int ovl_n; static char ov_fl[3][48];   /* latency 
 static void ovg_add(double ms, int h, int real, double t) { ovg[ovg_i].ms = (float)ms; ovg[ovg_i].h = (uint8_t)(h > 255 ? 255 : h); ovg[ovg_i].real = (uint8_t)real; ovg_t[ovg_i] = t; ovg_i = (ovg_i + 1) % OVG; if (ovg_n < OVG) ovg_n++; }
 /* a new picture reached the screen at t (src 1: first scanout, 0: present wait) */
 static void sm_shown(uint64_t tag, double t, int src) {
+    { const double now = host_now(); if (t < now - 2 || t > now + 1) return; }   /* (a time from another clock: not used) */
     if (src) sm_scan_seen = 1; else if (sm_scan_seen > 0) return;
     const uint64_t vb = tag >> 2;
     if (sm_last_t > 0 && t > sm_last_t) {
@@ -586,8 +588,39 @@ static void sm_shown(uint64_t tag, double t, int src) {
         }
     }
 }
+/* Linux: the sound card's own queue, which the device latency above leaves out (PipeWire's ALSA sinks keep 1-2 periods
+   in the hardware buffer: 11-21 ms on the user's HDMI output). Read 4 times a second from the one running playback
+   stream in /proc/asound and averaged; not used when none or several run, nor with HG_AUDIO_LAT_MS. UI thread. */
+static void av_probe_hw(double now) {
+#ifdef __linux__
+    static double t_next, avg = -1; static int off = -1;
+    if (off < 0) off = getenv("HG_AUDIO_LAT_MS") != 0 || (getenv("HG_AUDIO_HWPROBE") && !atoi(getenv("HG_AUDIO_HWPROBE")));
+    if (off || now < t_next || audio_state != 1) return;
+    t_next = now + 0.25;
+    int found = 0; long delay = 0, rate = 0;
+    for (int c = 0; c < 8; c++) for (int d = 0; d < 16; d++) {
+        char p[96]; snprintf(p, sizeof p, "/proc/asound/card%d/pcm%dp/sub0/status", c, d);
+        FILE *f = fopen(p, "r"); if (!f) continue;
+        char line[128]; int run = 0; long dl = -1;
+        while (fgets(line, sizeof line, f)) { if (strstr(line, "RUNNING")) run = 1; if (!strncmp(line, "delay", 5)) dl = atol(strchr(line, ':') ? strchr(line, ':') + 1 : line); }
+        fclose(f);
+        if (!run || dl < 0) continue;
+        found++; delay = dl;
+        snprintf(p, sizeof p, "/proc/asound/card%d/pcm%dp/sub0/hw_params", c, d);
+        if ((f = fopen(p, "r"))) { while (fgets(line, sizeof line, f)) if (!strncmp(line, "rate:", 5)) rate = atol(line + 5); fclose(f); }
+    }
+    if (found != 1 || rate <= 0) return;
+    const double s = (double)delay / rate;
+    avg = avg < 0 ? s : avg + (s - avg) * 0.05;
+    av_hw = avg;
+    static int nl; static double t_log; if (now - t_log > 60 && nl++ < 30) { t_log = now; L("host audio: the sound card holds %.1f ms (measured, added to the A/V latency)\n", avg * 1e3); }
+#else
+    (void)now;
+#endif
+}
 static void sm_tick(int final) {   /* UI thread, every refresh: events polled, the seconds closed */
     const double now = host_now();
+    av_probe_hw(now);
     if (!sm_t0) { sm_t0 = sm_sec_t = now; sm_und_seen = ar_underruns_total(); sm_drop_seen = ar_drops; sm_skip_seen = gs_vi_skipped(); }
     { const uint64_t u = ar_underruns_total(), d = ar_drops, s = gs_vi_skipped();
       if (u > sm_und_seen) { sm_cur.underruns += u - sm_und_seen; sm_hitch('U', (int)(u - sm_und_seen), vb_last); sm_und_seen = u; }
@@ -728,7 +761,7 @@ static int ui_refresh(int x2) {
         else {
             s = -1;
             if (locked && (qd > 0 || took_last)) {   /* a picture was due and is not ready: shown again (a stutter); the game runs earlier */
-                misses++; miss_win++; ph += 0.25; if (ph > 3) ph = 3; calm_until = now + 20;
+                misses++; miss_win++; ph += 0.25; if (ph > 4) ph = 4; calm_until = now + 20;
                 sm_cur.notready++; sm_hitch('N', qd, vb_last);
                 static int nl; if (nl++ < 50) L("host: VB tick %llu: no picture ready (%d waiting): shown again; game phase now %.2f VBlanks earlier\n", (unsigned long long)ticks, qd, ph);
             }
@@ -752,7 +785,7 @@ static int ui_refresh(int x2) {
             if (av_on && now - t_av >= 2) { t_av = now;
                 if (av_ctl_take(&o)) {
                     const double ph0 = ph;
-                    if (o < -12) { if (!av_audio_move(-o - 6, -1) && ph < 2.5) ph += 0.25; }
+                    if (o < -12) { if (!av_audio_move(-o - 6, -1) && ph < 4) { ph += o < -40 ? 0.5 : 0.25; if (ph > 4) ph = 4; } }   /* (big offsets, at start: half VBlanks) */
                     else if (o > 12) { if (ph > -3 && now > calm_until) ph -= 0.25; else av_audio_move(o - 6, 1); }
                     static int nl; if (ph != ph0 && nl++ < 200) L("host: A/V %+.0f ms: game phase now %.2f VBlanks\n", o, ph);
                 }
@@ -1029,7 +1062,8 @@ void host_audio_push(const int16_t *s, int frames) {
         SDL_PauseAudioDevice(adev, 0);   /* silence until the cushion is there */
         audio_state = 1; rs_init();
         {   const char *e = getenv("HG_AUDIO_LAT_MS"); av_dev = e ? atof(e) / 1000 : got.samples / 48000.0; }   /* (the device's own latency: an estimate, see A/V above) */
-        L("host: audio open (48 kHz stereo, %s, buffer %d frames; device latency taken as %.1f ms)\n", SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?", got.samples, av_dev * 1e3);
+        {   const char *e = getenv("HG_AUDIO_OFFSET_MS"); av_user = (e ? atof(e) : settings()->audio_offset) / 1000.0; }
+        L("host: audio open (48 kHz stereo, %s, buffer %d frames; device latency taken as %.1f ms, audio_offset %+.0f ms)\n", SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?", got.samples, av_dev * 1e3, av_user * 1e3);
     }
     if (audio_state < 0 || frames <= 0) return;
     static int qmin = 1 << 30, qmax; static double tlog;
@@ -1082,7 +1116,7 @@ void host_audio_push(const int16_t *s, int frames) {
         ar_n = q + frames;
         {   /* A/V: the last frame pushed reaches the speakers after the ring before it, what SDL holds, the device */
             const double now = host_now(); double held = cb_frames - (now - cb_t) * 48000; if (held < 0) held = 0;
-            const double te = now + (q + frames + held) / 48000.0 + av_dev + (RS_TAPS / 2) * rs_step / 48000.0;
+            const double te = now + (q + frames + held) / 48000.0 + av_dev + av_hw + av_user + (RS_TAPS / 2) * rs_step / 48000.0;
             SDL_AtomicLock(&av_lock); av_in_end = aud_in; av_t_end = te; av_step = rs_step; av_valid = ar_playing; SDL_AtomicUnlock(&av_lock);
         }
     }

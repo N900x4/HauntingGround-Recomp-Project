@@ -89,3 +89,27 @@ Complications:
 - (−) Atlas pages mean one replacement per 256x256 page, which is workable.
 
 Cheapest test: in PCSX2 ≥1.7 enable Graphics → Texture Replacement → "Dump Textures", load the first stage (ST_000) and the title screen. Check that the 14 ST_000 pages and the FIN_000 pages each appear once with stable hashes, and that the dumps are not mixed with framebuffer bytes. Then drop a recoloured page into `textures/SLUS-21075/replacements` and see whether it shows in the 8H-placed stage geometry.
+
+## 6. Extraction with ids and the runtime check (2026-10-25)
+
+Tools: `tools/textures/texdump.py OUT` (every texture on the disc with an id, 7 s), `HG_TEXLOG=FILE` (gs.c: what the GS
+receives and what the game draws with), `tools/textures/texmatch.py MANIFEST TEXLOG`. Code reading with rea + Ghidra
+(R5900 language, `tools/rea/README.md`).
+
+- **id** = `<crc32 of the index bytes>_<crc32 of the 1 KB CLUT>`, both exactly as uploaded (linear, unswizzled), so the
+  runtime computes the same numbers from the image transfers. Disc: **2,063 instances, 1,398 ids** (the census above
+  plus TITLE_BACK.BIN and LOGO_CRI.BIN). Output in `D:\ps2-work\texwork` (`/mnt/NewVolume/ps2-work/texwork`): `source/<id>.png`
+  and `manifest.tsv` (file, blob offset, entry, size, psm). Game data: never committed.
+- **Placement, decompiled** (`vram_register_tex_entry` 0x1bfec0 -> `vram_alloc_tex` 0x1c1e00 -> `vram_upload_tex_clut`
+  0x1c02a0; TEX0 from `vram_build_tex0` 0x1c12e0). Handles: 64 x 0x12 bytes at manager+0x98 (+2 w, +4 h, +6 psm, +8 page,
+  +0xc cpsm or 0xff, +0xe clut page, +0x10 clut index). TBP = page x 0x800 words for PSMT8H/4HL/4HH (the frame buffer's
+  upper bits), else 0xC0000 + page x 0x800; CBP = 0xFC000 + clut page x 0x800 + (index << 11) / (16 if cpsm = CT16
+  else 8). Region 1 turns PSMT8 into 8H and PSMT4 into 4HL. The only caller of libgraph's LoadImage pair
+  (0x10ccb8/0x10cea0) is `vram_upload_tex_clut`; the cache re-upload (0x1bb470), TITLE_BACK (0x1bb010) and 0x1bb230 build
+  their own PATH2 packets.
+- **Checked on the user's session `recordings/20261024-230145`** (to VB 26,000: title, ST_02A, ST_013, ST_021, the
+  EV0002 cutscenes): 182,066 image uploads and 179,620 CLUT uploads (content changes per address), **all disc textures
+  and CLUTs**; the 21,107 others are CT32 16x448 / 16x224 strips at bp 8704 / 12288 (movie frames) and 12 one-off
+  256x256 CT32 uploads at start. Paletted texture setups drawn: 96 map to disc ids (59 ids); 12 read the movie buffer or
+  the frame buffer as indices (palette effects, not replaceable by design). Every on-screen disc texture is identified
+  by its TEX0 and the content at TBP/CBP, which is what the replacement layer needs.

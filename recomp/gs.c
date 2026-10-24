@@ -2300,6 +2300,50 @@ static void vertex_kick(Vtx v, int draw) {
 /* ================================================================== transfers */
 static struct { int active, dir; uint32_t bp, bw, psm; int sx, sy, w, h, x, y; uint64_t carry; int ncarry; } xfer;
 static uint64_t st_xfer_psm[64];
+/* HG_TEXLOG=FILE: which texture data goes where, for the HD texture work (tools/textures/texdump.py, docs/textures.md).
+   Logging only. "UP vb bp bw psm x y w h crc bytes": an image transfer whose content at that address changed (crc32 of
+   its bytes as sent, as texdump.py computes it from the disc); "USE vb tbp tbw psm tw th cbp cpsm csa img clut": a
+   texture setup (TEX0) seen the first time with that content, img and clut the crcs of the last uploads at tbp and cbp
+   (0: none seen). GS thread. */
+static FILE *tl_f; static int tl_on = -1;
+static struct { uint32_t crc, n, want; } tl;
+static struct { uint32_t crc, psm, w, h; } tl_at[16384][4];   /* the last upload at each base pointer: full words, 8H, 4HL, 4HH */
+static int tl_cls(uint32_t psm) { return psm == 0x1B ? 1 : psm == 0x24 ? 2 : psm == 0x2C ? 3 : 0; }
+static uint64_t tl_seen[1 << 16];
+static uint32_t tl_tab[256];
+static void tl_init(void) {
+    const char *e = getenv("HG_TEXLOG"); tl_on = e && *e && (tl_f = fopen(e, "w")) != 0;
+    for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1; tl_tab[i] = c; }
+}
+static void tl_begin(void) {
+    static const uint8_t bits[64] = { [0x00] = 32, [0x01] = 24, [0x02] = 16, [0x0A] = 16, [0x13] = 8, [0x14] = 4, [0x1B] = 8,
+                                      [0x24] = 4, [0x2C] = 4, [0x30] = 32, [0x31] = 24, [0x32] = 16, [0x3A] = 16 };
+    tl.crc = 0xFFFFFFFFu; tl.n = 0; tl.want = (uint32_t)((uint64_t)xfer.w * xfer.h * (bits[xfer.psm & 63] ? bits[xfer.psm & 63] : 32) / 8);
+}
+static void tl_feed(const uint8_t *b, uint32_t n) {
+    if (tl.n >= tl.want) return;
+    if (n > tl.want - tl.n) n = tl.want - tl.n;
+    uint32_t c = tl.crc; for (uint32_t i = 0; i < n; i++) c = tl_tab[(c ^ b[i]) & 255] ^ (c >> 8);
+    tl.crc = c; tl.n += n;
+    if (tl.n < tl.want) return;
+    const uint32_t crc = ~tl.crc;
+    const int k = tl_cls(xfer.psm);
+    if (tl_at[xfer.bp][k].crc != crc || tl_at[xfer.bp][k].psm != xfer.psm) {
+        fprintf(tl_f, "UP %llu %u %u 0x%x %d %d %d %d %08x %u\n", (unsigned long long)cur_vb, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.w, xfer.h, crc, tl.want);
+        tl_at[xfer.bp][k].crc = crc; tl_at[xfer.bp][k].psm = xfer.psm; tl_at[xfer.bp][k].w = (uint32_t)xfer.w; tl_at[xfer.bp][k].h = (uint32_t)xfer.h;
+    }
+}
+static void tl_use(uint64_t t) {
+    const uint32_t tbp = BITS(t, 0, 14), cbp = BITS(t, 37, 14);
+    const uint32_t img = tl_at[tbp][tl_cls(BITS(t, 20, 6))].crc, clut = tl_at[cbp][0].crc;
+    uint64_t k = t ^ ((uint64_t)img << 13) ^ ((uint64_t)clut << 29) ^ (t >> 31) * 0x9E3779B97F4A7C15ull; if (!k) k = 1;
+    for (uint32_t i = (uint32_t)(k * 0x9E3779B97F4A7C15ull >> 48), n = 0; n < (1u << 16); i = (i + 1) & 0xFFFF, n++) {
+        if (tl_seen[i] == k) return;
+        if (!tl_seen[i]) { tl_seen[i] = k; break; }
+    }
+    fprintf(tl_f, "USE %llu %u %u 0x%x %u %u %u 0x%x %u %08x %08x\n", (unsigned long long)cur_vb, tbp, (unsigned)BITS(t, 14, 6), (unsigned)BITS(t, 20, 6),
+            1u << BITS(t, 26, 4), 1u << BITS(t, 30, 4), cbp, (unsigned)BITS(t, 51, 4), (unsigned)BITS(t, 56, 5), img, clut);
+}
 static void xfer_put_px(uint32_t v) {
     if (xfer.y >= xfer.h) return;
     write_px(xfer.bp, xfer.bw, xfer.psm, xfer.sx + xfer.x, xfer.sy + xfer.y, v);
@@ -2310,6 +2354,7 @@ static void xfer_put_px(uint32_t v) {
 }
 static void hwreg_write(uint64_t v) {
     if (!xfer.active) return;
+    if (tl_on > 0) tl_feed((const uint8_t *)&v, 8);
 #ifdef HAVE_VULKAN
     gsvk_xfer_touch();
 #endif
@@ -2332,6 +2377,7 @@ static void hwreg_write(uint64_t v) {
    (PSMT8: 16 pixels in one block row, PSMT4: 32, PSMCT32: 4); same addresses as write_px(). */
 static void xfer_qword(const uint64_t q[2]) {
     if (!xfer.active) return;
+    if (tl_on > 0) tl_feed((const uint8_t *)q, 16);
 #ifdef HAVE_VULKAN
     gsvk_xfer_touch();
 #endif
@@ -2401,6 +2447,8 @@ static void trxdir_write(uint64_t v) {
         xfer.sx = BITS(r_trxpos, 32, 11); xfer.sy = BITS(r_trxpos, 48, 11); xfer.w = BITS(r_trxreg, 0, 12); xfer.h = BITS(r_trxreg, 32, 12);
         xfer.x = xfer.y = 0; xfer.carry = 0; xfer.ncarry = 0;
         if (!xfer.w || !xfer.h) xfer.active = 0;
+        if (tl_on < 0) tl_init();
+        if (tl_on > 0 && xfer.active) tl_begin();
         if (xfer.active && gsw_n) {   /* queued draws must be done with the pages the image goes to */
             uint64_t pg[8] = {0}; mark_pages(pg, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1); gsw_access(pg, 1);
         }
@@ -2453,7 +2501,7 @@ void gs_write_reg(int reg, uint64_t v) {
     case 0x03: r_uv = v; break;
     case 0x04: case 0x0C: { Vtx x = cur_vtx(); x.x = BITS(v, 0, 16); x.y = BITS(v, 16, 16); x.z = BITS(v, 32, 24); x.f = BITS(v, 56, 8); vertex_kick(x, reg == 0x04); break; }
     case 0x05: case 0x0D: { Vtx x = cur_vtx(); x.x = BITS(v, 0, 16); x.y = BITS(v, 16, 16); x.z = (uint32_t)(v >> 32); vertex_kick(x, reg == 0x05); break; }
-    case 0x06: case 0x07: gc[reg - 6].tex0 = v; clut_load(v); break;
+    case 0x06: case 0x07: gc[reg - 6].tex0 = v; clut_load(v); if (tl_on > 0) tl_use(v); break;
     case 0x08: case 0x09: gc[reg - 8].clamp = v; break;
     case 0x0A: r_fog = v; break;
     case 0x14: case 0x15: gc[reg - 0x14].tex1 = v; break;

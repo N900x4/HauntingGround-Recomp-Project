@@ -27,11 +27,13 @@ while [ $# -gt 0 ]; do
 done
 TITLE="Haunting Ground Recomp"
 have() { command -v "$1" >/dev/null 2>&1; }
-ui() {   # ui KIND TEXT   (KIND: info | error)
-  [ $BATCH = 1 ] && { echo "$2"; return; }
-  if have kdialog; then [ "$1" = error ] && kdialog --title "$TITLE" --error "$2" || kdialog --title "$TITLE" --msgbox "$2"
-  elif have zenity; then zenity --"$1" --title="$TITLE" --no-wrap --text="$2" 2>/dev/null
-  else printf '\n%s\n' "$2"; [ -t 0 ] && { printf 'Press Enter. '; read -r _; }; fi
+QDBUS=; for q in qdbus qdbus6 qdbus-qt6 qdbus-qt5; do have $q && { QDBUS=$q; break; }; done   # (kdialog's progress bar is driven over D-Bus)
+ui() {   # ui KIND TEXT   (KIND: info | error; \n in TEXT is a new line)
+  m=$(printf '%b' "$2")
+  [ $BATCH = 1 ] && { printf '%s\n' "$m"; return; }
+  if have kdialog; then [ "$1" = error ] && kdialog --title "$TITLE" --error "$m" || kdialog --title "$TITLE" --msgbox "$m"
+  elif have zenity; then zenity --"$1" --title="$TITLE" --no-wrap --text="$m" 2>/dev/null
+  else printf '\n%s\n' "$m"; [ -t 0 ] && { printf 'Press Enter. '; read -r _; }; fi
 }
 pick_iso() {   # prints the chosen path
   if have kdialog; then kdialog --title "Choose your Haunting Ground disc image (.iso)" --getopenfilename "$HOME" "*.iso *.ISO|Disc images (*.iso)"
@@ -57,18 +59,18 @@ need_build() { [ $FORCE = 1 ] && return 0; [ -x bin/hgboot ] || return 0; grep -
 run_setup() {   # run_setup [ISO]
   set -- "$PY" -u -I engine/src/tools/release/setup.py --root "$ROOT" ${1:+--iso "$1"}
   log "setup: $*"
-  if [ $BATCH = 0 ] && have kdialog && [ -z "$NOTERM" ]; then
+  if [ $BATCH = 0 ] && have kdialog && [ -n "$QDBUS" ]; then
     # progress: kdialog's progress bar fed from setup.py's @progress / @stage lines
     DB=$(kdialog --title "$TITLE" --progressbar "Preparing the game..." 100 2>/dev/null)
     "$@" 2>&1 | while IFS= read -r l; do
       printf '%s\n' "$l" >> "$LOG"
       case "$l" in
-        @progress\ *) [ -n "$DB" ] && qdbus $DB Set "" value "${l#@progress }" >/dev/null 2>&1;;
-        @stage\ *) [ -n "$DB" ] && qdbus $DB setLabelText "${l#@stage }" >/dev/null 2>&1;;
+        @progress\ *) [ -n "$DB" ] && $QDBUS $DB Set "" value "${l#@progress }" >/dev/null 2>&1;;
+        @stage\ *) [ -n "$DB" ] && $QDBUS $DB setLabelText "${l#@stage }" >/dev/null 2>&1;;
         @need-iso|@error\ *|@done) printf '%s\n' "$l" > logs/setup.result;;
       esac
     done
-    [ -n "$DB" ] && qdbus $DB close >/dev/null 2>&1
+    [ -n "$DB" ] && $QDBUS $DB close >/dev/null 2>&1
   elif [ $BATCH = 0 ] && have zenity; then
     "$@" 2>&1 | while IFS= read -r l; do
       printf '%s\n' "$l" >> "$LOG"

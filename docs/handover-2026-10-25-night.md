@@ -6,7 +6,7 @@
 ## Progress (night of 2026-10-26, unattended; newest first)
 
 - **Linux release built and verified** (`scratch/release-linux/HauntingGround-Recomp-0.2-linux-x64.tar.gz`, 1,633.7
-  MB, sha256 2910822...ad74 at commit 67078b4+; rebuild it from the latest commit with `tools/release/mkrelease_linux.py
+  MB, sha256 c55a5354...9b5c, built from 36d1e27 with the 0.2 README; rebuild it from the latest commit with `tools/release/mkrelease_linux.py
   --gcc D:/ps2-work/tools-ext/bootlin-dl/x86-64--glibc--stable-2024.05-1 --gcc-licenses .../bootlin-dl/licenses
   --textures D:/ps2-work/texwork/release_textures`). Unpacked into an empty folder: first start with the user's ISO in
   64 s (copy 1 s, translate 17 s, compile 45 s), ISO untouched, the built game identical to hashA (software and GPU),

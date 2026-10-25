@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""First-start build of the release (run by HauntingGround.exe with the bundled Python; also usable by hand).
+"""First-start build of the release (run by HauntingGround.exe with the bundled Python, or on Linux by
+HauntingGround.sh with the system's python3; also usable by hand).
 
     setup.py --root ROOT [--iso DISC.iso] [--jobs N]
 
@@ -10,7 +11,9 @@ ROOT is the release folder (engine/ holds the sources, Python and the compiler).
      Without --iso the script stops with "@need-iso" (exit status 3) so the launcher can ask for the image.
   2. translate: recomp/bulk2.py writes the C code into ROOT/build/gen
   3. compile and link with the bundled gcc (hgbuild.py, all cores) into ROOT/bin/hgboot.exe, with SDL2.dll,
-     libwinpthread-1.dll and vulkan-1.dll next to it
+     libwinpthread-1.dll and vulkan-1.dll next to it; on Linux with the bundled zig (engine/zig) into ROOT/bin/hgboot,
+     against engine/include (SDL2 and Vulkan headers) and engine/link (link stubs: the system's SDL2 and Vulkan loader
+     are used at run time)
   4. ROOT/bin/build.txt records the release; ROOT/build is deleted.
 Lines for the launcher: "@stage TEXT", "@progress PERCENT", "@error TEXT", "@need-iso", "@done". Everything else is log.
 Nothing here writes to the disc image, and nothing leaves ROOT."""
@@ -157,7 +160,7 @@ def main():
     ap.add_argument('--keep-build', action='store_true')
     a = ap.parse_args()
     root = os.path.abspath(a.root); eng = os.path.join(root, 'engine'); src = os.path.join(eng, 'src')
-    recomp = os.path.join(src, 'recomp'); tc = os.path.join(eng, 'ucrt64')
+    recomp = os.path.join(src, 'recomp'); tc = os.path.join(eng, 'ucrt64'); linux = sys.platform.startswith('linux')
     game = os.path.join(root, 'game'); build = os.path.join(root, 'build'); bindir = os.path.join(root, 'bin')
     disc = json.load(open(os.path.join(HERE, 'disc.json')))
     version = open(os.path.join(eng, 'version.txt')).read().strip()
@@ -201,26 +204,34 @@ def main():
         say('translated in %.1f s' % (time.time() - t0)); progress(30)
         # 3. compile
         stage('Compiling (this takes a few minutes; all CPU cores are used)')
-        gcc = os.path.join(tc, 'bin', 'gcc.exe')
-        if not os.path.exists(gcc): raise Fail('The bundled compiler is missing (%s). Please unzip the release again.' % gcc)
-        env = dict(os.environ); env['PATH'] = os.path.join(tc, 'bin') + os.pathsep + env.get('PATH', '')
+        gcc = os.path.join(eng, 'zig', 'zig') if linux else os.path.join(tc, 'bin', 'gcc.exe')
+        if not os.path.exists(gcc): raise Fail('The bundled compiler is missing (%s). Please unpack the release again.' % gcc)
+        env = dict(os.environ)
+        if not linux: env['PATH'] = os.path.join(tc, 'bin') + os.pathsep + env.get('PATH', '')
+        else:   # zig's caches inside the build folder (deleted at the end): nothing outside ROOT
+            env['ZIG_GLOBAL_CACHE_DIR'] = os.path.join(build, 'zig-cache'); env['ZIG_LOCAL_CACHE_DIR'] = os.path.join(build, 'zig-cache')
         for k in ('C_INCLUDE_PATH', 'CPATH', 'LIBRARY_PATH', 'GCC_EXEC_PREFIX', 'COMPILER_PATH'): env.pop(k, None)
         os.makedirs(bindir, exist_ok=True)
-        exe_tmp = os.path.join(build, 'hgboot.exe')
+        exe_name = 'hgboot' if linux else 'hgboot.exe'
+        exe_tmp = os.path.join(build, exe_name)
         def on_line(line):
             if line.startswith('@progress '):
                 d, t = line.split()[1:3]; progress(30 + 68 * int(d) / int(t)); return True
             return False
         t0 = time.time()
         cmd = [sys.executable, '-u', os.path.join(HERE, 'hgbuild.py'), '--src', recomp, '--gen', gen, '--obj', obj, '--out', exe_tmp, '--cc', gcc]
+        if linux: cmd += ['--target', 'linux', '--sdl-include', os.path.join(eng, 'include', 'SDL2'), '--include', os.path.join(eng, 'include'),
+                          '--lib-dir', os.path.join(eng, 'link')]
         if a.jobs: cmd += ['--jobs', str(a.jobs)]
         r = run_logged(cmd, build, env, on_line)
         if r != 0 or not os.path.exists(exe_tmp): raise Fail('Compiling failed (status %d). The log has the compiler\'s messages.' % r)
         say('compiled and linked in %.1f s' % (time.time() - t0))
         # 4. install
         stage('Finishing')
-        for d in ('SDL2.dll', 'libwinpthread-1.dll', 'vulkan-1.dll'): shutil.copy(os.path.join(tc, 'bin', d), bindir)
-        shutil.move(exe_tmp, os.path.join(bindir, 'hgboot.exe'))
+        if not linux:
+            for d in ('SDL2.dll', 'libwinpthread-1.dll', 'vulkan-1.dll'): shutil.copy(os.path.join(tc, 'bin', d), bindir)
+        shutil.move(exe_tmp, os.path.join(bindir, exe_name))
+        if linux: os.chmod(os.path.join(bindir, exe_name), 0o755)
         with open(os.path.join(bindir, 'build.txt'), 'w', newline='\n') as f:
             f.write('release=%s\nbuilt=%s\nbuild_seconds=%.0f\n' % (version, time.strftime('%Y-%m-%d %H:%M:%S'), time.time() - t_all))
         if not a.keep_build: shutil.rmtree(build, ignore_errors=True)

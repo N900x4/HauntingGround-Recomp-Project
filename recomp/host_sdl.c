@@ -42,7 +42,9 @@ double host_idle;   /* seconds slept to pace the window to real time (HG_SPEEDLO
 #ifdef HAVE_SDL
 #define SDL_MAIN_HANDLED          /* our own main(): no SDL2main, and the console stays */
 #include <SDL.h>
-#include <SDL_syswm.h>
+#ifdef _WIN32
+#include <SDL_syswm.h>     /* (the window's HWND for Vulkan; elsewhere SDL_vulkan.h: no X11 headers needed) */
+#endif
 #if defined HAVE_VULKAN && !defined _WIN32
 #include <SDL_vulkan.h>
 #endif
@@ -413,11 +415,12 @@ static uint64_t ui_present(void) {   /* the timer's way: the next picture (or th
     if (vkmode == 1) {   /* the GPU renderer: set up yet? */
         int r = gsvk_ready();
         if (r > 0) {
-            SDL_SysWMinfo wi; SDL_VERSION(&wi.version); r = -1;
+            r = -1;
 #ifdef _WIN32
+            SDL_SysWMinfo wi; SDL_VERSION(&wi.version);
             if (SDL_GetWindowWMInfo(win, &wi) && gsvk_present_init(wi.info.win.hinstance, wi.info.win.window)) { vkmode = 2; r = 1; }
 #else
-            (void)wi; if (gsvk_present_init_with(ui_mksurf, ui_size)) { vkmode = 2; r = 1; }
+            if (gsvk_present_init_with(ui_mksurf, ui_size)) { vkmode = 2; r = 1; }
 #endif
         }
         if (r < 0) { vkmode = 0; sdl_renderer(); L("host: presenting with SDL\n"); }

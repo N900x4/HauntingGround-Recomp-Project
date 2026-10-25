@@ -183,6 +183,20 @@ static void gsw_drain(void);
 static void gsw_wait_seq(uint64_t seq);
 static void gsw_access(const uint64_t pages[8], int write);
 static void mark_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int x0, int y0, int x1, int y1);
+#if defined(__x86_64__) || defined(__i386__)
+#include <cpuid.h>
+static int cpu_avx2(void) {   /* AVX2 and the OS saving YMM (as __builtin_cpu_supports, which needs libgcc's __cpu_model:
+                                 not in zig's runtime, the Linux release's compiler) */
+    unsigned a, b, c, d;
+    if (!__get_cpuid(1, &a, &b, &c, &d) || !(c & (1u << 27)) || !(c & (1u << 28))) return 0;   /* OSXSAVE, AVX */
+    unsigned lo, hi; __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0)); (void)hi;
+    if ((lo & 6) != 6) return 0;                                                               /* XMM and YMM state */
+    if (!__get_cpuid_count(7, 0, &a, &b, &c, &d)) return 0;
+    return (b >> 5) & 1;                                                                       /* AVX2 */
+}
+#else
+static int cpu_avx2(void) { return 0; }
+#endif
 /* HD replacements (hdtex.c): ids from local memory. hd_pgen: per 8 KB page, the count of transfers when one last wrote
    it (hd_wgen counts them), so a texture setup's id is worked out again only when its pages change; hd_dim: the size
    of the last indexed image sent to each base pointer (a texture may be smaller than TW x TH); hd_pend: an indexed
@@ -659,7 +673,7 @@ static int rows_mine(int y0, int y1) { int n = 0; for (int y = y0; y < y1; y++) 
 static void sprite_spans(const Draw *d, const Vtx *b, int px0, int px1, int py0, int py1, int x0, int y0, float u0, float v0, float du, float dv) {
     const int tex = !d->tme ? 0 : (d->tex.psm == CT32 && !d->tex.bilinear) ? 1 : 2, tfx = d->tex.tfx, tcc = d->tex.tcc, bl = d->abe;
 #if defined(__x86_64__)
-    if (have_avx2 < 0) have_avx2 = __builtin_cpu_supports("avx2") && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
+    if (have_avx2 < 0) have_avx2 = cpu_avx2() && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
     if (have_avx2 && !(d->zte && (d->zread || !d->zmsk)) && (tex != 2 || d->tex.psm == CT32)) {
         const int k = tex == 2 ? 3 : tex;
         for (int y = py0; y < py1; y++) if (ROW_MINE(y)) sprite_row_avx2(d, b, y, px0, px1, x0, u0, du, d->tme ? (int)(v0 + ((y << 4) - y0) * dv) : 0, k);
@@ -708,7 +722,7 @@ static void draw_sprite(const Draw *d, const Vtx *a, const Vtx *b) {
     const int px0 = g.px0, px1 = g.px1, py0 = g.py0, py1 = g.py1, x0 = g.x0, y0 = g.y0; const float u0 = g.u0, v0 = g.v0, du = g.du, dv = g.dv;
     if (sprite_span_ok(d)) { sprite_spans(d, b, px0, px1, py0, py1, x0, y0, u0, v0, du, dv); return; }
 #if defined(__x86_64__)
-    if (have_avx2 < 0) have_avx2 = __builtin_cpu_supports("avx2") && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
+    if (have_avx2 < 0) have_avx2 = cpu_avx2() && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
     if (have_avx2 && tri_simd_ok_ex(d, d->tme && !sprite_tex_overlaps(d, px0, px1, py0, py1, x0, y0, u0, v0, du, dv))) { sprite_vec(d, b, px0, px1, py0, py1, x0, y0, u0, v0, du, dv); return; }
 #endif
     for (int y = py0; y < py1; y++) {
@@ -3251,7 +3265,7 @@ void gs_init(uint8_t *priv) {
     }
     int bad = check_bijective(); if (bad) L("GS: WARNING: T%d column table is not a bijection\n", bad);
 #if defined(__x86_64__)
-    have_avx2 = __builtin_cpu_supports("avx2") && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
+    have_avx2 = cpu_avx2() && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
 #endif
     gsw_init();
 }

@@ -99,7 +99,7 @@ void dump_stats(const char *why) {
     /* profile */
     uint64_t pt = 0; for (int i = 0; i < rec_nfuncs; i++) pt += prof_hist[i];
     if (pt) { L("profile samples %llu, top:\n", (unsigned long long)pt);
-        for (int k = 0; k < 15; k++) { int b = -1; for (int i = 0; i < rec_nfuncs; i++) if (prof_hist[i] && (b < 0 || prof_hist[i] > prof_hist[b])) b = i;
+        for (int k = 0; k < 25; k++) { int b = -1; for (int i = 0; i < rec_nfuncs; i++) if (prof_hist[i] && (b < 0 || prof_hist[i] > prof_hist[b])) b = i;
             if (b < 0) break; L("  0x%08x %llu\n", rec_table[b].addr, (unsigned long long)prof_hist[b]); prof_hist[b] = 0; } }
     { double tot = now() - t_start; L("host time: total %.1fs, VU1 %.1fs, GS draw %.1fs, IOP+SPU2 %.1fs (SPU2 mix %.1fs), DMA/VIF %.1fs, rest (EE code, HLE, output) %.1fs\n",
         tot, tprof[0], tprof[1], tprof[2], tprof[3], tprof[4], tot - tprof[0] - tprof[1] - tprof[2] - tprof[4]); }
@@ -189,7 +189,12 @@ void hw_write128(uint32_t a, const GPR *r) { hw_write(a, r->u64[0], 8); hw_write
 uint8_t *gptr(uint32_t a) { if (a < 0x02000000) return ee_ram + a; uint8_t *p = ram_alias(a); return p ? p : ee_ram; }
 
 /* ------------------------------------------------------------------ profiling + time limit */
-static void on_prof(void) { int i = func_containing(rec_cur); if (i < 0) i = func_index(rec_cur); if (i >= 0) prof_hist[i]++; }
+static long prof_from = -1;   /* HG_HOSTPROF_FROM=N: samples from VBlank N on only */
+static void on_prof(void) {
+    extern uint64_t hle_vblank_count(void);
+    if (prof_from < 0) prof_from = getenv("HG_HOSTPROF_FROM") ? atol(getenv("HG_HOSTPROF_FROM")) : 0;
+    if (prof_from && (long)hle_vblank_count() < prof_from) return;
+    int i = func_containing(rec_cur); if (i < 0) i = func_index(rec_cur); if (i >= 0) prof_hist[i]++; }
 static double time_limit = -1;   /* -t seconds; default 60 headless, unlimited with a window */
 static void time_limit_stop(void) { fprintf(logf_, "host backtrace (guest call chain, innermost first):\n"); host_backtrace(logf_); dump_stats("wall-clock time limit (probably a busy-wait loop; see profile)"); _exit(0); }
 void host_stop_now(void) { host_stop_req = 0; time_limit_stop(); }

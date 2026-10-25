@@ -10,7 +10,9 @@
    is then sampled, in the upscaling copies only, instead of local memory (vk/gs_sprite.comp, COPIES). The exact copy
    of local memory never sees it, so the game and every frame hash are unchanged. A replacement is decoded (worker
    threads, with its mipmaps) as soon as its image has been uploaded (hdtex_image), which the game does while
-   loading; a draw that needs one still being decoded waits for it, so a texture never changes on screen.
+   loading. A draw that needs one still being decoded: with the window, the original is drawn until it is ready (a
+   wait there stalls the game, and the sound runs dry); headless (the gates, replays without a window) the draw waits
+   for it, so the pictures do not depend on timing. HG_HDTEX_WAIT=1 / 0 always / never waits.
    HG_HDTEX=DIR (or hd_textures in hg.ini) names the folder; HG_HDTEX=0 turns it off. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,7 +49,7 @@ typedef struct {
 static Ent *ents; static int nents, cap_ents;
 static int *tab; static uint32_t tabmask;   /* id -> entry, open addressing */
 static int on = -1;
-static uint64_t n_hit, n_miss, n_wait; static double wait_ms; static int nslots;
+static uint64_t n_hit, n_miss, n_wait, n_late; static double wait_ms; static int nslots;
 
 static uint32_t hkey(uint32_t img, uint32_t clut, int csa) { uint64_t h = ((uint64_t)img << 32 | clut) * 0x9E3779B97F4A7C15ull; return (uint32_t)(h >> 32) ^ (uint32_t)csa * 0x85EBCA6Bu; }
 static Ent *find(uint32_t img, uint32_t clut, int csa) {
@@ -174,6 +176,9 @@ int hdtex_get(uint32_t img, uint32_t clut, uint32_t clut16, int sub) {
     if (!e) { n_miss++; return 0; }
     int st = atomic_load(&e->state);
     if (st == 0) { want(e); st = 1; }
+    static int wait = -1;
+    if (wait < 0) { const char *w = getenv("HG_HDTEX_WAIT"); wait = w ? atoi(w) != 0 : !host_window_wanted(); }
+    if ((st == 1 || st == 2) && !wait) { n_late++; return -1; }   /* (still decoding: the original for now; asked again) */
     if (st == 1 || st == 2) {   /* still decoding: wait for it rather than change the texture on screen later */
         const double t0 = host_now(); n_wait++;
         pthread_mutex_lock(&mx);
@@ -188,6 +193,6 @@ int hdtex_get(uint32_t img, uint32_t clut, uint32_t clut16, int sub) {
 }
 void hdtex_stats(void) {
     if (on <= 0) return;
-    L("HD textures: %d on the GPU (%.0f MB), %llu setups replaced, %llu with no replacement, %llu waits for decoding (%.0f ms)\n", nslots, gsvk_hd_mb(),
-      (unsigned long long)n_hit, (unsigned long long)n_miss, (unsigned long long)n_wait, wait_ms);
+    L("HD textures: %d on the GPU (%.0f MB), %llu setups replaced, %llu with no replacement, %llu waits for decoding (%.0f ms), %llu draws of the original while decoding\n", nslots, gsvk_hd_mb(),
+      (unsigned long long)n_hit, (unsigned long long)n_miss, (unsigned long long)n_wait, wait_ms, (unsigned long long)n_late);
 }

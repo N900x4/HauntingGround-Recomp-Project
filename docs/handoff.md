@@ -1,5 +1,9 @@
 # Handoff: where the project stands (2026-10-15)
 
+> **Latest (2026-10-25 night): read `docs/handover-2026-10-25-night.md` first.** Tonight's fixes are on the local
+> branch `wip-2026-10-25-night`, not yet gated or merged; the release plan (Windows + Linux bundles with the HD
+> textures) is there too.
+
 Read this first when resuming. It gives the state, the rules and the next steps. Details are in the other docs.
 
 ## State

@@ -227,10 +227,12 @@ static void fire_vblank(void) {
             lt = now; lidle = host_idle;
         }
         if (every > 0 && vblank_count - v0 >= (uint64_t)every) {
+            extern double gs_producer_wait_s(void); static double pw0; const double pw = gs_producer_wait_s();
+            L("SPEED vb %llu: waiting for the GS thread %.2f ms per VB\n", (unsigned long long)vblank_count, (pw - pw0) / (double)(vblank_count - v0) * 1e3); pw0 = pw;
             double t = host_now(), dt = t - t0, n = (double)(vblank_count - v0), busy = dt - (host_idle - idle0);
-            L("SPEED vb %llu: %.1f VB/s = %.2fx real time; per VB %.2f ms (busy %.2f, worst %.1f): VU1 %.2f, IOP+SPU2 %.2f, other EE-thread %.2f; GS thread busy %.0f%%\n",
+            L("SPEED vb %llu: %.1f VB/s = %.2fx real time; per VB %.2f ms (busy %.2f, worst %.1f): VU1 %.2f, IOP+SPU2 %.2f, DMA/VIF (less VU1, GS) %.2f, other EE-thread %.2f; GS thread busy %.0f%%\n",
               (unsigned long long)vblank_count, n / dt, n / dt / 59.94, dt / n * 1e3, busy / n * 1e3, worst * 1e3, (tprof[0] - p0[0]) / n * 1e3, (tprof[2] - p0[2]) / n * 1e3,
-              (busy - (tprof[0] - p0[0]) - (tprof[2] - p0[2])) / n * 1e3, (tprof[1] - p0[1]) / dt * 100);
+              (tprof[4] - p0[4]) / n * 1e3, (busy - (tprof[0] - p0[0]) - (tprof[2] - p0[2]) - (tprof[4] - p0[4])) / n * 1e3, (tprof[1] - p0[1]) / dt * 100);
             t0 = t; v0 = vblank_count; memcpy(p0, tprof, sizeof p0); idle0 = host_idle; worst = 0;
         }
     }

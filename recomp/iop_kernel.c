@@ -581,27 +581,42 @@ static void iop_run_until(uint64_t target, long budget) {
    event later in the VBlank (SNDDRV's sound tick, a DelayThread) is answered only in the next VBlank's slice, and the
    EE thread waiting for it loses that VBlank (the game's 3-VBlank frames, docs/frame-timing.md). With it, hle.c's
    idle loop runs the IOP to its next event while the EE waits, and the answer comes at the time it would on the
-   console. A replay (HG_PADPLAY) runs with the mode its recording was made with: the "iopsync N" line in pad.txt,
-   and recordings without one (all before 2026-10-25) the old timing; HG_IOPSYNC overrides both. */
+   console. Mode 2 (the default) gives the IOP the console's 36.864 MHz per emulated second (IOP_CLOCK / 59.94 cycles
+   per VBlank of EE time); mode 1 (2026-10-25's recordings) took 8 EE cycles per IOP cycle, but the EE's emulated
+   time counts 300 M a second (HG_EE_MIPS), not 294.9: the IOP ran 1.7 % fast, its sound with it (the ring full,
+   chunks dropped, movie sound ahead of the pictures; playtest 6). A replay (HG_PADPLAY) runs with the mode its
+   recording was made with: the "iopsync N" line in pad.txt, and recordings without one (all before 2026-10-25) the
+   old timing; HG_IOPSYNC=0/1/2 overrides both. */
 static int iop_sync = -1; static int64_t ee_off; static int ee_off_set;   /* (debug) EE requests not answered yet */
 int iop_rpc_open(void) { return ee_rpc_open; }
 int iop_sync_on(void) {
     if (iop_sync >= 0) return iop_sync;
     const char *e = getenv("HG_IOPSYNC"), *play = getenv("HG_PADPLAY");
-    if (e && *e) iop_sync = atoi(e) != 0;
+    if (e && *e) { iop_sync = atoi(e); if (iop_sync < 0 || iop_sync > 2) iop_sync = 2; }
     else if (play && *play) {
         char p[1100], line[512]; snprintf(p, sizeof p, "%s/pad.txt", play);
         FILE *f = fopen(p, "r"); int v; iop_sync = 0;
-        if (f) { while (fgets(line, sizeof line, f)) if (sscanf(line, "iopsync %d", &v) == 1) { iop_sync = v != 0; break; } fclose(f); }
-    } else iop_sync = 1;
-    L("IOP sync %s\n", iop_sync ? "on" : "off (the IOP runs a VBlank ahead)");
+        if (f) { while (fgets(line, sizeof line, f)) if (sscanf(line, "iopsync %d", &v) == 1) { iop_sync = v < 0 || v > 2 ? 2 : v; break; } fclose(f); }
+    } else iop_sync = 2;
+    L("IOP sync %s\n", iop_sync == 2 ? "on" : iop_sync ? "on (mode 1: 8 EE cycles per IOP cycle)" : "off (the IOP runs a VBlank ahead)");
     return iop_sync;
 }
-static uint64_t ee_to_iop(uint64_t eec) {
-    if (!ee_off_set) { ee_off = (int64_t)now - (int64_t)(eec / 8); ee_off_set = 1; }
-    const int64_t t = (int64_t)(eec / 8) + ee_off; return t < 0 ? 0 : (uint64_t)t;
+static uint64_t ee_iop(uint64_t eec) {   /* EE cycles as IOP cycles (rounded down) */
+    extern uint64_t ee_vb_period;
+    if (iop_sync == 1) return eec / 8;
+    return (uint64_t)((unsigned __int128)eec * (uint64_t)(IOP_CLOCK / 59.94) / ee_vb_period);
 }
-static uint64_t iop_to_ee(uint64_t t) { const int64_t e = ((int64_t)t - ee_off) * 8; return e < 0 ? 0 : (uint64_t)e; }
+static uint64_t ee_to_iop(uint64_t eec) {
+    if (!ee_off_set) { ee_off = (int64_t)now - (int64_t)ee_iop(eec); ee_off_set = 1; }
+    const int64_t t = (int64_t)ee_iop(eec) + ee_off; return t < 0 ? 0 : (uint64_t)t;
+}
+static uint64_t iop_to_ee(uint64_t t) {   /* (rounded up: ee_to_iop of the answer is not before t) */
+    extern uint64_t ee_vb_period;
+    const int64_t d = (int64_t)t - ee_off; if (d <= 0) return 0;
+    if (iop_sync == 1) return (uint64_t)d * 8;
+    const uint64_t p = (uint64_t)(IOP_CLOCK / 59.94);
+    return (uint64_t)(((unsigned __int128)(uint64_t)d * ee_vb_period + p - 1) / p);
+}
 void iop_sync_to_ee(uint64_t eec) {   /* run the IOP up to the EE's time (never ahead of it) */
     if (!nmods) return;
     const uint64_t t = ee_to_iop(eec);
@@ -702,6 +717,16 @@ void iop_vblank(void) {
     vblanks++;
     for (int i = 1; i < MAXTH; i++) if (th[i].status == TS_WAIT && th[i].wait == W_VBLANK) make_ready(i);
     iop_raise_irq(IOP_IRQ_VBLANK);
+    {   /* HG_IOPSYNC_AT=N:M (for replays): IOP sync mode M from the game's VBlank N on, e.g. a recording made with mode 1 replayed
+           exactly up to a cutscene, which then plays with mode 2's clock (the IOP's time carries on from where it is) */
+        static long at = -1; static int to; const char *e = at < 0 ? getenv("HG_IOPSYNC_AT") : 0;
+        if (at < 0) { at = 0; if (e && sscanf(e, "%ld:%d", &at, &to) != 2) at = 0; }
+        extern uint64_t hle_vblank_count(void);
+        if (at && (long)hle_vblank_count() >= at && iop_sync_on() && to >= 1 && to <= 2 && to != iop_sync) {
+            extern uint64_t ee_cycles; iop_sync = to; ee_off = (int64_t)now - (int64_t)ee_iop(ee_cycles);
+            L("IOP sync: mode %d from VBlank %llu\n", to, (unsigned long long)hle_vblank_count());
+        }
+    }
     if (iop_sync_on()) { extern uint64_t ee_cycles; iop_sync_to_ee(ee_cycles); return; }
     static uint64_t vtarget; if (!vtarget) vtarget = now;
     vtarget += (uint64_t)(IOP_CLOCK / 59.94);

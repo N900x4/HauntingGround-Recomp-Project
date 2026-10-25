@@ -1,5 +1,9 @@
 # Next session: state, findings and the brief (written 2026-10-15)
 
+> **Latest (2026-10-25 night): read `docs/handover-2026-10-25-night.md` first.** Tonight's fixes are on the local
+> branch `wip-2026-10-25-night`, not yet gated or merged; the release plan (Windows + Linux bundles with the HD
+> textures) is there too.
+
 Read this first, then `docs/handoff.md` (history, rules, paths) and `docs/gpu-renderer.md` (the GPU renderer, 60 fps
 and upscaling in detail). The repo is clean at the commit that added this file.
 

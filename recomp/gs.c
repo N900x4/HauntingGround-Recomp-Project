@@ -201,7 +201,7 @@ static uint32_t hd_crc(uint32_t c, const uint8_t *b, size_t n) {
     for (size_t i = 0; i < n; i++) c = hd_crctab[(c ^ b[i]) & 255] ^ (c >> 8);
     return c;
 }
-static uint32_t hd_img_crc(uint32_t bp, uint32_t bw, int psm, uint32_t w, uint32_t h) {   /* texels as texdump.py reads the disc */
+static uint32_t hd_img_crc_px(uint32_t bp, uint32_t bw, int psm, uint32_t w, uint32_t h) {   /* texels as texdump.py reads the disc */
     uint8_t row[1024]; uint32_t c = 0xFFFFFFFFu; const int four = psm == 0x14 || psm == 0x24 || psm == 0x2C;
     for (uint32_t y = 0; y < h; y++) {
         uint32_t n = 0;
@@ -211,11 +211,51 @@ static uint32_t hd_img_crc(uint32_t bp, uint32_t bw, int psm, uint32_t w, uint32
     }
     return ~c;
 }
-static void hd_clut_crc(uint32_t cbp, uint32_t *c1k, uint32_t *c64) {   /* the CLUT as uploaded: 16 x 16 words, and 8 x 2 */
+static void hd_clut_crc_px(uint32_t cbp, uint32_t *c1k, uint32_t *c64) {   /* the CLUT as uploaded: 16 x 16 words, and 8 x 2 */
     uint32_t px[256]; for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) px[y * 16 + x] = read_px(cbp, 1, CT32, x, y);
     *c1k = ~hd_crc(0xFFFFFFFFu, (const uint8_t *)px, 1024);
     uint32_t q[16]; for (int y = 0; y < 2; y++) for (int x = 0; x < 8; x++) q[y * 8 + x] = read_px(cbp, 1, CT32, x, y);
     *c64 = ~hd_crc(0xFFFFFFFFu, (const uint8_t *)q, 64);
+}
+/* The ids above read every texel through the swizzle (about 1 ms for a 256 x 256 image), and the game sends many
+   textures and CLUTs again every frame: a quick hash of the memory blocks the image covers (in the image's block order,
+   so it does not depend on where the image is; only the bits the format uses) finds the id worked out before.
+   HG_HDTEX_CHECK=1 works out every id both ways and counts the differences (hdtex_stats' line in the log). */
+typedef struct { uint64_t fh; uint32_t geo, a, b; } HdMemo;
+static HdMemo hd_memo[8192];
+static int hd_check = -1; static uint64_t hd_n_fast, hd_n_slow, hd_n_bad;
+static uint64_t hd_blocks(uint32_t bp, uint32_t bw, int psm, uint32_t w, uint32_t h) {
+    const int bx = psm == T4 ? 32 : psm == T8 ? 16 : 8, by = psm == T4 || psm == T8 ? 16 : 8;
+    const uint32_t m = psm == T8H ? 0xFF000000u : psm == T4HL ? 0x0F000000u : psm == T4HH ? 0xF0000000u : 0xFFFFFFFFu;
+    uint64_t f = 0x243F6A8885A308D3ull;
+    for (uint32_t y = 0; y < h; y += by) for (uint32_t x = 0; x < w; x += bx) {
+        const uint32_t blk = (psm == T4 ? addr4(bp, bw, (int)x, (int)y) >> 9 : psm == T8 ? addr8(bp, bw, (int)x, (int)y) >> 8 : addr32(bp, bw, (int)x, (int)y) >> 6) & 16383;
+        const uint32_t *q = &vm[blk * 64];
+        for (int i = 0; i < 64; i += 2) f = (f ^ ((uint64_t)(q[i] & m) | (uint64_t)(q[i + 1] & m) << 32)) * 0x9E3779B97F4A7C15ull, f ^= f >> 29;
+    }
+    return f;
+}
+static HdMemo *hd_memo_at(uint64_t fh, uint32_t geo, int *hit) {
+    const uint32_t i0 = (uint32_t)((fh ^ geo * 0xD6E8FEB86659FD93ull) >> 51);
+    for (uint32_t n = 0; n < 8; n++) { HdMemo *c = &hd_memo[(i0 + n) & 8191]; if (c->geo == geo && c->fh == fh) { *hit = 1; return c; } }
+    *hit = 0; return &hd_memo[(i0 + (uint32_t)(fh & 7)) & 8191];   /* (a miss replaces one of the 8) */
+}
+static uint32_t hd_img_crc(uint32_t bp, uint32_t bw, int psm, uint32_t w, uint32_t h) {
+    if (hd_check < 0) { const char *e = getenv("HG_HDTEX_CHECK"); hd_check = e && *e == '1'; }
+    const uint64_t fh = hd_blocks(bp, bw, psm, w, h); const uint32_t geo = (uint32_t)psm | w << 6 | h << 19 | 1u << 31;
+    int hit; HdMemo *c = hd_memo_at(fh, geo, &hit);
+    if (hit && !hd_check) { hd_n_fast++; return c->a; }
+    const uint32_t v = hd_img_crc_px(bp, bw, psm, w, h); hd_n_slow++;
+    if (hit && c->a != v) hd_n_bad++;
+    c->fh = fh; c->geo = geo; c->a = v; return v;
+}
+static void hd_clut_crc(uint32_t cbp, uint32_t *c1k, uint32_t *c64) {
+    const uint64_t fh = hd_blocks(cbp, 1, CT32, 16, 16); const uint32_t geo = 0x7FFFFFFFu;
+    int hit; HdMemo *c = hd_memo_at(fh, geo, &hit);
+    if (hit && !hd_check) { hd_n_fast++; *c1k = c->a; *c64 = c->b; return; }
+    hd_clut_crc_px(cbp, c1k, c64); hd_n_slow++;
+    if (hit && (c->a != *c1k || c->b != *c64)) hd_n_bad++;
+    c->fh = fh; c->geo = geo; c->a = *c1k; c->b = *c64;
 }
 static void hd_flush(void) {   /* the indexed image whose transfer ended: identified, its replacements decoded */
     if (!hd_pend.on) return;
@@ -225,6 +265,8 @@ static void hd_flush(void) {   /* the indexed image whose transfer ended: identi
     hdtex_image(hd_img_crc(hd_pend.bp, hd_pend.bw, (int)hd_pend.psm, hd_pend.w, hd_pend.h));
 }
 #ifdef HAVE_VULKAN
+static int dl_hit(const uint64_t pg[8]);
+static long dl_log = -1; static uint32_t dl_by[512][8]; static uint64_t cur_vb;   /* (debug, HG_DLLOG: CLUT read-backs) */
 static int vk_live; static void gsvk_live_need_(const uint64_t pages[8], int line); static void gsvk_live_wrote(const uint64_t pages[8]);
 #define gsvk_live_need(pg) gsvk_live_need_(pg, __LINE__)   /* (read-backs are counted by the line that asked for them: the GSVK summary) */
 static void gsvk_xfer_touch(void);
@@ -254,6 +296,11 @@ static void clut_load(uint64_t tex0) {
         uint64_t pg[8] = {0}; const int cps = (cpsm == CT32 || cpsm == CT24) ? CT32 : cpsm == CT16S ? CT16S : CT16;
         if (csm) mark_pages(pg, cbp, BITS(r_texclut, 0, 6), cps, BITS(r_texclut, 6, 6) * 16, BITS(r_texclut, 12, 10), BITS(r_texclut, 6, 6) * 16 + n - 1, BITS(r_texclut, 12, 10));
         else mark_pages(pg, cbp, 1, cps, 0, 0, 15, 15);
+        if (dl_log) {   /* (debug, HG_DLLOG=VB) */
+            const int hit = dl_hit(pg);
+            static int nl; const uint32_t p = (cbp >> 5) & 511;
+            if (hit && (long)cur_vb >= dl_log && nl++ < 400) L("DL vb %llu: CLUT cbp 0x%x (page %u) psm 0x%x cpsm 0x%x csm %d csa %d; the page last drawn by fbp 0x%x fbw %u psm 0x%x scissor to %ux%u zbp 0x%x zpsm 0x%x zbits 0x%x\n",
+                (unsigned long long)cur_vb, cbp, p, psm, cpsm, csm, csa, dl_by[p][0], dl_by[p][1], dl_by[p][2], dl_by[p][3], dl_by[p][4], dl_by[p][5], dl_by[p][6], dl_by[p][7]); }
         gsvk_live_need(pg);
     }
 #endif
@@ -1224,7 +1271,7 @@ static uint64_t vi_r_sub; static double vi_r_wait;
 static double vi_t_match, vi_t_replay, vi_t_compose, vi_t_log, vi_t_present;
 static uint64_t vi_frames, vi_cut, vi_off_cadence, vi_prims, vi_matched, vi_far, vi_carried, vi_st_frames, vi_st_bad, vi_shape_bad; static int vi_selftest;
 /* adaptive interpolation (see vi_adapt_tick) */
-static int vi_adapt, vi_adapt_skip, vi_nosnap;   /* on (this VBlank); the budget says no in-between pictures; no snapshot taken */
+static int vi_adapt, vi_adapt_skip, vi_slow, vi_nosnap;   /* on (this VBlank); the budget / the game's waits (slow) say no in-between pictures; no snapshot taken */
 static uint64_t vi_skip_budget, vi_skip_behind, vi_elig, vi_rep_frames;   /* frames: left out (budget, GPU behind); on cadence; replayed */
 static volatile uint64_t vi_skipped_pics;   /* in-between pictures left out (any thread reads: the F3 overlay) */
 static double vi_p_est = -1, vi_kappa = 2.0;   /* smoothed GPU ms per VBlank with interpolation; a frame's replay / B */
@@ -1367,6 +1414,7 @@ static void gsvk_live_need_(const uint64_t pages[8], int line) {
     gsvk_batch_close(); gsvk_download(m, vm); vk_downloads++;
     for (int i = 0; i < 8; i++) { pg_gpu[i] &= ~m[i]; vk_dl_pages += (uint64_t)__builtin_popcountll(m[i]); }
 }
+static int dl_hit(const uint64_t pg[8]) { for (int i = 0; i < 8; i++) if (pg[i] & pg_gpu[i]) return 1; return 0; }
 static void gsvk_live_wrote(const uint64_t pages[8]) { if (vk_live) for (int i = 0; i < 8; i++) { pg_cpu[i] |= pages[i]; pg_rt[i] &= ~pages[i]; } }
 /* image data is about to be written into local memory (pages xfer_pg, set when the transfer starts). Pages it covers
    completely (xfer_full) need not come back from the GPU first: the game streams textures into pages its effect
@@ -1419,7 +1467,10 @@ static int gsvk_take(const Draw *d, const GsVkSprite *s, int x0, int y0, int x1,
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > 2047) x1 = 2047; if (y1 > 2047) y1 = 2047;
     if (x1 >= x0 && y1 >= y0) {
         mark_pages(w, d->fbp, d->fbw, d->fpsm, x0, y0, x1, y1);
-        if (d->zte && d->ztst != 0) mark_pages(w, d->zbp, d->fbw, d->zpsm, x0, y0, x1, y1);
+        /* the Z buffer: written unless ZMSK; with ZMSK only read (a Z buffer as tall as the frame reaches the CLUTs the
+           game keeps at the end of local memory: marked as written, each CLUT load waited for all the GPU's work,
+           2026-10-25, the stutter before Debilitas' first scene) */
+        if (d->zte && d->ztst != 0) mark_pages(d->zmsk ? r : w, d->zbp, d->fbw, d->zpsm, x0, y0, x1, y1);
     }
     if (!alone && vk_tex) mark_pages(r, d->tex.tbp, d->tex.tbw, d->tex.psm, vk_ua, vk_va, vk_ub, vk_vb);
     if (vk_replay) {   /* into the in-between set: no uploads, no page or picture book-keeping */
@@ -1442,6 +1493,8 @@ static int gsvk_take(const Draw *d, const GsVkSprite *s, int x0, int y0, int x1,
         gsvk_prim(s, cl, 0);
         if (vk_interp) vi_log_rec(s, cl, 0);
         for (int i = 0; i < 8; i++) { vkb_w[i] |= w[i]; vkb_r[i] |= r[i]; if (vk_live) { pg_gpu[i] |= w[i]; pg_rt[i] |= w[i]; } }
+        if (dl_log < 0) dl_log = getenv("HG_DLLOG") ? atol(getenv("HG_DLLOG")) : 0;
+        if (dl_log) for (int i = 0; i < 8; i++) for (uint64_t m = w[i]; m; m &= m - 1) { uint32_t *b = dl_by[i * 64 + __builtin_ctzll(m)]; b[0] = d->fbp; b[1] = d->fbw; b[2] = d->fpsm; b[3] = d->scx1 + 1; b[4] = d->scy1 + 1; b[5] = d->zbp; b[6] = d->zpsm; b[7] = (uint32_t)d->zmsk | (uint32_t)d->zte << 1 | (uint32_t)d->ztst << 2 | (uint32_t)d->scx0 << 8 | (uint32_t)d->scy0 << 20; }
         vkb_nprim++; vkb_curn++; vk_n[kind]++; vk_hr_changes++;
         return vk_live;
     }
@@ -1508,7 +1561,7 @@ static int gsvk_hd(const Draw *d, float *su, float *sv) {
             const int four = t->psm == T4 || t->psm == T4HL || t->psm == T4HH;
             e->res = hdtex_get(e->img, e->c1k, four ? e->c64 : 0, four ? (int)(t->cpsm == CT32 ? (t->csa & 15) : t->csa) : 0);
         }
-        last = e; lwgen = hd_wgen;
+        last = e->res < 0 ? 0 : e; lwgen = hd_wgen;   /* (-1: still being decoded, asked again at the next draw) */
     }
     if (e->res <= 0) return 0;
     if (t->wms == 3 || t->wmt == 3 || (t->wms == 0 && e->w != t->tw) || (t->wmt == 0 && e->h != t->th)) return 0;   /* region repeat; repeating over a larger TW */
@@ -2033,12 +2086,34 @@ static void vi_drop(int j) { if (vi_slot[j] >= 0) { gsvk_pic_release(vi_slot[j])
      14.5 of the 16.7 ms VBlank) the in-between pictures stop, and they come back once P is under the budget minus
      1 ms, after 2 s at the least. While they are off the snapshot copy is left out too.
    - Behind: when a frame completes and the GPU has not finished what was submitted up to the previous VBlank, this
-     frame's in-between picture is left out. */
+     frame's in-between picture is left out.
+   - Slow: the game's thread waits for the GS thread (a full ring) more than HG_VI_SLOW ms per VBlank (default 3; with
+     the window it otherwise waits only for the display): the GS thread is the bottleneck even with the GPU under its
+     budget (it waits for the replays' GPU work, e.g. before Debilitas' first scene at x4: the game at 82 % speed, the
+     sound running dry). Off for 2 s, then tried again; each time it comes back within 10 s the time off doubles (at
+     most 20 s). */
+double gs_producer_wait_s(void);
 static void vi_adapt_tick(uint64_t vb) {
     static double budget = -1; if (budget < 0) { budget = getenv("HG_VI_BUDGET") ? atof(getenv("HG_VI_BUDGET")) : 14.5; if (budget <= 0) budget = 14.5; }
-    static uint64_t vb0, rep0, el0, since; static double g0, t0; static int init;
-    uint64_t ns, nd; double g, w; gsvk_stats(&ns, &nd, &g, &w); const double t = gsvk_tag_ms();
-    if (!init || vb < vb0) { init = 1; vb0 = vb; g0 = g; t0 = t; rep0 = vi_rep_frames; el0 = vi_elig; return; }
+    static double slow = -1; if (slow < 0) { slow = getenv("HG_VI_SLOW") ? atof(getenv("HG_VI_SLOW")) : 3.0; if (slow <= 0) slow = 1e9; }
+    static uint64_t vb0, rep0, el0, since, slow_until, slow_end, vbs0; static double g0, t0, pw0; static int init, slow_hold = 120;
+    uint64_t ns, nd; double g, w; gsvk_stats(&ns, &nd, &g, &w); const double t = gsvk_tag_ms(), pw = gs_producer_wait_s();
+    if (!init || vb < vb0) { init = 1; vb0 = vbs0 = vb; g0 = g; t0 = t; pw0 = pw; rep0 = vi_rep_frames; el0 = vi_elig; return; }
+    {   extern int host_fast_forward(void);   /* (HG_FF: an unpaced replay always waits for the GS thread) */
+        if (host_fast_forward()) { vi_slow = 0; slow_hold = 120; slow_end = 0; pw0 = pw; vbs0 = vb; }
+    }
+    if (vb - vbs0 >= 10) {   /* slow (see above), every 10 VBlanks */
+        const double pwv = (pw - pw0) / (double)(vb - vbs0) * 1e3; pw0 = pw; vbs0 = vb;
+        static int nl;
+        if (vi_slow && vb >= slow_until) {
+            vi_slow = 0; slow_end = vb;
+            if (!vi_adapt_skip && nl++ < 100) L("GSVK: VB %llu: in-between pictures on again (tried after %d VBlanks)\n", (unsigned long long)vb, slow_hold);
+        } else if (!vi_slow && pwv > slow) {
+            slow_hold = slow_end && vb - slow_end < 600 ? (slow_hold * 2 > 1200 ? 1200 : slow_hold * 2) : 120;
+            vi_slow = 1; slow_until = vb + (uint64_t)slow_hold;
+            if (nl++ < 100) L("GSVK: VB %llu: in-between pictures off: the game waited %.1f ms per VBlank for the GS thread (for %d VBlanks)\n", (unsigned long long)vb, pwv, slow_hold);
+        }
+    }
     if (vb - vb0 < 30) return;
     const double n = (double)(vb - vb0), B = (g - g0 - (t - t0)) / n, Bf = B > 0.5 ? B : 0.5, f = (double)(vi_elig - el0) / n;
     const uint64_t nrep = vi_rep_frames - rep0;
@@ -2076,7 +2151,7 @@ static void vi_vblank(uint64_t vb, const uint8_t *priv) {
     int skip = 0;
     if (vi_adapt && cadence) {   /* adaptive: this frame's in-between picture(s) left out? (vi_adapt_tick) */
         vi_elig++;
-        if (vi_adapt_skip || vi_nosnap) { skip = 1; vi_skip_budget++; }
+        if (vi_adapt_skip || vi_nosnap || vi_slow) { skip = 1; vi_skip_budget++; }
         else {   /* behind: the GPU has not finished what was submitted up to `behind` VBlanks ago (HG_VI_BEHIND, default 2:
                     a GPU working one VBlank behind the GS thread is the normal pipeline and keeps up; 1, the old rule,
                     left out about one in-between picture in 15 at x4 in the user's rooms with the GPU at 9 of 16.7 ms) */
@@ -2112,7 +2187,7 @@ static void vi_vblank(uint64_t vb, const uint8_t *priv) {
     }
     else vi_off_cadence++;
     gsvk_batch_close();
-    vi_nosnap = vi_adapt && vi_adapt_skip;   /* no in-between pictures for a while: no snapshot either */
+    vi_nosnap = vi_adapt && (vi_adapt_skip || vi_slow);   /* no in-between pictures for a while: no snapshot either */
     if (vi_nosnap) { vk_have_snap = 0; if (vi_adapt) { gsvk_submit(); gsvk_tag(0); } }
     else {
         if (vi_adapt) { gsvk_submit(); gsvk_tag(1); }
@@ -2993,6 +3068,7 @@ static void wake_consumer(void) {
 }
 /* wait until cond() holds, sleeping on the space condition (signalled by the consumer as it makes progress) */
 static double pw_t[3]; static uint64_t pw_n[3];   /* producer waits: ring full, drain, lag (statistics) */
+double gs_producer_wait_s(void) { return pw_t[0] + pw_t[1] + pw_t[2]; }   /* (hle.c's HG_SPEEDLOG) */
 static int ring_has_space(void); static int ring_empty(void); static int lag_ok(void);
 static void prod_wait(int (*cond)(void)) {
     const int k = cond == ring_has_space ? 0 : cond == ring_empty ? 1 : 2; const double t0 = host_now(); pw_n[k]++;
@@ -3182,7 +3258,7 @@ void gs_init(uint8_t *priv) {
 void gs_dump_stats(void) {
     gs_sync();
 #ifdef HAVE_VULKAN
-    if (hd_live > 0) hdtex_stats();
+    if (hd_live > 0) { hdtex_stats(); L("HD ids: %llu from the quick hash, %llu read texel by texel%s", (unsigned long long)hd_n_fast, (unsigned long long)hd_n_slow, hd_check > 0 ? "" : "\n"); if (hd_check > 0) L(", %llu quick-hash matches with a different id\n", (unsigned long long)hd_n_bad); }
 #endif
     L("GS producer waits: ring full %llu (%.1f s), drain %llu (%.1f s), lag %llu (%.1f s)\n", (unsigned long long)pw_n[0], pw_t[0], (unsigned long long)pw_n[1], pw_t[1], (unsigned long long)pw_n[2], pw_t[2]);
 #ifdef HAVE_VULKAN

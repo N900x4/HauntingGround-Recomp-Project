@@ -75,7 +75,9 @@ int host_window_wanted(void) { const char *w = getenv("HG_WINDOW"); return !(w &
         && (getenv("DISPLAY") || getenv("WAYLAND_DISPLAY"))
 #endif
         ; }
+static volatile int host_ff;   /* HG_FF: before its VBlank (see the pacing in host_vblank) */
 int host_window_active(void) { return active == 1; }
+int host_fast_forward(void) { return host_ff; }   /* HG_FF: before its VBlank */
 static int pad_kind(SDL_GameController *c) {   /* for the button names: PADKIND_* */
     if (!c) return PADKIND_NONE;
     const SDL_GameControllerType t = SDL_GameControllerGetType(c);
@@ -847,6 +849,16 @@ static int ui_refresh(int x2) {
             L("host pacedbg: interval %.2f ms: before the present %.2f (events, take), present call %.2f (fence %.2f acquire %.2f record %.2f submit %.2f present %.2f), wait %.2f; since the last done %.2f at its loop start\n",
               (t - t_last) * 1e3, (t_pc - now) * 1e3, (t_pr - t_pc) * 1e3, gsvk_present_ms[0], gsvk_present_ms[1], gsvk_present_ms[2], gsvk_present_ms[3], gsvk_present_ms[4], (t - t_pr) * 1e3, (now - t_last) * 1e3); } }
         if (t_last > 0) { ivl[ivl_i] = (t - t_last) / k; ivl_i = (ivl_i + 1) % NIVL; if (nivl < NIVL) nivl++; }
+        {   /* presents late several times in a row (the compositor taking one in 3 refreshes, playtest 7: 40 Hz for
+               seconds): the game follows the display's ticks, so it slowed down with it, sound running dry; the lock
+               is dropped at once (the game then follows the host clock) and the check below locks again later */
+            static int late_run;
+            late_run = t_last > 0 && t - t_last > (k + 0.5) * rp ? late_run + 1 : 0;
+            if (locked && late_run >= 6) {
+                L("host: display: %d presents in a row late (%.1f ms apart): not locked\n", late_run, (t - t_last) * 1e3);
+                locked = 0; irregular = 1; rc = 0; sched = t; lock_set(0, 0, 0, 0, 0); late_run = 0;
+            }
+        }
         t_last = t;
     } else t_last = 0;   /* (no present wait: FIFO's blocking paces the loop; the period stays the display mode's) */
     if (nivl >= 120 && rc % 120 == 0) {   /* the refresh period, and whether it locks (with a margin once locked) */
@@ -952,7 +964,13 @@ void host_vblank(uint64_t vb) {
     {   /* keep emulated time at real-time pace while a window is open: VBlanks follow the display's ticks when the
            window is display-locked (see "pacing" above), else 1/59.94 s of the host clock */
         extern int timing_wall; static Uint64 t0; static uint64_t vb0; static int anch; static uint64_t vb_a; static double n_a;
-        if (!timing_wall) {
+        /* HG_FF=N (for replays): no pacing and no sound before VBlank N, so a moment late in a recording is reached
+           quickly and then watched at real time */
+        static long ff = -1; if (ff < 0) ff = getenv("HG_FF") ? atol(getenv("HG_FF")) : 0;
+        host_ff = (long)vb < ff;
+        if (host_ff) { anch = 0; t0 = 0; }
+        else if (ff && (long)vb == ff) L("host: HG_FF: real time from VBlank %ld\n", ff);
+        if (!timing_wall && !host_ff) {
             int on; uint64_t n; double tt, per, ph;
             SDL_AtomicLock(&lk_lock); on = lk_on; n = lk_n; tt = lk_t; per = lk_per; ph = lk_phase; SDL_AtomicUnlock(&lk_lock);
             double now = host_now();
@@ -1065,6 +1083,7 @@ static int rs_run(const int16_t *s, int frames, int16_t *out, int max) {
 }
 void host_audio_push(const int16_t *s, int frames) {
     if (frames > 0) aud_in += (uint64_t)frames;   /* (the SPU2's samples pushed: the A/V sample index) */
+    if (host_ff) return;   /* (HG_FF: fast-forwarding) */
     if (!audio_state) {
         av_init();
         const char *a = getenv("HG_AUDIO");
@@ -1120,7 +1139,16 @@ void host_audio_push(const int16_t *s, int frames) {
     const int q = ar_n; uint64_t und = ar_underruns;
     if (q < qmin) qmin = q;
     if (q > qmax) qmax = q;
-    if (q + frames > AR_MAX) ar_drops++;
+    /* a backlog (the game catching up after a stall gives its sound in a burst) would take the 0.6 % resampling about
+       40 s per 250 ms to play off, the sound late all that while: well above the target for half a second, the new
+       sound is left out until the ring is back near it (one skip instead) */
+    static double t_over; static int shed; const int tgt = ar_target();
+    if (av_on && ar_playing && q > tgt + 48000 * 80 / 1000) { const double tn = host_now(); if (!t_over) t_over = tn; else if (tn - t_over >= 0.5 && !shed) shed = 1; }
+    else t_over = 0;
+    if (shed == 1) { static int nl; if (nl++ < 30) L("host audio: %d ms queued (target %d): the backlog left out\n", q / 48, tgt / 48); shed = 2; }
+    if (shed && q <= tgt + 48000 * 20 / 1000) { shed = 0; t_over = 0; }
+    if (shed) ar_drops++;
+    else if (q + frames > AR_MAX) ar_drops++;
     else {
         int w = (ar_r + q) % AR_CAP;
         for (int i = 0; i < frames; i++) {
@@ -1145,6 +1173,7 @@ void host_audio_push(const int16_t *s, int frames) {
 void host_audio_push(const int16_t *s, int frames) { (void)s; (void)frames; }
 int host_window_wanted(void) { return 0; }
 int host_window_active(void) { return 0; }
+int host_fast_forward(void) { return 0; }
 void host_vblank(uint64_t vb) { (void)vb; }
 void host_rumble(int small, int big) { (void)small; (void)big; }
 void host_shutdown(void) { }

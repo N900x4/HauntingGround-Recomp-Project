@@ -1,8 +1,14 @@
 # Third-party notices: Haunting Ground Recomp release
 
 Haunting Ground Recomp (the launcher `HauntingGround.exe`, the recompiler and the runtime in `engine/src`) is free
-software under the GNU General Public License version 3 or later (`LICENSE.txt`). It contains no code or data from
-Capcom or Sony: the game is built on your PC from your own disc image, and what is built stays on your PC.
+software under the GNU General Public License version 3 or later (`LICENSE.txt`). The game program itself is not in
+this download: it is built on your PC from your own disc image, and what is built stays on your PC.
+
+**The HD textures** in `textures\` are not ours: they are high-resolution versions of the game's own textures (Capcom's
+artwork), made by upscaling them with the AI models 4xHDcube3 and 4x-PBRify_UpscalerV4 and mixing the two
+(`engine\src\tools\textures`). They are included so that owners of the game get the best picture without any setup;
+the game uses them only when it runs from your own disc. They are not covered by this project's licence. Delete the
+`textures` folder (or set "HD textures" to Off in the Options menu) to play with the original textures.
 
 So that you do not have to install anything, the release bundles a C compiler and Python. They are unmodified binaries
 from the MSYS2 project (https://www.msys2.org/, UCRT64 environment) and from python.org. Each keeps its own licence; the

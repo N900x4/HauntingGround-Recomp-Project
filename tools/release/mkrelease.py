@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Build the release folder (and zip) of Haunting Ground Recomp: no game code or data, a launcher that builds the game
-on the player's PC from their own disc image with a bundled compiler and Python.
+"""Build the release folder (and zip) of Haunting Ground Recomp: no game code, a launcher that builds the game on the
+player's PC from their own disc image with a bundled compiler and Python; from 0.2 also the HD texture pack
+(--textures; the user's decision, 2026-10-25; the repository never holds it). tools/release/mkrelease_linux.py makes
+the Linux release.
 
-    python tools/release/mkrelease.py [--out DIR] [--version 0.1] [--msys C:/msys64] [--no-zip]
+    python tools/release/mkrelease.py [--out DIR] [--version 0.2] [--msys C:/msys64] [--textures DIR] [--no-zip]
 
 Run it on the development PC with the python.org Python whose copy is to be bundled (3.14 for 0.1), MSYS2 UCRT64 with
 the packages the README's developer build lists, and a finished development build in recomp/ (recomp/gen and
@@ -11,6 +13,7 @@ DIR/HauntingGround-Recomp-VERSION/ and DIR/HauntingGround-Recomp-VERSION-win64.z
 
 What goes in (see tools/release/README.md):
   HauntingGround.exe            the launcher (tools/release/launcher.c), built here
+  textures/                     the HD replacements (<id>.dds BC7, a few <id>.png), from --textures
   README.txt, LICENSE.txt, THIRD_PARTY_NOTICES.txt
   engine/version.txt
   engine/src/                   the repository's tracked sources the build needs (recomp/, data/, tools/release/),
@@ -173,7 +176,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', default='D:/ps2-work/scratch/release-0.1'); ap.add_argument('--version', default='0.1')
     ap.add_argument('--msys', default='C:/msys64'); ap.add_argument('--no-zip', action='store_true')
-    ap.add_argument('--skip-rule-check', action='store_true')
+    ap.add_argument('--skip-rule-check', action='store_true'); ap.add_argument('--textures', default=None)
     a = ap.parse_args()
     out = os.path.abspath(a.out)
     if norm(out).startswith(norm(REPO) + os.sep) or norm(out) == norm(REPO): raise SystemExit('the release must be built outside the repository')
@@ -237,13 +240,19 @@ def main():
     notes = notes.replace('<!-- PACKAGES -->', '| MSYS2 package (mingw-w64-ucrt-x86_64-...) | Version | Licence | Files bundled |\n|---|---|---|---|\n' + '\n'.join(rows))
     notes = notes.replace('<!-- PYTHON -->', pyver)
     open(os.path.join(S, 'THIRD_PARTY_NOTICES.txt'), 'w', encoding='utf-8', newline='\r\n').write(notes)
-    json.dump({'release': a.version, 'commit': commit, 'python': pyver, 'packages': pkgs}, open(os.path.join(E, 'bundle.json'), 'w'), indent=1)
+    ntex = 0
+    if a.textures:
+        T = os.path.join(S, 'textures'); os.makedirs(T)
+        for f in sorted(os.listdir(a.textures)):
+            if re.fullmatch(r'[0-9a-f]{8}_[0-9a-f]{8}(_c\d+)?\.(dds|png)', f): shutil.copy2(os.path.join(a.textures, f), os.path.join(T, f)); ntex += 1
+        log('textures: %d files, %.1f MB' % (ntex, du(T) / 1e6))
+    json.dump({'release': a.version, 'commit': commit, 'python': pyver, 'packages': pkgs, 'textures': ntex}, open(os.path.join(E, 'bundle.json'), 'w'), indent=1)
     # size report, zip
     for d in ('ucrt64', 'python', 'src', 'licenses'): log('  engine/%-9s %7.1f MB' % (d, du(os.path.join(E, d)) / 1e6))
     log('release folder: %s, %.1f MB' % (S, du(S) / 1e6))
     if not a.no_zip:
         zp = os.path.join(out, name + '-win64.zip')
-        with zipfile.ZipFile(zp, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        with zipfile.ZipFile(zp, 'w', zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as z:
             for dp, dn, fn in os.walk(S):
                 for f in sorted(fn):
                     p = os.path.join(dp, f); z.write(p, os.path.relpath(p, out).replace('\\', '/'))

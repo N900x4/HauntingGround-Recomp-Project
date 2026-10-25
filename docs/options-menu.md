@@ -119,7 +119,7 @@ Native rows are practical and safe. The design (implemented in `recomp/game/opti
 ### The rows
 
 Down from Screen Position (or Up from Controller Type) turns the page: the same panel (the title's "Options" header,
-or the sub-screen's tabs) with seven rows in the game's 32-pixel grid, the game's icons, bars, cursor, arrows, colours,
+or the sub-screen's tabs) with eight rows (HD textures added 2026-10-26) in the game's 32-pixel grid, the game's icons, bars, cursor, arrows, colours,
 sounds and footer:
 
 ```
@@ -128,10 +128,11 @@ sounds and footer:
  [~]  Frame rate        60 fps                30 | 60 | 120 (120 only at native resolution); GPU renderer only
  [+]  Display           Window                Window | Full screen
  [~]  V-Sync            On (smooth)           On (smooth) | Exact 59.94 Hz | Off (may tear)
+ [+]  HD textures       On                    On | Off ("Not installed" without a textures folder; GPU renderer only)
  [pad] Keyboard         Change                -> the keyboard page
  [pad] Controller       PlayStation           -> the controller page (the value: the kind connected)
-      (a note when the renderer differs from the running one, or when the software renderer runs)
-      60 and 120 fps add about 17 ms of delay.
+      one note: the renderer changing at the next start, or the software renderer running (resolution, frame
+      rate and HD need the GPU), or HD at native resolution, else "60 and 120 fps add about 17 ms of delay".
  (x):Select  (^):Back  ([]):Reset Defaults
 ```
 

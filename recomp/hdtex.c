@@ -2,7 +2,9 @@
    GS local memory (docs/textures.md). A replacement is a PNG named after the texture's id, <img>_<clut>.png, with
    img the crc32 of the index bytes and clut the crc32 of the 1 KB CLUT exactly as uploaded (tools/textures/texdump.py
    makes the originals); <img>_<clut>_c<N>.png is the same texture drawn with CLUT sub-palette N (4-bit textures, CSA).
-   The image may be any size; its alpha is 255 = opaque (the GS's 0x80).
+   The image may be any size; its alpha is 255 = opaque (the GS's 0x80). The same name with .dds instead: BC7 blocks
+   (DX10 header, DXGI_FORMAT_BC7_UNORM) with the mip chain (tools/textures/bc7pack.py makes them from the PNGs: a
+   quarter of the video memory, no decoding); a .dds is taken over a .png of the same id.
 
    gs.c works out a texture setup's id from local memory itself (the texels at TBP read back in the disc's byte order,
    and the CLUT at CBP): the game sends some textures rearranged so that they land right (the characters' 8H ones) and
@@ -13,7 +15,9 @@
    loading. A draw that needs one still being decoded: with the window, the original is drawn until it is ready (a
    wait there stalls the game, and the sound runs dry); headless (the gates, replays without a window) the draw waits
    for it, so the pictures do not depend on timing. HG_HDTEX_WAIT=1 / 0 always / never waits.
-   HG_HDTEX=DIR (or hd_textures in hg.ini) names the folder; HG_HDTEX=0 turns it off. */
+   HG_HDTEX=DIR (or hd_textures in hg.ini) names the folder, by default ../textures (the release's textures folder,
+   next to bin/) when there is one; HG_HDTEX=0 turns it off. hd = off in hg.ini (the Options menu's "HD textures")
+   leaves the replacements out at once, without unloading them. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,11 +35,13 @@
 
 #ifdef HAVE_VULKAN
 int gsvk_hd_ok(void);   /* gsvk.c */
-int gsvk_hd_upload(int slot, int w, int h, int levels, const uint8_t *pix);
+int gsvk_hd_upload(int slot, int w, int h, int levels, const uint8_t *pix, int bc7);
+int gsvk_hd_bc7(void);
 double gsvk_hd_mb(void);
 #else
 static int gsvk_hd_ok(void) { return 0; }
-static int gsvk_hd_upload(int slot, int w, int h, int levels, const uint8_t *pix) { (void)slot; (void)w; (void)h; (void)levels; (void)pix; return 0; }
+static int gsvk_hd_bc7(void) { return 0; }
+static int gsvk_hd_upload(int slot, int w, int h, int levels, const uint8_t *pix, int bc7) { (void)slot; (void)w; (void)h; (void)levels; (void)pix; (void)bc7; return 0; }
 static double gsvk_hd_mb(void) { return 0; }
 #endif
 
@@ -43,7 +49,7 @@ typedef struct {
     uint32_t img, clut; int csa;
     char *path;
     _Atomic int state;   /* 0 not wanted yet, 1 queued, 2 decoding, 3 decoded, 4 on the GPU, -1 failed */
-    int w, h, levels; uint8_t *pix;
+    int w, h, levels, bc7; uint8_t *pix;   /* bc7: a .dds of BC7 blocks with its mip chain (else a .png: RGBA, mips made here) */
     int slot;
 } Ent;
 static Ent *ents; static int nents, cap_ents;
@@ -75,7 +81,23 @@ static void mips(Ent *e, uint8_t *base) {   /* the whole chain after level 0, ea
         src = dst; off += (size_t)nw * nh * 4; w = nw; h = nh; e->levels++;
     }
 }
+static uint32_t rd32le(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+static void decode_dds(Ent *e) {   /* DDS with the DX10 header, DXGI_FORMAT_BC7_UNORM (98) or _SRGB (99, read as UNORM) */
+    FILE *f = fopen(e->path, "rb"); long n = -1; uint8_t *b = 0;
+    if (f && !fseek(f, 0, SEEK_END) && (n = ftell(f)) > 148 && !fseek(f, 0, SEEK_SET) && (b = malloc((size_t)n)) && fread(b, 1, (size_t)n, f) != (size_t)n) { free(b); b = 0; }
+    if (f) fclose(f);
+    const uint32_t fmt = b ? rd32le(b + 128) : 0;
+    if (!b || memcmp(b, "DDS ", 4) || memcmp(b + 84, "DX10", 4) || (fmt != 98 && fmt != 99)) { L("HD textures: %s is not a BC7 .dds\n", e->path); free(b); atomic_store(&e->state, -1); return; }
+    const int h = (int)rd32le(b + 12), w = (int)rd32le(b + 16); int lv = (int)rd32le(b + 28); if (lv < 1) lv = 1;
+    size_t need = 0; int l = 0;
+    for (int lw = w, lh = h; l < lv; l++, lw = lw > 1 ? lw / 2 : 1, lh = lh > 1 ? lh / 2 : 1) need += (size_t)((lw + 3) / 4) * ((lh + 3) / 4) * 16;
+    if (w < 1 || h < 1 || w > 16384 || h > 16384 || need > (size_t)n - 148) { L("HD textures: %s is too short\n", e->path); free(b); atomic_store(&e->state, -1); return; }
+    memmove(b, b + 148, need);
+    e->w = w; e->h = h; e->levels = lv; e->pix = b;
+    atomic_store(&e->state, 3);
+}
 static void decode(Ent *e) {
+    if (e->bc7) { decode_dds(e); return; }
     int w, h, n; uint8_t *p = stbi_load(e->path, &w, &h, &n, 4);
     if (!p) { L("HD textures: cannot read %s\n", e->path); atomic_store(&e->state, -1); return; }
     size_t total = 0; for (int lw = w, lh = h; ; lw = lw > 1 ? lw / 2 : 1, lh = lh > 1 ? lh / 2 : 1) { total += (size_t)lw * lh * 4; if (lw == 1 && lh == 1) break; }
@@ -108,35 +130,45 @@ static void want(Ent *e) {   /* queue for decoding (once) */
 }
 
 /* ------------------------------------------------------------------ set-up */
-static int parse_name(const char *s, uint32_t *img, uint32_t *clut, int *csa) {   /* xxxxxxxx_yyyyyyyy[_cN].png */
+static int parse_name(const char *s, uint32_t *img, uint32_t *clut, int *csa, int *bc7) {   /* xxxxxxxx_yyyyyyyy[_cN].png or .dds */
     unsigned a, b; int c = 0, n = 0;
     if (sscanf(s, "%8x_%8x%n", &a, &b, &n) != 2 || n != 17) return 0;
     if (s[n] == '_' && s[n + 1] == 'c') { if (sscanf(s + n + 2, "%d", &c) != 1 || c < 0 || c > 31) return 0; while (s[n + 2] >= '0' && s[n + 2] <= '9') n++; n += 2; }
-    if (strcmp(s + n, ".png") && strcmp(s + n, ".PNG")) return 0;
+    if (!strcmp(s + n, ".dds") || !strcmp(s + n, ".DDS")) *bc7 = 1;
+    else if (!strcmp(s + n, ".png") || !strcmp(s + n, ".PNG")) *bc7 = 0;
+    else return 0;
     *img = a; *clut = b; *csa = c; return 1;
 }
 static void init(void) {
     on = 0;
     const char *dir = getenv("HG_HDTEX");
     if (!dir || !*dir) dir = settings()->hd_textures;
-    if (!dir || !*dir || !strcmp(dir, "0") || !strcmp(dir, "off")) return;
+    if (!dir || !*dir) {   /* the release's folder next to bin/ (the game runs in bin/), if there is one */
+        DIR *t = opendir("../textures"); if (!t) return;
+        closedir(t); dir = "../textures";
+    }
+    if (!strcmp(dir, "0") || !strcmp(dir, "off")) return;
     if (!settings()->renderer) { L("HD textures: %s not used (needs the GPU renderer)\n", dir); return; }
     DIR *d = opendir(dir);
     if (!d) { L("HD textures: no folder %s\n", dir); return; }
     struct dirent *de;
     while ((de = readdir(d))) {
-        uint32_t img, clut; int csa;
-        if (!parse_name(de->d_name, &img, &clut, &csa)) continue;
+        uint32_t img, clut; int csa, bc7;
+        if (!parse_name(de->d_name, &img, &clut, &csa, &bc7)) continue;
         if (nents == cap_ents) { cap_ents = cap_ents ? cap_ents * 2 : 1024; ents = realloc(ents, sizeof *ents * cap_ents); }
         Ent *e = &ents[nents++]; memset(e, 0, sizeof *e);
-        e->img = img; e->clut = clut; e->csa = csa; e->slot = -1;
+        e->img = img; e->clut = clut; e->csa = csa; e->bc7 = bc7; e->slot = -1;
         const size_t len = strlen(dir) + strlen(de->d_name) + 2; e->path = malloc(len); snprintf(e->path, len, "%s/%s", dir, de->d_name);
     }
     closedir(d);
     if (!nents) { L("HD textures: no replacements in %s\n", dir); return; }
     uint32_t sz = 1; while (sz < (uint32_t)nents * 2) sz <<= 1;
     tab = malloc(sizeof *tab * sz); tabmask = sz - 1; for (uint32_t i = 0; i < sz; i++) tab[i] = -1;
-    for (int k = 0; k < nents; k++) { uint32_t i = hkey(ents[k].img, ents[k].clut, ents[k].csa) & tabmask; while (tab[i] >= 0) i = (i + 1) & tabmask; tab[i] = k; }
+    for (int k = 0; k < nents; k++) {   /* (both a .png and a .dds for one id: the .dds) */
+        uint32_t i = hkey(ents[k].img, ents[k].clut, ents[k].csa) & tabmask;
+        while (tab[i] >= 0 && !(ents[tab[i]].img == ents[k].img && ents[tab[i]].clut == ents[k].clut && ents[tab[i]].csa == ents[k].csa)) i = (i + 1) & tabmask;
+        if (tab[i] < 0 || ents[k].bc7) tab[i] = k;
+    }
     queue_ = malloc(sizeof *queue_ * nents);
     int nt = 4; const char *ne = getenv("HG_HDTEX_THREADS"); if (ne && atoi(ne) > 0) nt = atoi(ne);
     for (int k = 0; k < nt; k++) { pthread_t t; pthread_create(&t, 0, worker, 0); pthread_detach(t); }
@@ -150,15 +182,16 @@ int hdtex_wants(uint32_t psm) {   /* (uploads are followed from the first one, b
 }
 
 /* ------------------------------------------------------------------ the GS thread */
+int hdtex_available(void) { return on; }
 void hdtex_image(uint32_t img) {   /* an indexed image is in local memory: decode its replacements now (any CLUT), while
                                       the game is still loading (only when upscaling: at native resolution nothing takes them) */
-    if (on <= 0 || settings_gs_scale() < 2) return;
+    if (on <= 0 || settings_gs_scale() < 2 || !settings()->hd_on) return;
     for (int i = 0; i < nents; i++) if (ents[i].img == img) want(&ents[i]);
 }
 static int to_gpu(Ent *e) {
     if (atomic_load(&e->state) != 3) return 0;
     e->slot = nslots;
-    if (!gsvk_hd_upload(e->slot, e->w, e->h, e->levels, e->pix)) { atomic_store(&e->state, -1); free(e->pix); e->pix = 0; return 0; }
+    if (!gsvk_hd_upload(e->slot, e->w, e->h, e->levels, e->pix, e->bc7)) { atomic_store(&e->state, -1); free(e->pix); e->pix = 0; return 0; }
     nslots++; free(e->pix); e->pix = 0; atomic_store(&e->state, 4);
     return 1;
 }
@@ -174,6 +207,7 @@ int hdtex_get(uint32_t img, uint32_t clut, uint32_t clut16, int sub) {
     Ent *e = find(img, clut, sub);
     if (!e && clut16) e = find(img, clut16, sub);   /* a 16-entry CLUT (64 bytes, TITLE_BACK) */
     if (!e) { n_miss++; return 0; }
+    if (e->bc7 && !gsvk_hd_bc7()) { static int nl; if (!nl++) L("HD textures: the GPU cannot sample BC7 (.dds): those are not used\n"); n_miss++; return 0; }
     int st = atomic_load(&e->state);
     if (st == 0) { want(e); st = 1; }
     static int wait = -1;

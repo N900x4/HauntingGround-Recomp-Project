@@ -162,3 +162,24 @@ copies only), `gs.c` (`gsvk_hd`: ids per texture setup). On with the GPU rendere
   (index-space scaling, outline from 4xHDcube-Alpha on the glyph masks) keeps the colours but still leaves edge
   artifacts at glyph cells. Open: a vector font redrawn into the sheets (the user's choice of font).
 - The folder used: `texwork/hd` = `up_mix` without the 4 font ids (1,394 images).
+
+### 8.1 Playtests 6-7 and the release (2026-10-25 night / 26)
+
+- **Ids by a quick hash.** The game re-uploads many textures every frame; working the id out texel by texel through
+  the swizzle at each upload (and again at the next draw) doubled the GS thread's CPU time (+2 ms per VBlank, the game
+  at 81-86 % speed in playtest 6). Now a 64-bit hash of the memory blocks the image covers (in its block order, only
+  the bits its format uses; `hd_blocks`) finds an id worked out before (`hd_memo`, 8,192 entries); the slow id only for
+  new contents. `HG_HDTEX_CHECK=1` works out every id both ways: 0 differences in 108,763; 99.4 % from the hash.
+- **No waits with the window.** A draw whose replacement is still being decoded draws the original and asks again
+  (`hdtex_get` -1): a wait stalled the game (28 waits, 0.6 s in playtest 6) and the sound ran dry. Headless (gates,
+  replays) it still waits, so pictures do not depend on timing; `HG_HDTEX_WAIT=1` / `0` forces either.
+- **BC7.** `<id>.dds` (DX10 header, BC7_UNORM, the mip chain) is taken over `<id>.png`: a quarter of the video
+  memory, no PNG decoding, and the pack small enough for one release file (the PNGs are 2.4 GB, GitHub allows 2 GB
+  per file). `tools/textures/bc7pack.py IN OUT --enc bc7enc` makes them: the mip chain as `hdtex.c` makes it, each level
+  encoded by bc7enc_rdo built with BC7E (quality 6, perceptual metrics; the encoder and ISPC 1.31.0 are built outside
+  the repository, in `D:\ps2-work\tools-ext`, and not shipped). Level 0 of a test texture: 44.6-46.0 dB PSNR.
+  `gsvk.c` enables `textureCompressionBC` when the device has it (else .dds files are skipped with a log line).
+- **For players**: without `hd_textures` the game uses `../textures` (the release's `textures` folder next to `bin/`)
+  when there is one; the Options menu's **HD textures** row (On / Off; "Not installed" without a folder) and
+  `hd = on|off` in hg.ini switch them at once (the images stay loaded). Release bundles include the pack (the
+  user's decision; the repository never holds it).

@@ -116,3 +116,18 @@ renderers still identical to each other). Made the default on 2026-10-25: `ref/h
 (two runs identical, `HG_VU1CHECK=1` 0 mismatches), G10 pictures re-made. Recordings now carry the mode
 (`iopsync N` in pad.txt); a recording without that line (every one before 2026-10-25) replays with the old timing, so
 `ref/soak.md5` and the user's earlier sessions still replay exactly. `HG_IOPSYNC` overrides both.
+
+**Mode 2 (the default since the night of 2026-10-25).** The first IOP sync (now mode 1) took 8 EE cycles per IOP
+cycle, but the EE's emulated time counts `HG_EE_MIPS` (300 M) per second, not the console's 294.9 M: the IOP ran
+1.7 % fast, and its sound with it, 814.2 samples per VBlank instead of 800.8. With the window the sound ring then
+filled (the resampling's 0.6 % could not absorb it), chunks were dropped and movie sound ran ahead of the pictures,
+12 ms more each second (playtest 6b: "cutscenes are still out of sync"). Mode 2 gives the IOP the console's clock
+per VBlank of EE time: IOP cycles = EE cycles x (36,864,000 / 59.94) / `ee_vb_period` (`iop_kernel.c ee_iop`; the
+inverse rounds up, so an IOP event's EE time never comes before it). 799.8 samples per VBlank headless (the boot
+accounts for the rest); in playtest 7 the user found the cutscenes in sync. Recordings carry `iopsync 2`; `iopsync 1`
+recordings (2026-10-25 day) replay in mode 1, older ones in the old timing. `HG_IOPSYNC=0/1/2` overrides,
+`HG_IOPSYNC_AT=N:M` switches to mode M at the game's VBlank N (a mode-1 recording replayed exactly to a cutscene,
+which then plays with mode 2's clock). Gates in mode 2 (2026-10-26): two runs identical, `HG_VU1CHECK` 0
+mismatches, all four renderers identical on both routes (706 and 746 frames), G5 0 differing batches, the soak
+recording unchanged, saving identical to `ref/save.md5`, audiocheck PASS (4 clicks); `ref/hashA.md5` and
+`ref/cs.md5` re-frozen (the mode-1 sets in git history).

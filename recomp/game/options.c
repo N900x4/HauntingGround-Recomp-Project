@@ -20,6 +20,7 @@
 #include "ee_runtime.h"
 #include "hle.h"
 #include "settings.h"
+#include "hdtex.h"
 #include "game/guest.h"
 
 void set_hook(uint32_t a, RecHook h);
@@ -189,10 +190,10 @@ static void d_columns(Draw *d, int y, int h) {
 
 /* ------------------------------------------------------------------ our pages */
 enum { PG_NONE, PG_DISPLAY, PG_KEYBOARD, PG_PAD };
-enum { R_RENDERER, R_RESOLUTION, R_FPS, R_DISPLAY, R_VSYNC, R_KEYBOARD, R_PAD, NROWS };
-static const char *const row_label[NROWS] = { "Renderer", "Resolution", "Frame rate", "Display", "V-Sync", "Keyboard", "Controller" };
+enum { R_RENDERER, R_RESOLUTION, R_FPS, R_DISPLAY, R_VSYNC, R_HD, R_KEYBOARD, R_PAD, NROWS };
+static const char *const row_label[NROWS] = { "Renderer", "Resolution", "Frame rate", "Display", "V-Sync", "HD textures", "Keyboard", "Controller" };
 static const int row_icon[NROWS] = {
-    SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_PAD, SPR_ICON_PAD,
+    SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_SCREEN, SPR_ICON_PAD, SPR_ICON_PAD,
 };
 #define ROW_Y(r) (84 + 32 * (r))   /* the icon's top; the label 6 below (the game's rows: 84, 244, 276, 308, 340) */
 /* the mapping pages: the keyboard has the 16 buttons and the left stick's 4 directions, the controller 16 buttons */
@@ -258,6 +259,10 @@ static int values(int row, int *v, const char **names) {
         v[k] = VSYNC_MAILBOX; names[k++] = "Exact 59.94 Hz";
         v[k] = VSYNC_OFF; names[k++] = "Off (may tear)";
         break;
+    case R_HD:
+        v[k] = 1; names[k++] = "On";
+        v[k] = 0; names[k++] = "Off";
+        break;
     }
     return k;
 }
@@ -269,6 +274,7 @@ static int current(int row) {
     case R_FPS: return s->fps;
     case R_DISPLAY: return s->fullscreen;
     case R_VSYNC: return s->vsync;
+    case R_HD: return s->hd_on;
     }
     return 0;
 }
@@ -283,8 +289,8 @@ static const char *value_name(int row, int val) {
     const int k = values(row, v, n);
     return k ? n[value_index(row, val)] : "";
 }
-/* resolution and frame rate need the GPU renderer, running now */
-static int row_locked(int row) { return (row == R_RESOLUTION || row == R_FPS) && !settings()->renderer; }
+/* resolution, frame rate and HD textures need the GPU renderer, running now; HD textures a textures folder too */
+static int row_locked(int row) { return ((row == R_RESOLUTION || row == R_FPS || row == R_HD) && !settings()->renderer) || (row == R_HD && hdtex_available() == 0); }
 static void commit(int row, int val) {
     char b[16];
     snprintf(b, sizeof b, "%d", val);
@@ -297,6 +303,7 @@ static void commit(int row, int val) {
     case R_FPS: settings_set("fps", b, "Options menu"); break;
     case R_DISPLAY: settings_set("fullscreen", b, "Options menu"); break;
     case R_VSYNC: settings_set("vsync", val == VSYNC_ON ? "on" : val == VSYNC_OFF ? "off" : "mailbox", "Options menu"); break;
+    case R_HD: settings_set("hd", val ? "on" : "off", "Options menu"); break;
     }
 }
 
@@ -333,7 +340,8 @@ static void draw_display_page(Draw *d, const Opt *o) {
     const Settings *s = settings();
     d_panel(d);
     for (int r = R_RESOLUTION; r <= R_VSYNC; r++) d_row_strip(d, ROW_Y(r));   /* bars where the two-column area was */
-    d_plain(d, ROW_Y(7), 64);                                                 /* the last two rows: notes */
+    d_row_strip(d, ROW_Y(R_PAD));                                             /* (over the Volume row's slider line) */
+    d_plain(d, ROW_Y(8), 32);                                                 /* the last row: a note */
     for (int r = 0; r < NROWS; r++) {
         const int y = ROW_Y(r), edit = o->editing && o->row == r;
         char val[64];
@@ -341,7 +349,7 @@ static void draw_display_page(Draw *d, const Opt *o) {
         d_text(d, 72, y + 6, edit ? COL_EDIT : COL_NORMAL, row_label[r], 16);
         if (r == R_KEYBOARD) snprintf(val, sizeof val, "Change");
         else if (r == R_PAD) snprintf(val, sizeof val, "%s", pad_type_name());
-        else if (row_locked(r)) snprintf(val, sizeof val, "%s", r == R_FPS ? "30 fps" : "Native  640 x 448");
+        else if (row_locked(r)) snprintf(val, sizeof val, "%s", r == R_FPS ? "30 fps" : r == R_HD ? (settings()->renderer ? "Not installed" : "Off") : "Native  640 x 448");
         else snprintf(val, sizeof val, "%s", value_name(r, edit ? o->value : current(r)));
         d_text_centred(d, 352, y + 6, COL_NORMAL, val, 16);
         if (edit) {
@@ -350,9 +358,11 @@ static void draw_display_page(Draw *d, const Opt *o) {
             d_sprite(d, 448, y, SPR_ARROW_R, a);
         }
     }
-    if (s->renderer_next != s->renderer) d_text_centred(d, 256, ROW_Y(7) + 8, COL_NORMAL, "The renderer changes at the next start.", 14);
-    else if (!s->renderer) d_text_centred(d, 256, ROW_Y(7) + 8, COL_NORMAL, "Resolution and frame rate need the GPU renderer.", 14);
-    d_text_centred(d, 256, ROW_Y(8) + 8, COL_NORMAL, "60 and 120 fps add about 17 ms of delay.", 14);
+    const char *note = "60 and 120 fps add about 17 ms of delay.";   /* one line: the most useful note */
+    if (s->renderer_next != s->renderer) note = "The renderer changes at the next start.";
+    else if (!s->renderer) note = "Resolution, frame rate and HD need the GPU renderer.";
+    else if (s->scale == 1 && s->hd_on && hdtex_available() > 0) note = "HD textures show above native resolution.";
+    d_text_centred(d, 256, ROW_Y(8) + 8, COL_NORMAL, note, 14);
     d_sprite(d, 32, ROW_Y(o->row), SPR_CURSOR, 128);
 }
 static void draw_map_page(Draw *d, const Opt *o) {

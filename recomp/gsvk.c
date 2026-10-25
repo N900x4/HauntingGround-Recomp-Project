@@ -66,7 +66,7 @@ static int skip_exact;   /* gsvk_skip_exact() */
    bound in command buffers that are pending). Uploaded in the GS's stream, so it is there before the draws after it;
    its mipmaps come from the CPU (the GS's queue may be compute-only: no blits). */
 enum { HD_MAX = 4096 };
-static int hd_ok; static VkSampler hd_samp; static VkImage hd_img[HD_MAX + 1]; static VkImageView hd_view[HD_MAX + 1]; static VkDeviceMemory hd_mem[HD_MAX + 1];
+static int hd_ok, hd_bc7; static VkSampler hd_samp; static VkImage hd_img[HD_MAX + 1]; static VkImageView hd_view[HD_MAX + 1]; static VkDeviceMemory hd_mem[HD_MAX + 1];
 static double hd_bytes;
 static struct { Buf b; uint64_t id; } hd_stage[256]; static int hd_nstage;
 static void imgbar(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags sa, VkAccessFlags da, VkPipelineStageFlags ss, VkPipelineStageFlags ds);
@@ -217,6 +217,11 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     VkPhysicalDeviceDescriptorIndexingFeatures difw = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES,
         .shaderSampledImageArrayNonUniformIndexing = VK_TRUE, .descriptorBindingSampledImageUpdateAfterBind = VK_TRUE };
     want.samplerAnisotropy = have.samplerAnisotropy;
+    {   /* HD textures as BC7 (hdtex.c, .dds): a quarter of RGBA8's memory */
+        VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(phys, VK_FORMAT_BC7_UNORM_BLOCK, &fp);
+        hd_bc7 = have.textureCompressionBC && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+        want.textureCompressionBC = hd_bc7 ? VK_TRUE : VK_FALSE;
+    }
     VkPhysicalDeviceTimelineSemaphoreFeatures tsw = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES, .timelineSemaphore = VK_TRUE };
     const char *dext[7] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_present_id", "VK_KHR_present_wait", "VK_EXT_present_timing", "VK_EXT_global_priority", "VK_KHR_calibrated_timestamps", "VK_EXT_full_screen_exclusive" };
     if (can_wait) { pif.presentId = VK_TRUE; pwf.presentWait = VK_TRUE; pwf.pNext = 0; tsw.pNext = &pif; }
@@ -486,16 +491,20 @@ int gsvk_poll(uint64_t id) {   /* that submission (and earlier) done? never wait
 void gsvk_tag(int on) { tag_cur = on; }
 double gsvk_tag_ms(void) { return gpu_ms_tag; }
 int gsvk_hd_ok(void) { return state > 0 && hd_ok; }
+int gsvk_hd_bc7(void) { return gsvk_hd_ok() && hd_bc7; }
 double gsvk_hd_mb(void) { return hd_bytes / 1048576.0; }
 /* an HD replacement into slot (levels: the mip chain, level 0 first, each half the one before, packed RGBA) */
-int gsvk_hd_upload(int slot, int w, int h, int levels, const uint8_t *pix) {
-    if (!gsvk_hd_ok() || slot < 0 || slot >= HD_MAX || hd_img[slot]) return 0;
+static VkDeviceSize hd_level_bytes(int lw, int lh, int bc7) { return bc7 ? (VkDeviceSize)((lw + 3) / 4) * ((lh + 3) / 4) * 16 : (VkDeviceSize)lw * lh * 4; }
+int gsvk_hd_upload(int slot, int w, int h, int levels, const uint8_t *pix, int bc7) {   /* RGBA8, or BC7 blocks; the mip chain level after level */
+    if (!gsvk_hd_ok() || slot < 0 || slot >= HD_MAX || hd_img[slot] || (bc7 && !hd_bc7)) return 0;
+    const VkFormat fmt = bc7 ? VK_FORMAT_BC7_UNORM_BLOCK : VK_FORMAT_R8G8B8A8_UNORM;
     for (int i = 0; i < hd_nstage; ) {   /* staging buffers whose copies are done */
         if (hd_stage[i].id <= n_sub_id && gsvk_poll(hd_stage[i].id)) { free_buf(&hd_stage[i].b); hd_stage[i] = hd_stage[--hd_nstage]; } else i++;
     }
     if (hd_nstage == 256) { submit(1); for (int i = 0; i < hd_nstage; i++) free_buf(&hd_stage[i].b); hd_nstage = 0; }
-    VkDeviceSize total = 0; for (int l = 0, lw = w, lh = h; l < levels; l++, lw = lw > 1 ? lw / 2 : 1, lh = lh > 1 ? lh / 2 : 1) total += (VkDeviceSize)lw * lh * 4;
-    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { (uint32_t)w, (uint32_t)h, 1 },
+    if (levels > 16) levels = 16;
+    VkDeviceSize total = 0; for (int l = 0, lw = w, lh = h; l < levels; l++, lw = lw > 1 ? lw / 2 : 1, lh = lh > 1 ? lh / 2 : 1) total += hd_level_bytes(lw, lh, bc7);
+    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt, .extent = { (uint32_t)w, (uint32_t)h, 1 },
         .mipLevels = (uint32_t)levels, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
     if (vkCreateImage(dev, &ii, 0, &hd_img[slot])) { hd_img[slot] = 0; return 0; }
@@ -504,7 +513,7 @@ int gsvk_hd_upload(int slot, int w, int h, int levels, const uint8_t *pix) {
     Buf st = { 0 };
     if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(dev, &ai, 0, &hd_mem[slot])) { vkDestroyImage(dev, hd_img[slot], 0); hd_img[slot] = 0; L("GSVK: no video memory for an HD texture\n"); return 0; }
     vkBindImageMemory(dev, hd_img[slot], hd_mem[slot], 0);
-    VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = hd_img[slot], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+    VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = hd_img[slot], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt,
         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, (uint32_t)levels, 0, 1 } };
     if (vkCreateImageView(dev, &vi, 0, &hd_view[slot]) || !mkbuf(&st, total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
         vkDestroyImage(dev, hd_img[slot], 0); vkFreeMemory(dev, hd_mem[slot], 0); hd_img[slot] = 0; free_buf(&st); return 0; }
@@ -517,7 +526,7 @@ int gsvk_hd_upload(int slot, int w, int h, int levels, const uint8_t *pix) {
     VkBufferImageCopy rg[16]; VkDeviceSize off = 0; int nr = 0;
     for (int l = 0, lw = w, lh = h; l < levels && nr < 16; l++, lw = lw > 1 ? lw / 2 : 1, lh = lh > 1 ? lh / 2 : 1) {
         rg[nr++] = (VkBufferImageCopy){ .bufferOffset = off, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)l, 0, 1 }, .imageExtent = { (uint32_t)lw, (uint32_t)lh, 1 } };
-        off += (VkDeviceSize)lw * lh * 4;
+        off += hd_level_bytes(lw, lh, bc7);
     }
     vkCmdCopyBufferToImage(cmd, st.b, hd_img[slot], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)nr, rg);
     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;

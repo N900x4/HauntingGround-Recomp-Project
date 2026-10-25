@@ -15,4 +15,6 @@ int hdtex_get(uint32_t img, uint32_t clut, uint32_t clut16, int sub);
 /* GS thread, each VBlank: decoded images go up to the GPU */
 void hdtex_vblank(void);
 void hdtex_stats(void);
+/* any thread: 1 there are replacements, 0 none (no folder, no GPU renderer), -1 not looked yet */
+int hdtex_available(void);
 #endif

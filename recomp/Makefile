@@ -42,7 +42,7 @@ $(O)/iop_pad_mc.o: iop_pad_mc.c ee_runtime.h hle.h compat.h settings.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/overrides.o: overrides.c ee_runtime.h hle.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
-$(O)/options.o: game/options.c game/guest.h ee_runtime.h hle.h settings.h
+$(O)/options.o: game/options.c game/guest.h ee_runtime.h hle.h settings.h hdtex.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/gs.o: gs.c ee_runtime.h hle.h compat.h gsvk.h settings.h hdtex.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) $(VK_CFLAGS) -O2 -ffp-contract=off -c $< -o $@

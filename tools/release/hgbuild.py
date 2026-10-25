@@ -21,7 +21,7 @@ RUNTIME = [
     ('overrides', 'overrides.c', []), ('options', 'game/options.c', []), ('settings', 'settings.c', ['SDL']),
     ('gs', 'gs.c', VK + O2FP), ('dmac', 'dmac.c', []), ('host_sdl', 'host_sdl.c', ['SDL'] + VK), ('vu1', 'vu1.c', O2FP),
     ('vu1_ref', 'vu1_ref.c', O2FP), ('ipu', 'ipu.c', ['-O2']), ('iop_cpu', 'iop_cpu.c', ['-O2']),
-    ('iop_kernel', 'iop_kernel.c', ['-O2']), ('spu2', 'spu2.c', ['-O2']), ('compat', 'compat.c', []), ('gsvk', 'gsvk.c', []),
+    ('iop_kernel', 'iop_kernel.c', ['-O2']), ('spu2', 'spu2.c', ['-O2']), ('compat', 'compat.c', []), ('hdtex', 'hdtex.c', VK + ['-O2']), ('gsvk', 'gsvk.c', []),
 ]
 LIBS = ['-lm', '-lpthread', '-lmingw32', '-lSDL2', '-lvulkan-1']
 

@@ -1578,7 +1578,7 @@ static GsVkSprite gsvk_base(const Draw *d) {   /* the draw state every primitive
     s.ate = d->ate; s.atst = d->atst; s.aref = d->aref; s.afail = d->afail; s.abe = d->abe; s.a = d->a; s.b = d->b; s.cc = d->cc; s.d = d->d; s.fix = d->fix;
     s.pabe = d->pabe; s.fba = d->fba; s.colclamp = d->colclamp; s.fge = d->fge; s.need_dst = d->need_dst; s.zte = d->zte; s.ztst = d->ztst; s.fogcol = d->fogcol;
     s.zbp = d->zbp; s.zpsm = d->zpsm; s.zmsk = d->zmsk; s.zread = d->zread; s.date = d->date; s.datm = d->datm; s.fb16 = d->fb16;
-    if (d->tme && vk_ncopy > 1) { if (hd_live < 0) hd_live = hdtex_on(); if (hd_live > 0) s.hd = gsvk_hd(d, &s.hdsu, &s.hdsv); }
+    if (d->tme && vk_ncopy > 1) { if (hd_live < 0) hd_live = hdtex_on(); if (hd_live > 0 && settings()->hd_on) s.hd = gsvk_hd(d, &s.hdsu, &s.hdsv); }
     return s;
 }
 static void gsvk_sprite_prim(const Draw *d, const Vtx *a, const Vtx *b) {

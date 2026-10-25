@@ -167,6 +167,7 @@ void settings_defaults(Settings *s) {
     s->touchpad_select = 1;
     s->audio_offset = 0;
     s->hd_textures[0] = 0;
+    s->hd_on = 1;
 }
 
 /* ------------------------------------------------------------------ values as text */
@@ -186,6 +187,7 @@ static void value_of(const Settings *s, const char *key, char *out, size_t n) {
     else if (!strcmp(key, "touchpad_select")) snprintf(out, n, "%d", s->touchpad_select);
     else if (!strcmp(key, "audio_offset")) snprintf(out, n, "%d", s->audio_offset);
     else if (!strcmp(key, "hd_textures")) snprintf(out, n, "%s", s->hd_textures);
+    else if (!strcmp(key, "hd")) snprintf(out, n, "%s", s->hd_on ? "on" : "off");
     else if (!strncmp(key, "kb.", 3)) {
         for (int i = 0; i < PB_N; i++) if (!strcmp(key + 3, pb_key[i])) snprintf(out, n, "%s", settings_key_name(s->kb[i]));
     } else if (!strncmp(key, "pad.", 4)) {
@@ -240,6 +242,11 @@ static int apply_to(Settings *s, const char *key, const char *v, int swap) {
     if (!strcmp(key, "touchpad_select")) { s->touchpad_select = atoi(v) != 0 || !strcasecmp(v, "on") || !strcasecmp(v, "yes"); return 1; }
     if (!strcmp(key, "audio_offset")) { char *e; const long n = strtol(v, &e, 10); if (*e || e == v || n < -200 || n > 200) return 0; s->audio_offset = (int)n; return 1; }
     if (!strcmp(key, "hd_textures")) { if (strlen(v) >= sizeof s->hd_textures) return 0; snprintf(s->hd_textures, sizeof s->hd_textures, "%s", v); return 1; }
+    if (!strcmp(key, "hd")) {
+        if (!strcasecmp(v, "on") || !strcmp(v, "1")) { s->hd_on = 1; return 1; }
+        if (!strcasecmp(v, "off") || !strcmp(v, "0")) { s->hd_on = 0; return 1; }
+        return 0;
+    }
     if (!strncmp(key, "kb.", 3)) {
         for (int i = 0; i < PB_N; i++) if (!strcmp(key + 3, pb_key[i])) {
             int sc; if (!key_parse(v, &sc)) return 0;
@@ -352,7 +359,8 @@ void settings_save(void) {
     fprintf(f, "\n# sound\n");
     fprintf(f, "audio_offset = %d       # ms: raise it if the sound still seems late (speakers, TV), lower it if early (-200..200)\n", file.audio_offset);
     fprintf(f, "\n# textures\n");
-    fprintf(f, "hd_textures = %s       # a folder of HD replacements (<id>.png, tools/textures), empty for none; used with the GPU renderer when upscaling\n", file.hd_textures);
+    fprintf(f, "hd = %s               # on | off: HD textures, when there are some (the Options menu's \"HD textures\")\n", file.hd_on ? "on" : "off");
+    fprintf(f, "hd_textures = %s       # a folder of HD replacements (<id>.dds or .png, tools/textures); empty: the textures folder next to the game; used with the GPU renderer when upscaling\n", file.hd_textures);
     fclose(f);
     remove(ini_path);
     if (rename(tmp, ini_path)) L("settings: cannot replace %s\n", ini_path);
@@ -427,13 +435,13 @@ int settings_set(const char *key, const char *value, const char *why) {
 void settings_reset(const char *group, const char *why) {
     Settings d, t = eff;
     settings_defaults(&d);
-    if (!strcmp(group, "display")) { t.scale = d.scale; t.fps = d.fps; t.fullscreen = d.fullscreen; t.vsync = d.vsync; }
+    if (!strcmp(group, "display")) { t.scale = d.scale; t.fps = d.fps; t.fullscreen = d.fullscreen; t.vsync = d.vsync; t.hd_on = d.hd_on; }
     else if (!strcmp(group, "keyboard")) memcpy(t.kb, d.kb, sizeof t.kb);
     else if (!strcmp(group, "controller")) { memcpy(t.pad, d.pad, sizeof t.pad); t.vibration = d.vibration; t.lightbar = d.lightbar; }
     else return;
     if (!memcmp(&t, &eff, sizeof t)) return;
     eff = t;
-    if (!strcmp(group, "display")) { file.scale = d.scale; file.fps = d.fps; file.fullscreen = d.fullscreen; file.vsync = d.vsync; }
+    if (!strcmp(group, "display")) { file.scale = d.scale; file.fps = d.fps; file.fullscreen = d.fullscreen; file.vsync = d.vsync; file.hd_on = d.hd_on; }
     else if (!strcmp(group, "keyboard")) memcpy(file.kb, d.kb, sizeof file.kb);
     else { memcpy(file.pad, d.pad, sizeof file.pad); file.vibration = d.vibration; file.lightbar = d.lightbar; }
     L("settings: %s back to the defaults (%s)\n", group, why);

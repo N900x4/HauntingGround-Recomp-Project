@@ -7,8 +7,9 @@ case $(uname -s) in MINGW*|MSYS*|CYGWIN*) HGEXE=hgboot.exe;; *) HGEXE=hgboot;; e
 # usage: audiocheck.sh TAG [RECORDING_DIR [EXE]] [--keep]
 #   default recording ../recordings/20261015-184308 (New Game, intro skipped, the guest room: the 2026-10-15 beep),
 #   default exe recomp/hgboot (hgboot.exe on Windows); outputs in $HG_SCRATCH (default ../scratch next to the repo)
-#   The replay runs with IOP sync on (the default since 2026-10-25) although the default recording predates it, so the
-#   check covers the timing players get; HG_IOPSYNC=0 checks the old timing.
+#   The replay runs with IOP sync mode 2 (the default since the night of 2026-10-25: the console's IOP clock) although
+#   the default recording predates it, so the check covers the timing players get; HG_IOPSYNC=0 checks the old timing,
+#   1 the first IOP sync mode (its IOP ran 1.7 % fast).
 V=$(cd "$(dirname "$0")" && pwd); R=$(cd "$V/../.." && pwd); S=${HG_SCRATCH:-$(cd "$R/.." && pwd)/scratch}
 T=$1; REC=${2:-$R/recordings/20261015-184308}; EXE=${3:-$R/recomp/$HGEXE}
 KEEP=0; for a in "$@"; do [ "$a" = --keep ] && KEEP=1; done
@@ -17,7 +18,7 @@ C=$S/audiocheck_$T; rm -rf $C; mkdir -p $C/rec; cp -rp "$REC/card" "$REC/pad.txt
 LAST=$(grep -E '^[0-9]+ ' "$REC/pad.txt" | tail -1 | cut -d' ' -f1)
 WIN=$(cd $C && pwd -W 2>/dev/null || pwd)
 cd $R/recomp
-env HG_IOPSYNC=${HG_IOPSYNC:-1} HG_GSDRAW=0 HG_GSVK=0 HG_WINDOW=0 HG_PADREC= HG_PADPLAY=$WIN/rec HG_WAV=$WIN/out.wav HG_MAXVB=$((LAST + 60)) \
+env HG_IOPSYNC=${HG_IOPSYNC:-2} HG_GSDRAW=0 HG_GSVK=0 HG_WINDOW=0 HG_PADREC= HG_PADPLAY=$WIN/rec HG_WAV=$WIN/out.wav HG_MAXVB=$((LAST + 60)) \
     nice -n 19 "$EXE" -q -t 6000 > $C/run.log 2>&1
 grep -E "^SPU2:" $C/run.log
 PY=${PYTHON:-$(command -v python3 || command -v python || command -v py || ls /c/Users/*/AppData/Local/Programs/Python/Python3*/python.exe 2>/dev/null | tail -1)}

@@ -111,7 +111,11 @@ primitives and CLUTs go into rings in video memory the CPU writes but never read
 
 `gs.c` keeps the CPU's copy of local memory for what the CPU itself reads, and tracks 8 KB pages: written by the GPU
 since the CPU last read them back (`pg_gpu`), or written by the CPU since they last went up (`pg_cpu`). A page is
-never in both.
+never in both. A draw's Z buffer pages count as written only when Z is written (`ZMSK` 0); with `ZMSK` they are
+read (2026-10-26: Debilitas' first scene draws with a 512 x 448 Z buffer at 0x3380, ZMSK set, which covers pages
+504-505 where the game keeps two CLUTs; marked as written, every CLUT load from them read the page back and waited for
+all the GPU's work, 17,343 read-backs in a session, the game at 82 % speed at x4 + 60. Now 0; G5 0 differing
+batches).
 
 | The CPU... | Before | After |
 |---|---|---|
@@ -218,6 +222,14 @@ shown for two VBlanks (`docs/frame-timing.md`). With `HG_GSVK_INTERP=1`:
   between two unrelated screen positions over it: a visible jump in 13 of 4,350 frames of the user's session). In the
   user's 184308: 2 -> 28 cuts; normal frames match 86 % or more (1st percentile).
 
+- **Slow (2026-10-26).** With the window, the game's thread should only wait for the display. When it waits more than
+  `HG_VI_SLOW` ms (3) per VBlank for the GS thread (the ring full: `gs_producer_wait_s`, checked every 10 VBlanks),
+  the GS thread is the bottleneck although the GPU is under its budget (it waits for the replays' GPU work: before
+  Debilitas' first scene headless 1.84x real time without interpolation, 0.89x with), so the in-between pictures stop
+  for 2 s (the frame shown as at 30 fps), then are tried again; each time it comes back within 10 s the time off
+  doubles (at most 20 s). Ignored while `HG_FF` fast-forwards. On the user's recordings: Debilitas' scene and the chase
+  after it 0 late pictures and 0 sound underruns (were 30-35 and 12-14). The real fix is replays submitted without the
+  GS thread waiting (Next).
 - **Shape check (2026-10-25, the user's report: a glitch in the loading screen's spinning globe).** Only the in-between
   pictures had it: long cyan shards across the armillary rings. The rings repeat one part, so a piece culled in one
   frame was paired (as the only one with its identity) with its twin across the ring, and drawn halfway between the
@@ -233,6 +245,13 @@ primitive); without that read, normal GPU rendering went from 9.5 to 8.4 ms per 
 resolution since phase 1; with upscaling it is GPU-bound (three replays per frame: x5 55 %).
 
 ## Presenting the window (phase 1)
+
+**Display lock dropped at once (2026-10-26).** Display-locked pacing makes the game follow the display's refreshes. In
+playtest 7 KWin took one present in three (25 ms apart, 40 Hz) for some seconds and the game slowed down with it (33
+to 50 % speed, the sound running dry); the lock check (every 120 refreshes, over a long window) let go only later. Now
+six presents in a row later than their refreshes drop the lock at once (the game then follows the host clock; the
+usual check locks again once the presents are regular). Not reproducible in gamescope (the same moment replayed there
+is clean): to be confirmed live.
 
 With the GPU renderer the window's pictures never leave video memory:
 - `gsvk_pic()` (GS thread) composes a picture as before and copies it into one of 12 picture images

@@ -5,6 +5,21 @@
 
 ## Progress (night of 2026-10-26, unattended; newest first)
 
+- **Linux release built and verified** (`scratch/release-linux/HauntingGround-Recomp-0.2-linux-x64.tar.gz`, 1,633.7
+  MB, sha256 2910822...ad74 at commit 67078b4+; rebuild it from the latest commit with `tools/release/mkrelease_linux.py
+  --gcc D:/ps2-work/tools-ext/bootlin-dl/x86-64--glibc--stable-2024.05-1 --gcc-licenses .../bootlin-dl/licenses
+  --textures D:/ps2-work/texwork/release_textures`). Unpacked into an empty folder: first start with the user's ISO in
+  64 s (copy 1 s, translate 17 s, compile 45 s), ISO untouched, the built game identical to hashA (software and GPU),
+  the launcher writes hg.ini, records, finds ../textures by itself; kdialog progress checked in gamescope. Compiler:
+  **Bootlin gcc 13.3** (zig's clang took 4-8 min per compiled VU1 program: dropped); `recomp/glibc23.c` keeps the game at
+  glibc 2.34. Archive is .tar.gz (the toolchain has symlinks).
+- **Windows bundle not built**: the Windows drive (`/dev/nvme0n1p3`) is not mounted and mounting needs the user's
+  password (a udisks attempt at 01:20 was cancelled; a polkit dialog may have flashed). `mkrelease.py` (now with
+  `--textures`) is Windows-only (MSYS2 bash/pacman). Options for the user: boot Windows ~15 min and run it there, or
+  mount the drive read-only (`udisksctl mount -b /dev/nvme0n1p3 -o ro`) so a session can port the staging to Linux and
+  test under Wine.
+- README, known-issues and `docs/release/github-release-0.2.md` written for 0.2 (version number to be confirmed).
+
 - **All gates passed in IOP sync mode 2 and the work is merged into `main`** (fast-forward; the WIP branch is gone):
   determinism + `HG_VU1CHECK` 0 mismatches; G1/G2 all renderers identical (hashA, cs re-frozen); G5 0 differing
   batches; G6 0 of 1,737; G3 soak unchanged; saving identical; audiocheck PASS (now in mode 2); options test two runs

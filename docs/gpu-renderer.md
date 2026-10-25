@@ -218,6 +218,14 @@ shown for two VBlanks (`docs/frame-timing.md`). With `HG_GSVK_INTERP=1`:
   between two unrelated screen positions over it: a visible jump in 13 of 4,350 frames of the user's session). In the
   user's 184308: 2 -> 28 cuts; normal frames match 86 % or more (1st percentile).
 
+- **Shape check (2026-10-25, the user's report: a glitch in the loading screen's spinning globe).** Only the in-between
+  pictures had it: long cyan shards across the armillary rings. The rings repeat one part, so a piece culled in one
+  frame was paired (as the only one with its identity) with its twin across the ring, and drawn halfway between the
+  two. A pair now has to keep its shape (each edge may turn or stretch by about 40 degrees or 1.7x, plus 2 pixels,
+  `vi_shape_ok`); one that does not moves as an unmatched triangle. The globe is clean in all 30 in-between pictures
+  checked; over the user's playtest-5 session 24,752 of about 125 million pairs were refused (0.02 %); G10 and G1
+  unchanged.
+
 Found on the way: `gsvk_prim` read back the primitive ring, which lives in video memory over PCIe (microseconds per
 primitive); without that read, normal GPU rendering went from 9.5 to 8.4 ms per VBlank.
 

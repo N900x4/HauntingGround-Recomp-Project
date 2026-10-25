@@ -1180,7 +1180,7 @@ static unsigned vk_conf_gen;   /* bumped by vk_reconfigure: pictures composed be
 static uint32_t vk_disp_fbp = ~0u;
 static uint64_t vi_r_sub; static double vi_r_wait;
 static double vi_t_match, vi_t_replay, vi_t_compose, vi_t_log, vi_t_present;
-static uint64_t vi_frames, vi_cut, vi_off_cadence, vi_prims, vi_matched, vi_far, vi_carried, vi_st_frames, vi_st_bad; static int vi_selftest;
+static uint64_t vi_frames, vi_cut, vi_off_cadence, vi_prims, vi_matched, vi_far, vi_carried, vi_st_frames, vi_st_bad, vi_shape_bad; static int vi_selftest;
 /* adaptive interpolation (see vi_adapt_tick) */
 static int vi_adapt, vi_adapt_skip, vi_nosnap;   /* on (this VBlank); the budget says no in-between pictures; no snapshot taken */
 static uint64_t vi_skip_budget, vi_skip_behind, vi_elig, vi_rep_frames;   /* frames: left out (budget, GPU behind); on cadence; replayed */
@@ -1679,6 +1679,20 @@ static int vi_dist(const VkLogEnt *a, const VkLogEnt *b) {
     for (int k = 0; k < nv; k++) d += abs(a->w[k].x - b->w[k].x) + abs(a->w[k].y - b->w[k].y);
     return d;
 }
+/* A matched triangle must keep its shape: each edge may turn or stretch between two frames (a spinning or approaching
+   object), by at most about 40 degrees or 1.7x, plus 2 pixels. A partner that fails is another copy of a repeated
+   part (the loading screen's armillary rings: a piece culled in one frame paired with its twin across the ring, which
+   halfway between the two drew long shards); the triangle then moves as an unmatched one. */
+static int vi_shape_ok(const VkLogEnt *e, const VkLogEnt *f) {
+    if (e->prim < 3 || e->prim > 5) return 1;
+    for (int k = 0; k < 3; k++) {
+        const int j = (k + 1) % 3;
+        const double ex = e->w[j].x - e->w[k].x, ey = e->w[j].y - e->w[k].y, fx = f->w[j].x - f->w[k].x, fy = f->w[j].y - f->w[k].y;
+        const double dx = ex - fx, dy = ey - fy, l2 = fmax(ex * ex + ey * ey, fx * fx + fy * fy);
+        if (dx * dx + dy * dy > 0.5 * l2 + 32.0 * 32.0) return 0;
+    }
+    return 1;
+}
 /* Motion field, per render target: 16-pixel cells holding the average movement (previous frame minus this one, in
    1/16 pixel) of the vertices of triangles matched without ambiguity; empty cells take their neighbours' value. */
 enum { VIF_N = 64 };
@@ -1740,6 +1754,7 @@ static void vi_match(const VkLog *P, const VkLog *C, int *match) {
             const VkLogEnt *e = &C->e[kc[b].idx], *f = &P->e[kp[a].idx];
             const int nv = vi_nvtx(e->prim); int far = f->prim != e->prim;
             for (int k = 0; k < nv && !far; k++) far = abs(e->w[k].x - f->w[k].x) > 64 * 16 || abs(e->w[k].y - f->w[k].y) > 64 * 16;
+            if (!far && !vi_shape_ok(e, f)) { far = 1; vi_shape_bad++; }
             if (!far) {
                 match[kc[b].idx] = kp[a].idx; used[kp[a].idx] = 1;
                 if (e->prim >= 3 && e->prim <= 5) { ViField *F = vif_get(e->fbp, 1);
@@ -1758,7 +1773,7 @@ static void vi_match(const VkLog *P, const VkLog *C, int *match) {
         size_t lo = 0, hi = np; while (lo < hi) { size_t m = (lo + hi) / 2; if (kp[m].key < kc[b].key) lo = m + 1; else hi = m; }
         int best = -1, bd = 1 << 30;
         for (size_t j = lo; j < np && kp[j].key == kc[b].key; j++) {
-            const int c = kp[j].idx; if (used[c] || P->e[c].prim != e->prim) continue;
+            const int c = kp[j].idx; if (used[c] || P->e[c].prim != e->prim || !vi_shape_ok(e, &P->e[c])) continue;
             int dd = 0; for (int k = 0; k < nv; k++) dd += abs(P->e[c].w[k].x - e->w[k].x - ex[k]) + abs(P->e[c].w[k].y - e->w[k].y - ey[k]);
             if (dd < bd) { bd = dd; best = c; }
         }
@@ -3089,8 +3104,8 @@ void gs_dump_stats(void) {
     }
     if (vi_selftest) L("GSVK selftest: %llu frames replayed with no movement, %llu differ from the real frame\n", (unsigned long long)vi_st_frames, (unsigned long long)vi_st_bad);
     if (vk_interp) L("GSVK interpolation time: match %.1f s, replay %.1f s, compose %.1f s, logging %.1f s, presenting %.1f s; %llu submissions during replays, waiting %.1f s\n", vi_t_match, vi_t_replay, vi_t_compose, vi_t_log, vi_t_present, (unsigned long long)vi_r_sub, vi_r_wait / 1000.0);
-    if (vk_interp) L("GSVK interpolation: %llu in-between pictures, %llu camera cuts, %llu frames off the 30 Hz cadence; %llu primitives replayed, %llu moved halfway, %llu too far, %llu carried along by neighbours\n",
-        (unsigned long long)vi_frames, (unsigned long long)vi_cut, (unsigned long long)vi_off_cadence, (unsigned long long)vi_prims, (unsigned long long)vi_matched, (unsigned long long)vi_far, (unsigned long long)vi_carried);
+    if (vk_interp) L("GSVK interpolation: %llu in-between pictures, %llu camera cuts, %llu frames off the 30 Hz cadence; %llu primitives replayed, %llu moved halfway, %llu too far, %llu carried along by neighbours; %llu pairs refused for their shape\n",
+        (unsigned long long)vi_frames, (unsigned long long)vi_cut, (unsigned long long)vi_off_cadence, (unsigned long long)vi_prims, (unsigned long long)vi_matched, (unsigned long long)vi_far, (unsigned long long)vi_carried, (unsigned long long)vi_shape_bad);
     if (vk_interp && vi_elig) L("GSVK adaptive interpolation: %llu in-between pictures left out (%llu of %llu frames: %llu for the GPU budget, %llu with the GPU behind); kappa %.2f\n",
         (unsigned long long)vi_skipped_pics, (unsigned long long)(vi_skip_budget + vi_skip_behind), (unsigned long long)vi_elig, (unsigned long long)vi_skip_budget, (unsigned long long)vi_skip_behind, vi_kappa);
     if (vkchk_from >= 0) {

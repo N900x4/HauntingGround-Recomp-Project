@@ -37,8 +37,8 @@ Last commit before this doc: `bf60152`.
 - **The game's 3-VBlank frames** (`4b6e687`, details in `docs/frame-timing.md`): 5 % of frames held 50 ms because
   SNDDRV's RPC (sceSifCallRpc, command 0x26) was answered a VBlank late: the emulated IOP ran a VBlank ahead.
   `HG_IOPSYNC=1` keeps the IOP's time with the EE's: 131 -> 0 such frames in the user's session, 51 -> 0 on the G2
-  route, audiocheck PASS. **Off by default: it changes the emulation's timing, so every reference (hashA, cs, soak,
-  pictures) must be re-frozen and old recordings no longer replay the same after about VB 3,000. The user decides.**
+  route, audiocheck PASS. **The user made it the default (2026-10-25)**: hashA, cs, save and the G10 pictures
+  re-frozen; recordings carry the mode (`iopsync N`), older ones replay with the old timing (soak still identical).
 - **Pop-in** (still seen in playtest 5): not a texture swap, late upload or texture LOD (HG_TEXLOG_ALL: the characters'
   textures never change within a shot; `DNL_000H.TEX` is a recoloured costume). Left: a geometry LOD or something only
   in the live window. Needs an F9 mark.
@@ -48,6 +48,8 @@ Last commit before this doc: `bf60152`.
   **4xHDcube3** (licence loosened 2026-10-19: outputs free) and **4x-PBRify_UpscalerV4** (CC0), in
   `D:\ps2-work\texwork\up_*`; review page `texwork/review/index.html`. PBRify is the more faithful on faces (HDcube3
   invents speckles on skin); HDcube3 is cleaner on lace and patterns; alpha (4xHDcube-Alpha) clean on both.
+  **The user chose a mix** (2026-10-25): `tools/textures/mix.py` blends per texel, PBRify on skin and smooth areas,
+  HDcube3 on edges and patterns; all 1,398 in `texwork/up_mix` (docs/textures.md section 7).
 - **rea + Ghidra** for the EE: `tools/rea/README.md` (user-local Ghidra 12.1.4 with ghidra-emotionengine-reloaded;
   rea refuses the PS2's ELF flags, so a patched scratch copy; MCP servers `rea` and `rea-ps2`).
 - **Smoothness B** (40 fps while not locked): only in playtest 4, while the window's surface was recreated three

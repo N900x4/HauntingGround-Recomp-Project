@@ -113,3 +113,21 @@ receives and what the game draws with), `tools/textures/texmatch.py MANIFEST TEX
   256x256 CT32 uploads at start. Paletted texture setups drawn: 96 map to disc ids (59 ids); 12 read the movie buffer or
   the frame buffer as indices (palette effects, not replaceable by design). Every on-screen disc texture is identified
   by its TEX0 and the content at TBP/CBP, which is what the replacement layer needs.
+
+## 7. Upscaling: two models, mixed (2026-10-25)
+
+Tools: `tools/textures/upscale.py` (a spandrel model on the GPU, as chaiNNer runs it, with chaiNNer's bundled
+Python), `compare.py` (review crops), `mix.py` (the mix below). Outputs in `texwork/` (game data, never committed).
+
+- **Models** (free, hashes checked): **4x-PBRify_UpscalerV4** (DAT, CC0) and **4xHDcube3** (ESRGAN; licence loosened
+  2026-10-19, outputs free), alpha with **4xHDcube-Alpha**. All 1,398 textures with each on the RTX 5090: HDcube3 258 s,
+  PBRify 995 s (`up_4xHDcube3_500k/`, `up_4x-PBRify_UpscalerV4/`).
+- **What each does best** (review page `texwork/review/index.html`): PBRify is faithful and smooth, so it is better on
+  skin and flat areas, where HDcube3 invents speckles. HDcube3 is crisper on edges and patterns (lace, embroidery,
+  stone joints).
+- **The mix** (the user's choice, 2026-10-25; `up_mix/`, weights in `mask_mix/`): a weight per source texel, PBRify
+  where the 5 x 5 local luma deviation is low (below 2.5 all PBRify, above 7 all HDcube3) and, in the character
+  textures (`/O_*/`) only, on skin tones (YCbCr box) where the deviation is below 6-12 (cream lace is not skin).
+  The weight is upscaled and blurred by about one source texel, so there are no seams; alpha comes from HDcube3. Over
+  all 1,398 textures, PBRify's share is 33 % on average, median 22 %. 3.5 min on the CPU.
+  `python3 mix.py SRC MANIFEST PBRIFY_DIR HDCUBE3_DIR OUT [--mask DIR]`.

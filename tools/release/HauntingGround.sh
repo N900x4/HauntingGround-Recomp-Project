@@ -2,7 +2,7 @@
 # Haunting Ground Recomp: the Linux launcher (what HauntingGround.exe, tools/release/launcher.c, does on Windows).
 # First start: asks for the player's own disc image and runs engine/src/tools/release/setup.py with the system's
 # python3: the image is checked (read-only), the game files are copied out and the game is translated and compiled with
-# the bundled zig into bin/hgboot (a few minutes; logs/launcher.log). Then it writes a default hg.ini (the GPU
+# the bundled gcc into bin/hgboot (a few minutes; logs/launcher.log). Then it writes a default hg.ini (the GPU
 # renderer; the game falls back to the software renderer by itself if Vulkan fails) and starts the game in bin/ with
 # HG_INI=../hg.ini and HG_PADREC=auto, its output in logs/play.log (the one before in logs/play.prev.log). Later
 # starts go straight to the game; a new release unpacked over the old one (engine/version.txt differs from
@@ -81,7 +81,7 @@ run_setup() {   # run_setup [ISO]
     "$@" 2>&1 | while IFS= read -r l; do
       printf '%s\n' "$l" >> "$LOG"
       case "$l" in
-        @stage\ *) echo "${l#@stage }";;
+        @stage\ *) echo "${l#@stage }" >&2;;   # (to the terminal: stdout is the result)
         @need-iso|@error\ *|@done) printf '%s\n' "$l" > logs/setup.result;;
       esac
     done

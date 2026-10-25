@@ -5,9 +5,11 @@ The rules mirror recomp/Makefile (Windows branch, SDL2 and Vulkan on); tools/rel
 
 usage: hgbuild.py --src RECOMP_DIR --gen GEN_DIR --obj OBJ_DIR --out EXE [--cc GCC] [--jobs N] [--print]
                   [--target windows|linux] [--lib-dir DIR]
-  --target linux  the Linux release: --cc is the bundled zig ("zig cc" for x86_64 baseline and glibc 2.31, so the game
-                  runs on older distributions and does not depend on the player's CPU), SDL2 and Vulkan linked from
-                  --lib-dir (link stubs; the system's libraries at run time), -rdynamic as the Makefile's Linux branch
+  --target linux  the Linux release: --cc is the bundled gcc (a Bootlin x86-64 glibc toolchain: generic x86-64, its
+                  own older glibc, so the game runs on older distributions and does not depend on the player's CPU),
+                  or zig ("zig cc" for x86_64 baseline and glibc 2.31; clang takes minutes per compiled VU1 program, so
+                  gcc is the one shipped); SDL2 and Vulkan linked from --lib-dir (link stubs; the system's libraries at
+                  run time), -rdynamic as the Makefile's Linux branch
   RECOMP_DIR  the repository's recomp/ (the runtime sources)
   GEN_DIR     what bulk2.py wrote (part*.c, table.c, vu1_aot_*.c, protos.h) plus the gs_*_spv.h shader headers
 Progress lines on stdout: "@progress DONE TOTAL NAME"; errors: "@error TEXT". Exit status 0 when the exe was linked."""
@@ -28,7 +30,8 @@ RUNTIME = [
     ('iop_kernel', 'iop_kernel.c', ['-O2']), ('spu2', 'spu2.c', ['-O2']), ('compat', 'compat.c', []), ('hdtex', 'hdtex.c', VK + ['-O2']), ('gsvk', 'gsvk.c', []),
 ]
 LIBS = ['-lm', '-lpthread', '-lmingw32', '-lSDL2', '-lvulkan-1']
-LINUX_SDL = ['-DHAVE_SDL', '-D_REENTRANT']                          # pkg-config --cflags sdl2 on Linux (plus -I)
+LINUX_RUNTIME = [('glibc23', 'glibc23.c', [])]   # after gsvk, as the Makefile's Linux branch links it
+LINUX_SDL = ['-DHAVE_SDL', '-D_GNU_SOURCE=1', '-D_REENTRANT']       # pkg-config --cflags sdl2 on the development PC (sdl2-compat; plus -I)
 LINUX_LIBS = ['-rdynamic', '-lm', '-lpthread', '-ldl', '-lSDL2', '-lvulkan']
 ZIG_TARGET = ['-target', 'x86_64-linux-gnu.2.31', '-mcpu=baseline']
 
@@ -42,7 +45,7 @@ def plan(src, gen, obj, sdl_inc, sdl=None, extra_inc=()):
         if name.startswith('vu1_aot_'): flags = RTFLAGS + inc + O2FP + ['-g0']
         else: flags = GENFLAGS + inc
         jobs.append((o, flags + ['-c', c, '-o', o]))
-    for name, rel, extra in RUNTIME:
+    for name, rel, extra in RUNTIME + (LINUX_RUNTIME if sdl is not None else []):
         o = os.path.join(obj, name + '.o'); flags = list(RTFLAGS) + inc
         for e in extra: flags += ((sdl or SDL) + ['-I' + sdl_inc]) if e == 'SDL' else [e]
         jobs.append((o, flags + ['-c', os.path.join(src, rel), '-o', o]))
@@ -58,7 +61,7 @@ def main():
     ap.add_argument('--include', action='append', default=[])   # (Linux: the bundled SDL2 and Vulkan headers)
     a = ap.parse_args()
     linux = a.target == 'linux'
-    cc = [a.cc, 'cc'] + ZIG_TARGET if linux else [a.cc]
+    cc = [a.cc, 'cc'] + ZIG_TARGET if linux and os.path.basename(a.cc).startswith('zig') else [a.cc]
     if a.sdl_include: sdl_inc = a.sdl_include
     else:   # <toolchain>/bin/gcc.exe -> <toolchain>/include/SDL2
         sdl_inc = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(a.cc))), 'include', 'SDL2') if os.path.isabs(a.cc) else 'SDL2'

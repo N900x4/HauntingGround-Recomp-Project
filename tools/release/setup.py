@@ -11,7 +11,7 @@ ROOT is the release folder (engine/ holds the sources, Python and the compiler).
      Without --iso the script stops with "@need-iso" (exit status 3) so the launcher can ask for the image.
   2. translate: recomp/bulk2.py writes the C code into ROOT/build/gen
   3. compile and link with the bundled gcc (hgbuild.py, all cores) into ROOT/bin/hgboot.exe, with SDL2.dll,
-     libwinpthread-1.dll and vulkan-1.dll next to it; on Linux with the bundled zig (engine/zig) into ROOT/bin/hgboot,
+     libwinpthread-1.dll and vulkan-1.dll next to it; on Linux with the bundled gcc (engine/gcc) into ROOT/bin/hgboot,
      against engine/include (SDL2 and Vulkan headers) and engine/link (link stubs: the system's SDL2 and Vulkan loader
      are used at run time)
   4. ROOT/bin/build.txt records the release; ROOT/build is deleted.
@@ -204,12 +204,10 @@ def main():
         say('translated in %.1f s' % (time.time() - t0)); progress(30)
         # 3. compile
         stage('Compiling (this takes a few minutes; all CPU cores are used)')
-        gcc = os.path.join(eng, 'zig', 'zig') if linux else os.path.join(tc, 'bin', 'gcc.exe')
+        gcc = os.path.join(eng, 'gcc', 'bin', 'x86_64-buildroot-linux-gnu-gcc') if linux else os.path.join(tc, 'bin', 'gcc.exe')
         if not os.path.exists(gcc): raise Fail('The bundled compiler is missing (%s). Please unpack the release again.' % gcc)
         env = dict(os.environ)
-        if not linux: env['PATH'] = os.path.join(tc, 'bin') + os.pathsep + env.get('PATH', '')
-        else:   # zig's caches inside the build folder (deleted at the end): nothing outside ROOT
-            env['ZIG_GLOBAL_CACHE_DIR'] = os.path.join(build, 'zig-cache'); env['ZIG_LOCAL_CACHE_DIR'] = os.path.join(build, 'zig-cache')
+        env['PATH'] = os.path.join(os.path.dirname(gcc) if linux else os.path.join(tc, 'bin')) + os.pathsep + env.get('PATH', '')
         for k in ('C_INCLUDE_PATH', 'CPATH', 'LIBRARY_PATH', 'GCC_EXEC_PREFIX', 'COMPILER_PATH'): env.pop(k, None)
         os.makedirs(bindir, exist_ok=True)
         exe_name = 'hgboot' if linux else 'hgboot.exe'

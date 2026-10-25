@@ -14,6 +14,7 @@ else
 EXE = hgboot
 O = obj-linux
 LDFLAGS_OS = -rdynamic
+OS_OBJ = $(O)/glibc23.o   # (the C23 strtol/sscanf names, so the game needs glibc 2.34 only)
 endif
 ifneq ($(SDL_LIBS),)
 SDL_CFLAGS += -DHAVE_SDL
@@ -78,7 +79,9 @@ $(O)/interp.o: interp.c ee_runtime.h hle.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/compat.o: compat.c compat.h ee_runtime.h hle.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
-$(EXE): $(GENOBJ) $(O)/runtime.o $(O)/hle.o $(O)/interp.o $(O)/iop_pad_mc.o $(O)/overrides.o $(O)/options.o $(O)/settings.o $(O)/gs.o $(O)/dmac.o $(O)/host_sdl.o $(O)/vu1.o $(O)/vu1_ref.o $(O)/ipu.o $(O)/iop_cpu.o $(O)/iop_kernel.o $(O)/spu2.o $(O)/compat.o $(O)/hdtex.o $(VK_OBJ)
+$(O)/glibc23.o: glibc23.c
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(EXE): $(GENOBJ) $(O)/runtime.o $(O)/hle.o $(O)/interp.o $(O)/iop_pad_mc.o $(O)/overrides.o $(O)/options.o $(O)/settings.o $(O)/gs.o $(O)/dmac.o $(O)/host_sdl.o $(O)/vu1.o $(O)/vu1_ref.o $(O)/ipu.o $(O)/iop_cpu.o $(O)/iop_kernel.o $(O)/spu2.o $(O)/compat.o $(O)/hdtex.o $(VK_OBJ) $(OS_OBJ)
 	$(CC) $(LDFLAGS_OS) -o $@ $^ -lm -lpthread $(SDL_LIBS) $(VK_LIBS)
 clean:
 	rm -rf $(O) $(EXE)

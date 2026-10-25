@@ -1,4 +1,4 @@
-# Known issues (release 0.1)
+# Known issues (release 0.2)
 
 What is known not to work, not to be finished, or not to be tested yet. Reports about anything here are still
 welcome, especially with a recording (see the README, "Reporting bugs").
@@ -8,19 +8,20 @@ welcome, especially with a recording (see the README, "Reporting bugs").
 - **Game coverage.** Tested: the logos, movies, title and menus, New Game and the opening cinematic, the castle grounds
   (`ST_02A`, `ST_013`) and a room beyond (`ST_00D`), LOAD GAME into the Castle Suite, and a 6-minute recorded session
   from there through the next rooms (`ST_010`, `ST_020`). Most of the game, its later chapters, bosses and endings
-  have **not** been played on this build. A wrong picture, a missing sound or a stop is possible anywhere beyond.
+  have **not** been played on this build. Since 0.1: the user's sessions through the first meeting with Debilitas
+  and the chase after it. A wrong picture, a missing sound or a stop is possible anywhere beyond.
 - **Saving** is verified at the Castle Suite clock (a new slot, an empty memory card, overwriting a slot; reloading
   gives exactly the saved state). The route from New Game to the first clock has not been played through on this build
   by a script; it has only been checked in parts.
-- **Hardware.** 0.1 has been tested on one PC: Windows 11, AMD Ryzen 7 9800X3D, NVIDIA GeForce RTX 5090 (plus the
+- **Hardware.** 0.2 has been tested on one PC: Windows 11 and CachyOS Linux (KDE Plasma, Wayland), AMD Ryzen 7 9800X3D, NVIDIA GeForce RTX 5090 (plus the
   Ryzen's integrated AMD graphics, seen by the launcher but not used). Untested: AMD and Intel graphics cards as the
   game's GPU, Windows 10, laptops, PCs with fewer than 8 CPU threads, high-DPI and multi-monitor setups beyond the
   basics.
 - **Controllers.** A DualSense over USB was detected and drove vibration and the light bar in automated tests; the
   checklist with the controller in hand (feel, Bluetooth, the touchpad) has not been done yet. DualShock 4 and Xbox
   controllers are supported through SDL but were not tried on real hardware.
-- **Linux and macOS.** There is no release for them. The source still builds on Linux for developers (experimental,
-  not re-checked since 2026-10-13); see `docs/building.md`.
+- **Linux** has a release since 0.2, tested on one distribution (CachyOS); other distributions and the Steam Deck have
+  not been tried. It needs glibc 2.34 or later, python3 and the system's SDL2. There is no macOS release.
 
 ## Graphics
 
@@ -36,13 +37,20 @@ welcome, especially with a recording (see the README, "Reporting bugs").
   in-between pictures are left out (the F3 overlay's SKIP); x6 with 60 fps (77 %) and x5 with 120 fps (55 %) are too
   slow. 120 fps is offered at native resolution only. Slower GPUs will reach
   full speed at lower factors; pick a lower resolution if the F3 overlay shows less than 100 %.
-- **Upscaling renders more pixels, not new textures.** Textures, effects and 2D art stay at the original resolution.
+- **HD textures** replace the game's textures in the upscaled picture (stage textures, characters, menu panels): AI
+  upscales of the originals, so small details can differ from the PS2's look. Text (the fonts) and effects stay at
+  the original resolution. The first time a texture is needed its HD version may appear a moment after the original.
+- **Heavy scenes at x4 and 60 fps** (for example Debilitas' first appearance) can show 30 fps for a few seconds: when
+  the renderer cannot keep up, the in-between pictures are switched off instead of slowing the game and its sound.
 - **Pacing.** With V-Sync "On (smooth)" (the default) the game follows the display when its refresh rate is a
   multiple of 60 Hz (60, 120, 240): every picture stays up for the same number of refreshes, the game runs up to
   0.5 % faster than a PS2 (0.1 % at 60/120 Hz) and the sound is resampled to match. About 1 picture in 300 is still held
   one refresh longer (the driver). 144 and 165 Hz displays have no whole multiple: pictures follow the PS2's 59.94 Hz
   and some stay up one refresh longer than others (choose 120 Hz in Windows for the smoothest picture). "Exact
   59.94 Hz" is the PS2's rate on the host clock. Variable refresh rate (G-Sync/FreeSync) is not used.
+- **Linux desktops**: once in a test session (KDE Plasma, Wayland) the desktop showed only every third refresh for a few
+  seconds; the game now notices this at once and keeps its own pace (the screen stutters, the game and the sound keep
+  running). Full screen avoids most of the desktop's work.
 
 ## Settings and controls
 
@@ -67,11 +75,12 @@ welcome, especially with a recording (see the README, "Reporting bugs").
 - The executables are not code-signed: Windows SmartScreen and some antivirus programs may warn about
   `HauntingGround.exe` or about the program it compiles (`bin\hgboot.exe`). An antivirus scanning every file the
   compiler writes can make the first start much slower.
-- The first start needs about 2 GB of disk space and takes 1.5 minutes on a fast PC (more on slower ones: the
-  compilation uses every CPU core).
+- The first start needs about 2 GB of disk space besides the download and takes 1 to 1.5 minutes on a fast PC (more on
+  slower ones: the compilation uses every CPU core).
+- **Linux**: the launcher is a shell script; the progress window needs kdialog (KDE) or zenity (GNOME); without them
+  the progress shows in the terminal. A missing python3 or SDL2 is reported with the package to install.
 
-## Not in 0.1
+## Not in 0.2
 
-Texture replacement and higher-resolution textures, Hewie's voice replacement, mod loading, effect passes rewritten as
-native 4K shaders, and the Linux release are planned for later versions
-(`docs/roadmap-native-port.md`).
+An HD font, Hewie's voice replacement, mod loading, effect passes rewritten as native 4K shaders and macOS are planned
+for later versions (`docs/roadmap-native-port.md`).

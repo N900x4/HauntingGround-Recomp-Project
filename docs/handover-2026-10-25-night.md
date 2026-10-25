@@ -3,9 +3,24 @@
 **Read this first**, then `docs/next-session.md` (rules in its section 4, paths in section 7) and `docs/handoff.md`
 (history). The user's auto-memory (`hg-*` files) holds the same decisions in short form.
 
+## Progress (night of 2026-10-26, unattended; newest first)
+
+- **All gates passed in IOP sync mode 2 and the work is merged into `main`** (fast-forward; the WIP branch is gone):
+  determinism + `HG_VU1CHECK` 0 mismatches; G1/G2 all renderers identical (hashA, cs re-frozen); G5 0 differing
+  batches; G6 0 of 1,737; G3 soak unchanged; saving identical; audiocheck PASS (now in mode 2); options test two runs
+  identical (with the new HD row); rumble; G10 24/24 against the existing sets (kept); G7 in headless gamescope at
+  120 Hz: 99.97 % held 2 refreshes, speed 1.00.
+- **BC7 pack done**: `D:\ps2-work\texwork\release_textures` (1,389 `.dds` + 5 `.png`, 1.9 GB, about 1.5 GB zipped);
+  in game 46-58 dB against the PNGs, video memory 602 -> 152 MB, decode waits 947 -> 5 ms. Encoder and checker built
+  in `D:\ps2-work\tools-ext` (bc7enc_rdo + ISPC 1.31.0, bc7check), zig 0.16.0 there too (sha256 checked).
+- **HD for players**: `../textures` by default, `hd = on|off`, the Options row (picture checked).
+- **Linux build works**: zig-built game identical frames (G1), glibc <= 2.29; `HauntingGround.sh` and `setup.py`
+  Linux path written but **not yet run end to end** (next: a Linux mkrelease, then a fresh-folder first start with
+  the user's ISO in batch mode, then the Windows bundle).
+
 ## 0. Where the code is
 
-- Branch **`wip-2026-10-25-night`** (local git only, never pushed) holds tonight's fixes in one commit on top of
+- (Superseded: see Progress above.) Branch **`wip-2026-10-25-night`** (local git only, never pushed) held tonight's fixes in one commit on top of
   `main` (`73f668d`). They are **built and tested on recordings, but the regression gates have NOT been run** and
   the references are NOT re-frozen. `main` is unchanged. Work on the branch; merge it into `main` only after
   section 3, step 1 passes (rewrite the commit message then if useful).

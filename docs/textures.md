@@ -131,3 +131,34 @@ Python), `compare.py` (review crops), `mix.py` (the mix below). Outputs in `texw
   The weight is upscaled and blurred by about one source texel, so there are no seams; alpha comes from HDcube3. Over
   all 1,398 textures, PBRify's share is 33 % on average, median 22 %. 3.5 min on the CPU.
   `python3 mix.py SRC MANIFEST PBRIFY_DIR HDCUBE3_DIR OUT [--mask DIR]`.
+
+## 8. Replacement in the game (2026-10-25)
+
+`recomp/hdtex.c` (ids, decoding, the GPU slots), `gsvk.c` (the images), `vk/gs_sprite.comp` (sampling, the upscaling
+copies only), `gs.c` (`gsvk_hd`: ids per texture setup). On with the GPU renderer when upscaling (x2 and up):
+`HG_HDTEX=DIR` or `hd_textures = DIR` in hg.ini; files named `<img>_<clut>.png` (texdump.py's ids), `_c<N>` for a
+4-bit texture drawn with CLUT sub-palette N.
+
+- **Ids from local memory, not from the bytes sent.** The characters' textures (8H, in the frame buffer's upper bits)
+  are sent rearranged (two rows per row in 16-pixel strips, which the 8H addressing puts back in order) and their
+  CLUTs arrive inside larger transfers, so the crcs of transfers matched nothing on the disc. Read back from local
+  memory in texdump.py's byte order (`hd_img_crc`, `hd_clut_crc`), every texture checked has its disc id: Fiona's
+  FIN_000 0-2 among them. Kept per texture setup (4096 entries) and worked out again only when a transfer writes the
+  image's pages (per-page counters, `hd_pgen`) or the CLUT's page (the game sends CLUTs every frame: 256 reads).
+  8H/4HL/4HH textures share pages with the frame buffer the GPU draws into, but draws keep those bits: they are not
+  treated as render targets, and the copies do not move their coordinates (`apply_copy`).
+- **Decoding**: 4 threads (stb_image, mipmaps on the CPU: the GS's queue may be compute-only), started when the image
+  is uploaded (the game uploads while loading); a draw that needs one still being decoded waits, so a texture never
+  changes on screen. Images go to the GPU in the GS's command stream; a bindless array of 4096 (descriptor indexing,
+  update after bind), sampled with `textureGrad` (mipmaps, 16x anisotropic) at the copies' pixel footprint.
+  CLAMP / REGION_CLAMP applied in the shader, half an HD texel inside; a sprite reads only its own texel rectangle
+  (atlas bleeding).
+- **Exactness**: the exact copy of local memory never samples a replacement: G1 with HD on (x5 included) identical to
+  `hashA`; G10 with HD off unchanged.
+- **Cost** (Castle Suite, x4 + 60, headless): GPU 10.7 ms per VBlank without, 10.2-12.2 with; 27 images, 239 MB.
+  First use of a texture can still wait for its decoding (17 waits, 411 ms in all, at room entries).
+- **Fonts are left native for now.** The font sheets (MSG_BASE: the Latin font in 10 colours by sub-palette;
+  MSG_SUB, MSG_END) are 4-bit coverage maps with noisy texels; the AI upscales marble them, and `fontscale.py`
+  (index-space scaling, outline from 4xHDcube-Alpha on the glyph masks) keeps the colours but still leaves edge
+  artifacts at glyph cells. Open: a vector font redrawn into the sheets (the user's choice of font).
+- The folder used: `texwork/hd` = `up_mix` without the 4 font ids (1,394 images).

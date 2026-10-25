@@ -22,6 +22,16 @@ Castle Suite. The GS thread is the limit.
 
 Last commit before this doc: `bf60152`.
 
+### 2026-10-25 (day): IOP sync default, texture mix, HD textures in the game, the loading-screen globe
+
+- IOP sync made the default (the user's decision), references re-frozen (`a561022`); texture mix (`e7e1109`).
+- The loading screen's spinning globe drew shards in the 60 fps in-between pictures: pairs must keep their shape
+  (`abcec72`, docs/gpu-renderer.md).
+- **HD texture replacement works** (docs/textures.md section 8): stage textures, characters (close-ups: Fiona's
+  face, embroidery, lace), menu panels; ids from local memory; G1 identical with HD on. Fonts left native (open:
+  a vector font). `HG_HDTEX=/mnt/NewVolume/ps2-work/texwork/hd` for the playtest.
+- The user paused texture work once over GPU power (WireView Pro, no software readout) and then said to go on.
+
 ### 2026-10-24/25 (playtests 4 and 5, then overnight): Wayland window, overlay, A/V, the 3-VBlank frames, textures
 
 - **Window on KDE Wayland** (`d03e5f8`): the surface reports its size as 0xFFFFFFFF; the swapchain took it and failed,

@@ -166,6 +166,7 @@ void settings_defaults(Settings *s) {
     s->deadzone = 18;            /* about 6000 of 32768, as before settings existed */
     s->touchpad_select = 1;
     s->audio_offset = 0;
+    s->hd_textures[0] = 0;
 }
 
 /* ------------------------------------------------------------------ values as text */
@@ -184,6 +185,7 @@ static void value_of(const Settings *s, const char *key, char *out, size_t n) {
     else if (!strcmp(key, "deadzone")) snprintf(out, n, "%d", s->deadzone);
     else if (!strcmp(key, "touchpad_select")) snprintf(out, n, "%d", s->touchpad_select);
     else if (!strcmp(key, "audio_offset")) snprintf(out, n, "%d", s->audio_offset);
+    else if (!strcmp(key, "hd_textures")) snprintf(out, n, "%s", s->hd_textures);
     else if (!strncmp(key, "kb.", 3)) {
         for (int i = 0; i < PB_N; i++) if (!strcmp(key + 3, pb_key[i])) snprintf(out, n, "%s", settings_key_name(s->kb[i]));
     } else if (!strncmp(key, "pad.", 4)) {
@@ -237,6 +239,7 @@ static int apply_to(Settings *s, const char *key, const char *v, int swap) {
     if (!strcmp(key, "deadzone")) { const int n = atoi(v); if (n < 0 || n > 50 || !isdigit((unsigned char)v[0])) return 0; s->deadzone = n; return 1; }
     if (!strcmp(key, "touchpad_select")) { s->touchpad_select = atoi(v) != 0 || !strcasecmp(v, "on") || !strcasecmp(v, "yes"); return 1; }
     if (!strcmp(key, "audio_offset")) { char *e; const long n = strtol(v, &e, 10); if (*e || e == v || n < -200 || n > 200) return 0; s->audio_offset = (int)n; return 1; }
+    if (!strcmp(key, "hd_textures")) { if (strlen(v) >= sizeof s->hd_textures) return 0; snprintf(s->hd_textures, sizeof s->hd_textures, "%s", v); return 1; }
     if (!strncmp(key, "kb.", 3)) {
         for (int i = 0; i < PB_N; i++) if (!strcmp(key + 3, pb_key[i])) {
             int sc; if (!key_parse(v, &sc)) return 0;
@@ -348,6 +351,8 @@ void settings_save(void) {
     fprintf(f, "touchpad_select = %d    # 1: clicking the touchpad is Select too (unless pad.<button> = touchpad)\n", file.touchpad_select);
     fprintf(f, "\n# sound\n");
     fprintf(f, "audio_offset = %d       # ms: raise it if the sound still seems late (speakers, TV), lower it if early (-200..200)\n", file.audio_offset);
+    fprintf(f, "\n# textures\n");
+    fprintf(f, "hd_textures = %s       # a folder of HD replacements (<id>.png, tools/textures), empty for none; used with the GPU renderer when upscaling\n", file.hd_textures);
     fclose(f);
     remove(ini_path);
     if (rename(tmp, ini_path)) L("settings: cannot replace %s\n", ini_path);

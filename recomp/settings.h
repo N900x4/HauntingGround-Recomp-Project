@@ -54,6 +54,7 @@ typedef struct {
     int deadzone;       /* the analog sticks' dead zone, percent of full travel (0-50) */
     int touchpad_select;   /* 1: a click of the touchpad is Select too (unless the touchpad is mapped) */
     int audio_offset;   /* ms the sound reaches the ear later than the A/V control can measure (speakers, TV), -200..200 */
+    char hd_textures[256];   /* folder of HD texture replacements (hdtex.c), "" none; HG_HDTEX overrides */
 } Settings;
 
 void settings_init(void);                 /* load, apply the environment, log; once, at start */

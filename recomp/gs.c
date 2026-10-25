@@ -15,6 +15,7 @@
 #include "compat.h"
 #include "ee_runtime.h"
 #include "hle.h"
+#include "hdtex.h"
 #include "settings.h"
 #if defined(__x86_64__)
 #include <immintrin.h>
@@ -182,6 +183,47 @@ static void gsw_drain(void);
 static void gsw_wait_seq(uint64_t seq);
 static void gsw_access(const uint64_t pages[8], int write);
 static void mark_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int x0, int y0, int x1, int y1);
+/* HD replacements (hdtex.c): ids from local memory. hd_pgen: per 8 KB page, the count of transfers when one last wrote
+   it (hd_wgen counts them), so a texture setup's id is worked out again only when its pages change; hd_dim: the size
+   of the last indexed image sent to each base pointer (a texture may be smaller than TW x TH); hd_pend: an indexed
+   image whose transfer has ended, to be identified once its last pixels are written. */
+static uint32_t hd_pgen[512], hd_wgen = 1;
+static uint16_t hd_dim[16384][4][2];
+static struct { int on; uint32_t bp, bw, psm, w, h; } hd_pend;
+static uint32_t hd_crctab[256];
+static int hd_cls(uint32_t psm) { return psm == 0x1B ? 1 : psm == 0x24 ? 2 : psm == 0x2C ? 3 : 0; }
+static void hd_touch(const uint64_t pg[8]) {
+    hd_wgen++;
+    for (int i = 0; i < 8; i++) for (uint64_t m = pg[i]; m; m &= m - 1) hd_pgen[i * 64 + __builtin_ctzll(m)] = hd_wgen;
+}
+static uint32_t hd_crc(uint32_t c, const uint8_t *b, size_t n) {
+    if (!hd_crctab[1]) for (uint32_t i = 0; i < 256; i++) { uint32_t v = i; for (int k = 0; k < 8; k++) v = v & 1 ? 0xEDB88320u ^ (v >> 1) : v >> 1; hd_crctab[i] = v; }
+    for (size_t i = 0; i < n; i++) c = hd_crctab[(c ^ b[i]) & 255] ^ (c >> 8);
+    return c;
+}
+static uint32_t hd_img_crc(uint32_t bp, uint32_t bw, int psm, uint32_t w, uint32_t h) {   /* texels as texdump.py reads the disc */
+    uint8_t row[1024]; uint32_t c = 0xFFFFFFFFu; const int four = psm == 0x14 || psm == 0x24 || psm == 0x2C;
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t n = 0;
+        if (four) for (uint32_t x = 0; x + 1 < w || x < w; x += 2) row[n++] = (uint8_t)((read_px(bp, bw, psm, (int)x, (int)y) & 15) | (x + 1 < w ? (read_px(bp, bw, psm, (int)x + 1, (int)y) & 15) << 4 : 0));
+        else for (uint32_t x = 0; x < w; x++) row[n++] = (uint8_t)read_px(bp, bw, psm, (int)x, (int)y);
+        c = hd_crc(c, row, n);
+    }
+    return ~c;
+}
+static void hd_clut_crc(uint32_t cbp, uint32_t *c1k, uint32_t *c64) {   /* the CLUT as uploaded: 16 x 16 words, and 8 x 2 */
+    uint32_t px[256]; for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) px[y * 16 + x] = read_px(cbp, 1, CT32, x, y);
+    *c1k = ~hd_crc(0xFFFFFFFFu, (const uint8_t *)px, 1024);
+    uint32_t q[16]; for (int y = 0; y < 2; y++) for (int x = 0; x < 8; x++) q[y * 8 + x] = read_px(cbp, 1, CT32, x, y);
+    *c64 = ~hd_crc(0xFFFFFFFFu, (const uint8_t *)q, 64);
+}
+static void hd_flush(void) {   /* the indexed image whose transfer ended: identified, its replacements decoded */
+    if (!hd_pend.on) return;
+    hd_pend.on = 0;
+    if (hd_pend.bp >= 16384 || hd_pend.w > 1024) return;
+    const int k = hd_cls(hd_pend.psm); hd_dim[hd_pend.bp][k][0] = (uint16_t)hd_pend.w; hd_dim[hd_pend.bp][k][1] = (uint16_t)hd_pend.h;
+    hdtex_image(hd_img_crc(hd_pend.bp, hd_pend.bw, (int)hd_pend.psm, hd_pend.w, hd_pend.h));
+}
 #ifdef HAVE_VULKAN
 static int vk_live; static void gsvk_live_need_(const uint64_t pages[8], int line); static void gsvk_live_wrote(const uint64_t pages[8]);
 #define gsvk_live_need(pg) gsvk_live_need_(pg, __LINE__)   /* (read-backs are counted by the line that asked for them: the GSVK summary) */
@@ -236,12 +278,12 @@ static void clut_load(uint64_t tex0) {
 }
 
 /* ================================================================== texturing */
-typedef struct { uint32_t tbp, tbw, psm, tw, th, tcc, tfx, csa, cpsm; int wms, wmt, minu, maxu, minv, maxv; int bilinear; int aem; uint8_t ta0, ta1; const uint32_t *clut; } TexState;
+typedef struct { uint32_t tbp, tbw, psm, tw, th, tcc, tfx, csa, cpsm, cbp; int wms, wmt, minu, maxu, minv, maxv; int bilinear; int aem; uint8_t ta0, ta1; const uint32_t *clut; } TexState;
 static void tex_setup(TexState *t, const GsCtx *c) {
     uint64_t t0 = c->tex0;
     t->tbp = BITS(t0, 0, 14); t->tbw = BITS(t0, 14, 6); t->psm = BITS(t0, 20, 6);
     t->tw = 1u << BITS(t0, 26, 4); t->th = 1u << BITS(t0, 30, 4); t->tcc = BITS(t0, 34, 1); t->tfx = BITS(t0, 35, 2);
-    t->cpsm = BITS(t0, 51, 4); t->csa = BITS(t0, 56, 5);
+    t->cpsm = BITS(t0, 51, 4); t->csa = BITS(t0, 56, 5); t->cbp = BITS(t0, 37, 14);
     if (t->tw > 1024) t->tw = 1024; if (t->th > 1024) t->th = 1024;
     t->wms = BITS(c->clamp, 0, 2); t->wmt = BITS(c->clamp, 2, 2);
     t->minu = BITS(c->clamp, 4, 10); t->maxu = BITS(c->clamp, 14, 10); t->minv = BITS(c->clamp, 24, 10); t->maxv = BITS(c->clamp, 34, 10);
@@ -1428,6 +1470,51 @@ static void gsvk_after_cpu(const Draw *d) {
     static int nlog; static const char *nm[3] = { "sprite", "triangle", "line/point" };
     if (bad && nlog++ < 40) gsvk_log_bad(nm[kind], d, vk_box[0], vk_box[1], vk_box[2], vk_box[3], gpu);
 }
+/* The HD replacement for a draw's texture (hdtex.c): slot + 1, or 0; only the upscaling copies use it. Ids come from
+   local memory and are kept per texture setup until a transfer writes the image's pages (worked out again: 64k
+   reads) or the CLUT's page (256 reads; the game sends CLUTs every frame). A paletted image in the frame buffer's
+   upper bits (8H, 4HL, 4HH) shares pages the GPU draws into, but draws keep those bits: an id that matches the disc
+   is a texture. Other formats: textures the GPU has drawn into (render targets) are never replaced. */
+static int hd_live = -1;
+typedef struct { uint32_t tbp, tbw, psm, tw, th, cbp, cpsm, csa, w, h, isig, csig, img, c1k, c64; uint64_t ipg[8]; int res, used; } HdSet;
+static HdSet hd_set[4096];
+static int hd_same(const HdSet *e, const TexState *t) {
+    return e->used && e->tbp == t->tbp && e->tbw == t->tbw && e->psm == t->psm && e->tw == t->tw && e->th == t->th && e->cbp == t->cbp && e->cpsm == t->cpsm && e->csa == t->csa;
+}
+static int gsvk_hd(const Draw *d, float *su, float *sv) {
+    const TexState *t = &d->tex;
+    const int hfmt = t->psm == T8H || t->psm == T4HL || t->psm == T4HH;
+    if (!(t->psm == T8 || t->psm == T4 || hfmt) || t->tbp >= 16384 || t->cbp >= 16384) return 0;
+    hd_flush();
+    static HdSet *last; static uint32_t lwgen;
+    HdSet *e = last;
+    if (!(e && lwgen == hd_wgen && hd_same(e, t))) {
+        uint32_t i = (uint32_t)((((uint64_t)t->tbp << 20 ^ (uint64_t)t->cbp << 6 ^ t->psm ^ (uint64_t)t->csa << 40 ^ (uint64_t)t->tw << 48 ^ (uint64_t)t->th << 56 ^ t->tbw) * 0x9E3779B97F4A7C15ull) >> 52);
+        for (int n = 0; n < 8 && hd_set[i].used && !hd_same(&hd_set[i], t); n++) i = (i + 1) & 4095;
+        e = &hd_set[i];
+        if (!hd_same(e, t)) {   /* a new setup (or a full neighbourhood: this slot is reused) */
+            memset(e, 0, sizeof *e); e->used = 1;
+            e->tbp = t->tbp; e->tbw = t->tbw; e->psm = t->psm; e->tw = t->tw; e->th = t->th; e->cbp = t->cbp; e->cpsm = t->cpsm; e->csa = t->csa;
+            const uint16_t *dm = hd_dim[t->tbp][hd_cls(t->psm)];
+            e->w = dm[0] && dm[0] <= t->tw ? dm[0] : t->tw; e->h = dm[1] && dm[1] <= t->th ? dm[1] : t->th;
+            mark_pages(e->ipg, t->tbp, t->tbw, (int)t->psm, 0, 0, (int)e->w - 1, (int)e->h - 1);
+            e->res = -1;
+        }
+        uint32_t is = 0; for (int k = 0; k < 8; k++) for (uint64_t m = e->ipg[k]; m; m &= m - 1) { const uint32_t g = hd_pgen[k * 64 + __builtin_ctzll(m)]; if (g > is) is = g; }
+        const uint32_t cs = hd_pgen[(t->cbp >> 5) & 511];
+        if (is != e->isig || !e->img) { const uint32_t im = hd_img_crc(t->tbp, t->tbw, (int)t->psm, e->w, e->h); if (im != e->img) e->res = -1; e->img = im; e->isig = is; }
+        if (cs != e->csig || !e->c1k) { uint32_t a, b; hd_clut_crc(t->cbp, &a, &b); if (a != e->c1k || b != e->c64) e->res = -1; e->c1k = a; e->c64 = b; e->csig = cs; }
+        if (e->res < 0) {
+            const int four = t->psm == T4 || t->psm == T4HL || t->psm == T4HH;
+            e->res = hdtex_get(e->img, e->c1k, four ? e->c64 : 0, four ? (int)(t->cpsm == CT32 ? (t->csa & 15) : t->csa) : 0);
+        }
+        last = e; lwgen = hd_wgen;
+    }
+    if (e->res <= 0) return 0;
+    if (t->wms == 3 || t->wmt == 3 || (t->wms == 0 && e->w != t->tw) || (t->wmt == 0 && e->h != t->th)) return 0;   /* region repeat; repeating over a larger TW */
+    if (!hfmt && gsvk_tex_is_rt(d)) return 0;
+    *su = 1.0f / (float)e->w; *sv = 1.0f / (float)e->h; return e->res;
+}
 static GsVkSprite gsvk_base(const Draw *d) {   /* the draw state every primitive carries */
     const TexState *t = &d->tex;
     GsVkSprite s = { 0 };
@@ -1438,6 +1525,7 @@ static GsVkSprite gsvk_base(const Draw *d) {   /* the draw state every primitive
     s.ate = d->ate; s.atst = d->atst; s.aref = d->aref; s.afail = d->afail; s.abe = d->abe; s.a = d->a; s.b = d->b; s.cc = d->cc; s.d = d->d; s.fix = d->fix;
     s.pabe = d->pabe; s.fba = d->fba; s.colclamp = d->colclamp; s.fge = d->fge; s.need_dst = d->need_dst; s.zte = d->zte; s.ztst = d->ztst; s.fogcol = d->fogcol;
     s.zbp = d->zbp; s.zpsm = d->zpsm; s.zmsk = d->zmsk; s.zread = d->zread; s.date = d->date; s.datm = d->datm; s.fb16 = d->fb16;
+    if (d->tme && vk_ncopy > 1) { if (hd_live < 0) hd_live = hdtex_on(); if (hd_live > 0) s.hd = gsvk_hd(d, &s.hdsu, &s.hdsv); }
     return s;
 }
 static void gsvk_sprite_prim(const Draw *d, const Vtx *a, const Vtx *b) {
@@ -2321,7 +2409,7 @@ static uint64_t st_xfer_psm[64];
    texture setup (TEX0) seen the first time with that content, img and clut the crcs of the last uploads at tbp and cbp
    (0: none seen). GS thread. */
 static FILE *tl_f; static int tl_on = -1;
-static struct { uint32_t crc, n, want; } tl;
+static struct { uint32_t crc, n, want; int hd; } tl;   /* hd: the crc goes to hdtex_upload too */
 static struct { uint32_t crc, psm, w, h; } tl_at[16384][4];   /* the last upload at each base pointer: full words, 8H, 4HL, 4HH */
 static int tl_cls(uint32_t psm) { return psm == 0x1B ? 1 : psm == 0x24 ? 2 : psm == 0x2C ? 3 : 0; }
 static uint64_t tl_seen[1 << 16]; static uint64_t tl_seen_vb[1 << 16]; static int tl_all;   /* HG_TEXLOG_ALL=1: a USE line per VBlank (setups drawn with, each once per VBlank) */
@@ -2343,6 +2431,8 @@ static void tl_feed(const uint8_t *b, uint32_t n) {
     tl.crc = c; tl.n += n;
     if (tl.n < tl.want) return;
     const uint32_t crc = ~tl.crc;
+    if (tl.hd && xfer.sx == 0 && xfer.sy == 0) { hd_pend.on = 1; hd_pend.bp = xfer.bp; hd_pend.bw = xfer.bw; hd_pend.psm = xfer.psm; hd_pend.w = (uint32_t)xfer.w; hd_pend.h = (uint32_t)xfer.h; }
+    if (tl_on <= 0) return;
     const int k = tl_cls(xfer.psm);
     if (tl_at[xfer.bp][k].crc != crc || tl_at[xfer.bp][k].psm != xfer.psm) {
         fprintf(tl_f, "UP %llu %u %u 0x%x %d %d %d %d %08x %u\n", (unsigned long long)cur_vb, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.w, xfer.h, crc, tl.want);
@@ -2371,7 +2461,7 @@ static void xfer_put_px(uint32_t v) {
 }
 static void hwreg_write(uint64_t v) {
     if (!xfer.active) return;
-    if (tl_on > 0) tl_feed((const uint8_t *)&v, 8);
+    if (tl.want) tl_feed((const uint8_t *)&v, 8);
 #ifdef HAVE_VULKAN
     gsvk_xfer_touch();
 #endif
@@ -2394,7 +2484,7 @@ static void hwreg_write(uint64_t v) {
    (PSMT8: 16 pixels in one block row, PSMT4: 32, PSMCT32: 4); same addresses as write_px(). */
 static void xfer_qword(const uint64_t q[2]) {
     if (!xfer.active) return;
-    if (tl_on > 0) tl_feed((const uint8_t *)q, 16);
+    if (tl.want) tl_feed((const uint8_t *)q, 16);
 #ifdef HAVE_VULKAN
     gsvk_xfer_touch();
 #endif
@@ -2465,7 +2555,10 @@ static void trxdir_write(uint64_t v) {
         xfer.x = xfer.y = 0; xfer.carry = 0; xfer.ncarry = 0;
         if (!xfer.w || !xfer.h) xfer.active = 0;
         if (tl_on < 0) tl_init();
-        if (tl_on > 0 && xfer.active) tl_begin();
+        hd_flush();   /* (the previous transfer is written by now) */
+        tl.want = 0; tl.hd = xfer.active && hdtex_wants(xfer.psm);
+        if (xfer.active) { uint64_t hp[8] = {0}; mark_pages(hp, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1); hd_touch(hp); }
+        if ((tl_on > 0 || tl.hd) && xfer.active) tl_begin();
         if (xfer.active && gsw_n) {   /* queued draws must be done with the pages the image goes to */
             uint64_t pg[8] = {0}; mark_pages(pg, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1); gsw_access(pg, 1);
         }
@@ -2492,6 +2585,7 @@ static void trxdir_write(uint64_t v) {
         uint32_t dbp = BITS(r_bitbltbuf, 32, 14), dbw = BITS(r_bitbltbuf, 48, 6), dpsm = BITS(r_bitbltbuf, 56, 6);
         int sx = BITS(r_trxpos, 0, 11), sy = BITS(r_trxpos, 16, 11), dx = BITS(r_trxpos, 32, 11), dy = BITS(r_trxpos, 48, 11);
         int w = BITS(r_trxreg, 0, 12), h = BITS(r_trxreg, 32, 12);
+        { uint64_t hp[8] = {0}; mark_pages(hp, dbp, dbw, (int)dpsm, dx, dy, dx + w - 1, dy + h - 1); hd_touch(hp); }
         uint32_t *tmp = malloc((size_t)w * h * 4); if (!tmp) return;
         for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) tmp[y * w + x] = read_px(sbp, sbw, spsm, (sx + x) & 2047, (sy + y) & 2047);
         for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) write_px(dbp, dbw, dpsm, (dx + x) & 2047, (dy + y) & 2047, tmp[y * w + x]);
@@ -2996,6 +3090,7 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg) {
     gsw_drain();   /* the display and frame dumps read local memory */
 #ifdef HAVE_VULKAN
     vk_reconfigure(vb, (int)(cfg & 0xFF), (int)(cfg >> 8 & 0xFF));
+    if (hd_live > 0) hdtex_vblank();
 #else
     (void)cfg;
 #endif
@@ -3086,6 +3181,9 @@ void gs_init(uint8_t *priv) {
 }
 void gs_dump_stats(void) {
     gs_sync();
+#ifdef HAVE_VULKAN
+    if (hd_live > 0) hdtex_stats();
+#endif
     L("GS producer waits: ring full %llu (%.1f s), drain %llu (%.1f s), lag %llu (%.1f s)\n", (unsigned long long)pw_n[0], pw_t[0], (unsigned long long)pw_n[1], pw_t[1], (unsigned long long)pw_n[2], pw_t[2]);
 #ifdef HAVE_VULKAN
     if (vkb_open) gsvk_batch_close();

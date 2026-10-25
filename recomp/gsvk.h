@@ -21,6 +21,7 @@ typedef struct {
     int32_t gcopy, rt, cn;            /* upscaling copies made on the GPU (batches), texturing from a render target, N */
     int32_t sx0, sy0, sx1, sy1;       /* sprite or point: the vertices in 1/16 pixels */
     float su0, sv0, su1, sv1;         /* sprite: their texture coordinates (1/16 texel) */
+    int32_t hd; float hdsu, hdsv;     /* HD replacement (hdtex.c): its slot + 1 (0: none), 1 / the texture's size in texels; the copies only */
 } GsVkSprite;
 /* tables: the 8-, 4- and 16-bit block and column tables, laid out as the shader's BT8 ... CT16 offsets */
 #define GSVK_TABLES 1056

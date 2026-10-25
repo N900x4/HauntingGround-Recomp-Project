@@ -44,7 +44,7 @@ $(O)/overrides.o: overrides.c ee_runtime.h hle.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/options.o: game/options.c game/guest.h ee_runtime.h hle.h settings.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
-$(O)/gs.o: gs.c ee_runtime.h hle.h compat.h gsvk.h settings.h
+$(O)/gs.o: gs.c ee_runtime.h hle.h compat.h gsvk.h settings.h hdtex.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) $(VK_CFLAGS) -O2 -ffp-contract=off -c $< -o $@
 gen/gs_sprite_spv.h: vk/gs_sprite.comp
 	glslangValidator -V --target-env vulkan1.1 --vn gs_sprite_spv -o $@ $<
@@ -54,6 +54,8 @@ gen/gs_batchc_spv.h: vk/gs_sprite.comp
 	glslangValidator -V --target-env vulkan1.1 -DBATCH -DCOPIES --vn gs_batchc_spv -o $@ $<
 $(O)/gsvk.o: gsvk.c gsvk.h gen/gs_sprite_spv.h gen/gs_batch_spv.h gen/gs_batchc_spv.h ee_runtime.h hle.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(O)/hdtex.o: hdtex.c hdtex.h settings.h ee_runtime.h hle.h third_party/stb_image.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) $(VK_CFLAGS) -O2 -c $< -o $@
 $(O)/dmac.o: dmac.c ee_runtime.h hle.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/settings.o: settings.c settings.h hle.h
@@ -76,7 +78,7 @@ $(O)/interp.o: interp.c ee_runtime.h hle.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/compat.o: compat.c compat.h ee_runtime.h hle.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
-$(EXE): $(GENOBJ) $(O)/runtime.o $(O)/hle.o $(O)/interp.o $(O)/iop_pad_mc.o $(O)/overrides.o $(O)/options.o $(O)/settings.o $(O)/gs.o $(O)/dmac.o $(O)/host_sdl.o $(O)/vu1.o $(O)/vu1_ref.o $(O)/ipu.o $(O)/iop_cpu.o $(O)/iop_kernel.o $(O)/spu2.o $(O)/compat.o $(VK_OBJ)
+$(EXE): $(GENOBJ) $(O)/runtime.o $(O)/hle.o $(O)/interp.o $(O)/iop_pad_mc.o $(O)/overrides.o $(O)/options.o $(O)/settings.o $(O)/gs.o $(O)/dmac.o $(O)/host_sdl.o $(O)/vu1.o $(O)/vu1_ref.o $(O)/ipu.o $(O)/iop_cpu.o $(O)/iop_kernel.o $(O)/spu2.o $(O)/compat.o $(O)/hdtex.o $(VK_OBJ)
 	$(CC) $(LDFLAGS_OS) -o $@ $^ -lm -lpthread $(SDL_LIBS) $(VK_LIBS)
 clean:
 	rm -rf $(O) $(EXE)

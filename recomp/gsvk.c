@@ -61,6 +61,16 @@ static struct { uint64_t pid; double sub, beg, end; } ugt[64]; static uint64_t u
 static PFN_vkSetSwapchainPresentTimingQueueSizeEXT pt_qsize; static PFN_vkGetSwapchainTimeDomainPropertiesEXT pt_domains; static PFN_vkGetPastPresentationTimingEXT pt_past;
 static struct { uint64_t pid; double t; } pt_ring[256]; static int pt_n;   /* scanout times collected, not yet taken (gsvk_present_scanout) */   /* VK_KHR_present_wait (gsvk_present_wait) */
 static int skip_exact;   /* gsvk_skip_exact() */
+/* HD texture replacements (hdtex.c): images sampled by the upscaling copies (binding 7, an array of HD_MAX). Every
+   slot first holds a 1 x 1 image; a replacement's slot is written once (update after bind: the descriptor set stays
+   bound in command buffers that are pending). Uploaded in the GS's stream, so it is there before the draws after it;
+   its mipmaps come from the CPU (the GS's queue may be compute-only: no blits). */
+enum { HD_MAX = 4096 };
+static int hd_ok; static VkSampler hd_samp; static VkImage hd_img[HD_MAX + 1]; static VkImageView hd_view[HD_MAX + 1]; static VkDeviceMemory hd_mem[HD_MAX + 1];
+static double hd_bytes;
+static struct { Buf b; uint64_t id; } hd_stage[256]; static int hd_nstage;
+static void imgbar(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags sa, VkAccessFlags da, VkPipelineStageFlags ss, VkPipelineStageFlags ds);
+static uint32_t memtype(uint32_t bits, VkMemoryPropertyFlags want);
 /* recording */
 static int open_, bound; static VkPipeline cur_pipe; static uint32_t nprim, nclut, upoff;
 static uint32_t bfirst, bn; static int bx0, by0, bx1, by1;   /* the batch being collected */
@@ -201,6 +211,12 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     VkPhysicalDeviceFeatures have, want = { 0 }; vkGetPhysicalDeviceFeatures(phys, &have);
     if (!have.shaderFloat64) { L("GSVK: no 64-bit floats in shaders (triangle Z)\n"); return 0; }
     want.shaderFloat64 = VK_TRUE;
+    VkPhysicalDeviceDescriptorIndexingFeatures dif = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES };
+    { VkPhysicalDeviceFeatures2 h2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &dif }; vkGetPhysicalDeviceFeatures2(phys, &h2); }
+    hd_ok = pr.apiVersion >= VK_API_VERSION_1_2 && dif.shaderSampledImageArrayNonUniformIndexing && dif.descriptorBindingSampledImageUpdateAfterBind;
+    VkPhysicalDeviceDescriptorIndexingFeatures difw = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES,
+        .shaderSampledImageArrayNonUniformIndexing = VK_TRUE, .descriptorBindingSampledImageUpdateAfterBind = VK_TRUE };
+    want.samplerAnisotropy = have.samplerAnisotropy;
     VkPhysicalDeviceTimelineSemaphoreFeatures tsw = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES, .timelineSemaphore = VK_TRUE };
     const char *dext[7] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_present_id", "VK_KHR_present_wait", "VK_EXT_present_timing", "VK_EXT_global_priority", "VK_KHR_calibrated_timestamps", "VK_EXT_full_screen_exclusive" };
     if (can_wait) { pif.presentId = VK_TRUE; pwf.presentWait = VK_TRUE; pwf.pNext = 0; tsw.pNext = &pif; }
@@ -218,6 +234,7 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     /* HG_FSE=1 (a test): full-screen exclusive mode when the window is full screen (VK_EXT_full_screen_exclusive) */
     if (has_fse && can_present && have_caps2 && getenv("HG_FSE") && atoi(getenv("HG_FSE"))) { dext[dci.enabledExtensionCount] = "VK_EXT_full_screen_exclusive"; dci.enabledExtensionCount++; use_fse = 1; }
     if (has_cal && can_present && getenv("HG_PACEDBG")) { dext[dci.enabledExtensionCount] = "VK_KHR_calibrated_timestamps"; dci.enabledExtensionCount++; use_cal = 1; }
+    if (hd_ok) { difw.pNext = (void *)dci.pNext; dci.pNext = &difw; }
     if (vkCreateDevice(phys, &dci, 0, &dev)) { L("GSVK: no device\n"); return 0; }
     if (use_cal && !(get_cal = (PFN_vkGetCalibratedTimestampsKHR)vkGetDeviceProcAddr(dev, "vkGetCalibratedTimestampsKHR"))) use_cal = 0;
     if (use_fse && !(fse_acquire = (VkResult (VKAPI_PTR *)(VkDevice, VkSwapchainKHR))vkGetDeviceProcAddr(dev, "vkAcquireFullScreenExclusiveModeEXT"))) use_fse = 0;
@@ -246,10 +263,14 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     memcpy(xoffb.p, xoff32, 33u * 2048 * 4); memcpy((uint32_t *)xoffb.p + 33u * 2048, xoff32z, 33u * 2048 * 4); memcpy(tabb.p, tables, GSVK_TABLES * 4);
     /* one layout for both pipelines: 0 local memory, 1 32-bit address tables, 2 CLUTs, 3 primitives, 4 other tables;
        push constants: n, bx0, by0, first (batch) or the primitive's index (one primitive) */
-    VkDescriptorSetLayoutBinding bd[7];
+    VkDescriptorSetLayoutBinding bd[8];
     for (int i = 0; i < 7; i++) bd[i] = (VkDescriptorSetLayoutBinding){ .binding = (uint32_t)i, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                                                          .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT };
-    VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 7, .pBindings = bd };
+    bd[7] = (VkDescriptorSetLayoutBinding){ .binding = 7, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = HD_MAX, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT };
+    VkDescriptorBindingFlags bfl[8] = { 0 }; bfl[7] = hd_ok ? VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT : 0;
+    VkDescriptorSetLayoutBindingFlagsCreateInfo bfi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO, .bindingCount = 8, .pBindingFlags = bfl };
+    VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = &bfi, .bindingCount = 8, .pBindings = bd,
+                                            .flags = hd_ok ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT : 0 };
     VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 32 };
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
     if (vkCreateDescriptorSetLayout(dev, &dli, 0, &dsl) || vkCreatePipelineLayout(dev, &pli, 0, &pl)) { L("GSVK: pipeline layout failed\n"); return 0; }
@@ -262,8 +283,9 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
             .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" } };
         if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, 0, k == 2 ? &pipebc : k ? &pipeb : &pipe1)) { L("GSVK: pipeline failed\n"); return 0; }
     }
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 };
-    VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps };
+    VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 }, { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, HD_MAX } };
+    VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = ps,
+                                       .flags = hd_ok ? VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT : 0 };
     VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = 1, .pSetLayouts = &dsl };
     if (vkCreateDescriptorPool(dev, &dpi, 0, &dpool)) return 0;
     dai.descriptorPool = dpool; if (vkAllocateDescriptorSets(dev, &dai, &dset)) return 0;
@@ -272,6 +294,27 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     for (int i = 0; i < 7; i++) wr[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = dset, .dstBinding = (uint32_t)i, .descriptorCount = 1,
                                                                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[i] };
     vkUpdateDescriptorSets(dev, 7, wr, 0, 0);
+    {   VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
+            .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR, .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT, .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT, .anisotropyEnable = want.samplerAnisotropy, .maxAnisotropy = want.samplerAnisotropy ? 16.0f : 1.0f,
+            .maxLod = VK_LOD_CLAMP_NONE };
+        if (vkCreateSampler(dev, &sci, 0, &hd_samp)) return 0;
+        VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { 1, 1, 1 },
+            .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+        if (vkCreateImage(dev, &ii, 0, &hd_img[HD_MAX])) return 0;
+        VkMemoryRequirements mr; vkGetImageMemoryRequirements(dev, hd_img[HD_MAX], &mr);
+        VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = memtype(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+        if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(dev, &ai, 0, &hd_mem[HD_MAX]) || vkBindImageMemory(dev, hd_img[HD_MAX], hd_mem[HD_MAX], 0)) return 0;
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = hd_img[HD_MAX], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        if (vkCreateImageView(dev, &vi, 0, &hd_view[HD_MAX])) return 0;
+        VkDescriptorImageInfo *ii2 = malloc(sizeof *ii2 * HD_MAX);
+        for (int i = 0; i < HD_MAX; i++) ii2[i] = (VkDescriptorImageInfo){ hd_samp, hd_view[HD_MAX], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w7 = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = dset, .dstBinding = 7, .descriptorCount = HD_MAX,
+                                    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = ii2 };
+        vkUpdateDescriptorSets(dev, 1, &w7, 0, 0); free(ii2);
+    }
     VkCommandPoolCreateInfo cpci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qfam };
     VkCommandBufferAllocateInfo cbai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = NCMD };
     VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
@@ -283,6 +326,16 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     tim_on = getenv("HG_GSVK_TIMING") && atoi(getenv("HG_GSVK_TIMING")) > 0;
     if (vkCreateQueryPool(dev, &qpi, 0, &qpool)) return 0;
     tsperiod = pr.limits.timestampPeriod;
+    {   /* the 1 x 1 image's layout, before anything uses the set */
+        VkCommandBufferBeginInfo cbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+        vkBeginCommandBuffer(cmds[0], &cbi);
+        imgbar(cmds[0], hd_img[HD_MAX], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, VK_ACCESS_SHADER_READ_BIT,
+               VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        vkEndCommandBuffer(cmds[0]);
+        VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmds[0] };
+        if (vkQueueSubmit(queue, 1, &si, fences[0]) || vkWaitForFences(dev, 1, &fences[0], VK_TRUE, UINT64_MAX)) return 0;
+        vkResetFences(dev, 1, &fences[0]);
+    }
     L("GSVK: Vulkan compute on %s%s%s%s\n", pr.deviceName, can_present ? (shared_q ? " (can present the window from video memory; one queue)" : " (can present the window from video memory)") : "",
       can_wait ? " (present wait: yes)" : "", ufam != qfam ? (ui_prio ? " (GS on an async compute queue; the window's at high priority)" : " (GS on an async compute queue)") : "");
     state = 1; return 1;
@@ -432,6 +485,52 @@ int gsvk_poll(uint64_t id) {   /* that submission (and earlier) done? never wait
 }
 void gsvk_tag(int on) { tag_cur = on; }
 double gsvk_tag_ms(void) { return gpu_ms_tag; }
+int gsvk_hd_ok(void) { return state > 0 && hd_ok; }
+double gsvk_hd_mb(void) { return hd_bytes / 1048576.0; }
+/* an HD replacement into slot (levels: the mip chain, level 0 first, each half the one before, packed RGBA) */
+int gsvk_hd_upload(int slot, int w, int h, int levels, const uint8_t *pix) {
+    if (!gsvk_hd_ok() || slot < 0 || slot >= HD_MAX || hd_img[slot]) return 0;
+    for (int i = 0; i < hd_nstage; ) {   /* staging buffers whose copies are done */
+        if (hd_stage[i].id <= n_sub_id && gsvk_poll(hd_stage[i].id)) { free_buf(&hd_stage[i].b); hd_stage[i] = hd_stage[--hd_nstage]; } else i++;
+    }
+    if (hd_nstage == 256) { submit(1); for (int i = 0; i < hd_nstage; i++) free_buf(&hd_stage[i].b); hd_nstage = 0; }
+    VkDeviceSize total = 0; for (int l = 0, lw = w, lh = h; l < levels; l++, lw = lw > 1 ? lw / 2 : 1, lh = lh > 1 ? lh / 2 : 1) total += (VkDeviceSize)lw * lh * 4;
+    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { (uint32_t)w, (uint32_t)h, 1 },
+        .mipLevels = (uint32_t)levels, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    if (vkCreateImage(dev, &ii, 0, &hd_img[slot])) { hd_img[slot] = 0; return 0; }
+    VkMemoryRequirements mr; vkGetImageMemoryRequirements(dev, hd_img[slot], &mr);
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = memtype(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    Buf st = { 0 };
+    if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(dev, &ai, 0, &hd_mem[slot])) { vkDestroyImage(dev, hd_img[slot], 0); hd_img[slot] = 0; L("GSVK: no video memory for an HD texture\n"); return 0; }
+    vkBindImageMemory(dev, hd_img[slot], hd_mem[slot], 0);
+    VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = hd_img[slot], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, (uint32_t)levels, 0, 1 } };
+    if (vkCreateImageView(dev, &vi, 0, &hd_view[slot]) || !mkbuf(&st, total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+        vkDestroyImage(dev, hd_img[slot], 0); vkFreeMemory(dev, hd_mem[slot], 0); hd_img[slot] = 0; free_buf(&st); return 0; }
+    memcpy(st.p, pix, (size_t)total);
+    close_batch(); rec_open(); phase(PH_XFER);
+    VkImageMemoryBarrier b = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = hd_img[slot], .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, (uint32_t)levels, 0, 1 } };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, 0, 0, 0, 1, &b);
+    VkBufferImageCopy rg[16]; VkDeviceSize off = 0; int nr = 0;
+    for (int l = 0, lw = w, lh = h; l < levels && nr < 16; l++, lw = lw > 1 ? lw / 2 : 1, lh = lh > 1 ? lh / 2 : 1) {
+        rg[nr++] = (VkBufferImageCopy){ .bufferOffset = off, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)l, 0, 1 }, .imageExtent = { (uint32_t)lw, (uint32_t)lh, 1 } };
+        off += (VkDeviceSize)lw * lh * 4;
+    }
+    vkCmdCopyBufferToImage(cmd, st.b, hd_img[slot], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, (uint32_t)nr, rg);
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, 0, 0, 0, 1, &b);
+    VkDescriptorImageInfo di = { hd_samp, hd_view[slot], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet wr = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = dset, .dstBinding = 7, .dstArrayElement = (uint32_t)slot, .descriptorCount = 1,
+                                .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &di };
+    vkUpdateDescriptorSets(dev, 1, &wr, 0, 0);
+    hd_stage[hd_nstage].b = st; hd_stage[hd_nstage].id = n_sub_id + 1; hd_nstage++;   /* the open command buffer's id when submitted */
+    hd_bytes += (double)mr.size;
+    return 1;
+}
 static void ring_switch(void);
 /* local memory words [w, w+n) from src, at this point of the stream */
 void gsvk_upload(uint32_t w, uint32_t n, const uint32_t *src) {

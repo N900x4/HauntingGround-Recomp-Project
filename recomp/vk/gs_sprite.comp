@@ -1,4 +1,7 @@
 #version 450
+#ifdef COPIES
+#extension GL_EXT_nonuniform_qualifier : require
+#endif
 // GS sprite rasterizer on the GPU: one invocation per pixel of the sprite's rectangle, doing exactly what gs.c's
 // draw_sprite() -> shade() -> pixel() do for the same pixel (integer math as written there; the float texture
 // coordinates use `precise` so that no multiply-add is fused, matching the C code compiled with -ffp-contract=off).
@@ -27,7 +30,8 @@ layout(std430, binding = 2) readonly buffer Clut { uint clut[]; };
     int serial; \
     uint clutoff; \
     uint mbase; \
-    int gcopy, rt, cn, sx0, sy0, sx1, sy1; float su0, sv0, su1, sv1;
+    int gcopy, rt, cn, sx0, sy0, sx1, sy1; float su0, sv0, su1, sv1; \
+    int hd; float hdsu, hdsv;
 // prim 0: sprite (px0.. are its pixel rectangle), 1: triangle (px0.. its bounding box), 2: line from (lx0,ly0) to
 // (lx1,ly1) in ln steps, 3: point at (lx0,ly0) with texel (x0,y0)
 // mbase: the word where the copy of local memory this primitive draws into starts (0: the exact one; others:
@@ -251,10 +255,47 @@ uint sample_(int u16, int v16) {
     uint ag = (((c00 >> 8) & 0xFF00FFu) * w00 + ((c10 >> 8) & 0xFF00FFu) * w10 + ((c01 >> 8) & 0xFF00FFu) * w01 + ((c11 >> 8) & 0xFF00FFu) * w11) >> 8;
     return (rb & 0xFF00FFu) | ((ag & 0xFF00FFu) << 8);
 }
+#ifdef COPIES
+// HD replacements (hdtex.c): a primitive with hd != 0 samples image hd - 1 instead of local memory, in the copies only
+// (the exact copy never changes). hd_uv: the texture coordinates in texels, hd_gx / hd_gy their change per pixel of
+// local memory; one pixel of a copy is 1/N of that, which picks the mipmap (and anisotropic) level. The CLAMP and
+// REGION_CLAMP modes are applied here, half an HD texel inside, the sampler repeats.
+layout(binding = 7) uniform sampler2D hdt[4096];
+bool hd_use = false, hd_box = false; vec2 hd_uv, hd_gx, hd_gy, hd_lo, hd_hi;   // hd_box: a sprite's own texel rectangle (atlases: glyphs, UI parts)
+uint sample_hd() {
+    const int i = prims[pi].hd - 1;
+    const vec2 inv = vec2(prims[pi].hdsu, prims[pi].hdsv);
+    const vec2 e = 0.5 / (vec2(textureSize(hdt[nonuniformEXT(i)], 0)) * inv);
+    vec2 uv = hd_uv;
+    if (PF(wms) == 1) uv.x = clamp(uv.x, e.x, 1.0 / inv.x - e.x); else if (PF(wms) == 2) uv.x = clamp(uv.x, float(PF(minu)) + e.x, float(PF(maxu)) + 1.0 - e.x);
+    if (PF(wmt) == 1) uv.y = clamp(uv.y, e.y, 1.0 / inv.y - e.y); else if (PF(wmt) == 2) uv.y = clamp(uv.y, float(PF(minv)) + e.y, float(PF(maxv)) + 1.0 - e.y);
+    // a sprite reads only its own rectangle of the texture (the GS reads whole texels inside it; filtering the larger
+    // image would reach half a texel into the neighbouring glyph or part of an atlas)
+    if (hd_box) uv = clamp(uv, hd_lo + e, max(hd_hi - e, hd_lo + e));
+    const float k = 1.0 / float(PF(cn));
+    const vec4 c = textureGrad(hdt[nonuniformEXT(i)], uv * inv, hd_gx * inv * k, hd_gy * inv * k);
+    const uvec4 b = uvec4(clamp(c, 0.0, 1.0) * vec4(255.0, 255.0, 255.0, 128.0) + 0.5);
+    return b.r | (b.g << 8u) | (b.b << 16u) | (b.a << 24u);
+}
+vec2 tri_uv(float px, float py) {   // a triangle's texture coordinates at (px, py), texels
+    float w0 = ((PF(tx1) - px) * (PF(ty2) - py) - (PF(tx2) - px) * (PF(ty1) - py)) * PF(tinv);
+    float w1 = ((PF(tx2) - px) * (PF(ty0) - py) - (PF(tx0) - px) * (PF(ty2) - py)) * PF(tinv);
+    float w2 = 1.0 - w0 - w1;
+    float q = PF(tq0) * w0 + PF(tq1) * w1 + PF(tq2) * w2;
+    vec2 uv = vec2(PF(tu0) * w0 + PF(tu1) * w1 + PF(tu2) * w2, PF(tv0) * w0 + PF(tv1) * w1 + PF(tv2) * w2);
+    if (PF(fst) == 0 && q != 0.0) uv /= q;
+    return uv / 16.0;
+}
+#endif
 uint shade(uint vcol, int u16, int v16, uint fog) {
     uint c = vcol;
     if (PF(tme) != 0) {
-        uint t = sample_(u16, v16); int ta = int(t >> 24), fa = int(vcol >> 24); uint o = 0u;
+#ifdef COPIES
+        uint t = hd_use ? sample_hd() : sample_(u16, v16);
+#else
+        uint t = sample_(u16, v16);
+#endif
+        int ta = int(t >> 24), fa = int(vcol >> 24); uint o = 0u;
         for (int s = 0; s < 24; s += 8) {
             int ct = int((t >> s) & 255u), cf = int((vcol >> s) & 255u), v;
             if (PF(tfx) == 0) v = ct * cf >> 7; else if (PF(tfx) == 1) v = ct; else v = (ct * cf >> 7) + fa;
@@ -332,10 +373,17 @@ void pixel(int x, int y, uint zv, uint col) {
 }
 // one pixel of a sprite, triangle or point, at (x, y) inside its rectangle
 void draw_at(int x, int y) {
+#ifdef COPIES
+    hd_use = false; hd_box = false;
+#endif
     if (PF(prim) == 3) { pixel(x, y, PF(z), shade(PF(rgba), PF(x0), PF(y0), PF(fog))); return; }
     if (PF(prim) == 0) {
         precise float uu = PF(u0) + float((x << 4) - PF(x0)) * PF(du);
         precise float vv = PF(v0) + float((y << 4) - PF(y0)) * PF(dv);
+#ifdef COPIES
+        if (prims[pi].hd != 0) { hd_use = true; hd_uv = vec2(uu, vv) / 16.0; hd_gx = vec2(PF(du), 0.0); hd_gy = vec2(0.0, PF(dv));
+                                 hd_box = true; hd_lo = vec2(min(PF(su0), PF(su1)), min(PF(sv0), PF(sv1))) / 16.0; hd_hi = vec2(max(PF(su0), PF(su1)), max(PF(sv0), PF(sv1))) / 16.0; }
+#endif
         pixel(x, y, PF(z), shade(PF(rgba), cvt(uu), cvt(vv), PF(fog)));
         return;
     }
@@ -362,6 +410,9 @@ void draw_at(int x, int y) {
         precise float uu = PF(tu0) * w0 + PF(tu1) * w1 + PF(tu2) * w2, vv = PF(tv0) * w0 + PF(tv1) * w1 + PF(tv2) * w2;
         if (PF(fst) == 0 && q != 0.0) { uu = divx(uu, q); vv = divx(vv, q); }
         u16 = cvt(uu); v16 = cvt(vv);
+#ifdef COPIES
+        if (prims[pi].hd != 0) { hd_use = true; hd_uv = vec2(uu, vv) / 16.0; hd_gx = tri_uv(px + 1.0, py) - hd_uv; hd_gy = tri_uv(px, py + 1.0) - hd_uv; }
+#endif
     }
     precise float ff = float(PF(tf0)) * w0 + float(PF(tf1)) * w1 + float(PF(tf2)) * w2;
     pixel(x, y, zv, shade(col, u16, v16, uint(cvt(ff))));
@@ -382,7 +433,7 @@ void apply_copy(int z) {
     PF(mbase) += uint(z) << 20;
     if (PF(prim) == 1) {
         PF(tx0) -= ox; PF(tx1) -= ox; PF(tx2) -= ox; PF(ty0) -= oy; PF(ty1) -= oy; PF(ty2) -= oy;
-        if (PF(rt) != 0) {
+        if (PF(rt) != 0 && prims[pi].hd == 0) {   // (a replaced texture is a disc texture, not a render target)
             PF(tu0) -= ox * 16.0 * PF(tq0); PF(tu1) -= ox * 16.0 * PF(tq1); PF(tu2) -= ox * 16.0 * PF(tq2);
             PF(tv0) -= oy * 16.0 * PF(tq0); PF(tv1) -= oy * 16.0 * PF(tq1); PF(tv2) -= oy * 16.0 * PF(tq2);
         }
@@ -417,7 +468,7 @@ void apply_copy(int z) {
     if (PF(py1) > PF(scy1)) py1 = PF(scy1) + 1;
     PF(du) = x1 != x0 ? (u1 - u0) / float(x1 - x0) : 0.0; PF(dv) = y1 != y0 ? (v1 - v0) / float(y1 - y0) : 0.0;
     PF(px0) = px0; PF(px1) = px1; PF(py0) = py0; PF(py1) = py1; PF(x0) = x0; PF(y0) = y0; PF(u0) = u0; PF(v0) = v0;
-    if (PF(rt) != 0) { PF(u0) -= float(oxi); PF(v0) -= float(oyi); }
+    if (PF(rt) != 0 && prims[pi].hd == 0) { PF(u0) -= float(oxi); PF(v0) -= float(oyi); }
 }
 // Does copy z of triangle i cover pixel (x, y)? Decided from its few geometry fields, so the whole primitive (about 120
 // words) is loaded only for the triangles of a tile's list that do (about 7 % of the copies' time). The test is

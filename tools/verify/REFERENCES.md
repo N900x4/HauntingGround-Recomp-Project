@@ -5,10 +5,15 @@ the oracle. They are md5 sums of our own frame dumps (PPM files written by `HG_F
 
 | File | What | Made with | Check |
 |---|---|---|---|
-| `ref/hashA.md5` | New Game on an empty card to VB 4000, a frame every 5 VBlanks (702 frames), software GS | `da1c36f` (Windows port, 2026-10-13), confirmed by every later speed-up | `runhash.sh ./hgboot.exe OUT.md5 4000` |
-| `ref/cs.md5` | LOAD GAME from `../memcards` into the Castle Suite to VB 4200 (742 frames), software GS (`cs0.md5` in scratch; `cs4.md5`, the GS workers, identical) | `0d641d9` (GS workers, 2026-10-13) | `HG_ROUTE=cs runhash.sh ./hgboot.exe OUT.md5 4200` |
-| `ref/save.md5` | The card files `savetest.sh` writes (save into a new slot, onto an emptied card, overwrite), with the game's clock fixed (`HG_CLOCK`) | 2026-10-15 (release 0.1) | `savetest.sh TAG` |
-| `ref/soak.md5` | The user's session `recordings/20261014-200745` replayed to VB 20600, a frame every 20 VBlanks (1,005 frames), software GS; GPU x4 identical (`14bd3e3`). **Re-frozen 2026-10-15 with the SPU2 fix** (reverb end address, envelope rates): identical to the old one up to VB 11920, then Fiona's pose differs by a few pixels (IOP timing follows the sound state; see `docs/handoff.md`); two runs identical, one with `HG_VU1CHECK=1` | SPU2 fix (2026-10-15) | `soak.sh TAG [env]` |
+| `ref/hashA.md5` | New Game on an empty card to VB 4000, a frame every 5 VBlanks (706 frames), software GS | **Re-frozen 2026-10-25 with IOP sync the default** (the game makes fewer 3-VBlank frames, so more frames); two runs identical, `HG_VU1CHECK=1` 0 mismatches; all four renderers identical. Before: 702 frames from `da1c36f` (2026-10-13) | `runhash.sh ./hgboot.exe OUT.md5 4000` |
+| `ref/cs.md5` | LOAD GAME from `../memcards` into the Castle Suite to VB 4200 (746 frames), software GS | **Re-frozen 2026-10-25 with IOP sync** (checked as hashA). Before: 742 frames from `0d641d9` (2026-10-13) | `HG_ROUTE=cs runhash.sh ./hgboot.exe OUT.md5 4200` |
+| `ref/save.md5` | The card files `savetest.sh` writes (save into a new slot, onto an emptied card, overwrite), with the game's clock fixed (`HG_CLOCK`) | **Re-frozen 2026-10-25 with IOP sync** (the save data follows the timing; two runs identical). Before: 2026-10-15 (release 0.1) | `savetest.sh TAG` |
+| `ref/soak.md5` | The user's session `recordings/20261014-200745` replayed to VB 20600, a frame every 20 VBlanks (1,005 frames), software GS; GPU x4 identical (`14bd3e3`). **Re-frozen 2026-10-15 with the SPU2 fix** (reverb end address, envelope rates): identical to the old one up to VB 11920, then Fiona's pose differs by a few pixels (IOP timing follows the sound state; see `docs/handoff.md`); two runs identical, one with `HG_VU1CHECK=1`. The recording predates IOP sync and has no `iopsync` line, so it replays with the old timing (still identical on 2026-10-25); a new-mode soak needs a new recording | SPU2 fix (2026-10-15) | `soak.sh TAG [env]` |
+
+**IOP sync** (default since 2026-10-25, `docs/frame-timing.md`): G1, G2, G10 and saving run with it; `HG_IOPSYNC=0`
+gives the old timing, whose references are in git history before that date. A replay uses its recording's mode.
+G10's picture references were re-made the same day (`scratch/pic_ref_x5i`, `pic_ref_n60`; two sets 24/24 within the
+gate; the old sets kept as `pic_ref_*_20261024_noiopsync`).
 
 The New Game route uses `HG_MOVIES=skip` and a fixed `HG_PAD` timeline; LOAD GAME needs the user's card in
 `../memcards/port0` (save 01) and the recording needs `../recordings/20261014-200745` (neither is in the repository).

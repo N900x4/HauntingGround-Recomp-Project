@@ -108,9 +108,11 @@ frame thread waited about one VBlank in `sceSifCallRpc` (0x2700e8) for SNDDRV's 
 whole VBlank ahead at each VBlank (`iop_vblank`), so a request made during the VBlank found the IOP at the end of
 its slice: the tick, and the answer, came in the next slice, while the idle EE jumped to the next VBlank.
 
-`HG_IOPSYNC=1` (off by default): the IOP's time follows the EE's (8 EE cycles per IOP cycle); an RPC first catches
+IOP sync (**the default since 2026-10-25**, the user's decision; `HG_IOPSYNC=0` is the old timing): the IOP's time follows the EE's (8 EE cycles per IOP cycle); an RPC first catches
 the IOP up; while no EE thread can run, `idle_advance` runs the IOP to each of its events before the EE's next one
 and delivers the answers. Result: 0 frames of 3 VBlanks (2,499 of 2 from VB 3,000 to 8,000; G2 route 51 -> 0),
 audiocheck PASS. It changes the emulation's timing (G1 706 frames, G2 746, different from the references; all four
-renderers still identical to each other), so making it the default means re-freezing every reference and making new
-test recordings.
+renderers still identical to each other). Made the default on 2026-10-25: `ref/hashA.md5` and `ref/cs.md5` re-frozen
+(two runs identical, `HG_VU1CHECK=1` 0 mismatches), G10 pictures re-made. Recordings now carry the mode
+(`iopsync N` in pad.txt); a recording without that line (every one before 2026-10-25) replays with the old timing, so
+`ref/soak.md5` and the user's earlier sessions still replay exactly. `HG_IOPSYNC` overrides both.

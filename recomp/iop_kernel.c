@@ -576,14 +576,27 @@ static void iop_run_until(uint64_t target, long budget) {
     }
 }
 
-/* HG_IOPSYNC=1: the IOP's time follows the EE's (8 EE cycles per IOP cycle) instead of running a VBlank ahead at
-   each VBlank. Without it an RPC whose answer needs an IOP event later in the VBlank (SNDDRV's sound tick, a
-   DelayThread) is answered only in the next VBlank's slice, and the EE thread waiting for it loses that VBlank (the
-   game's 3-VBlank frames, docs/frame-timing.md). With it, hle.c's idle loop runs the IOP to its next event while the
-   EE waits, and the answer comes at the time it would on the console. */
+/* IOP sync (the default since 2026-10-25; HG_IOPSYNC=0 is the old timing): the IOP's time follows the EE's (8 EE
+   cycles per IOP cycle) instead of running a VBlank ahead at each VBlank. Without it an RPC whose answer needs an IOP
+   event later in the VBlank (SNDDRV's sound tick, a DelayThread) is answered only in the next VBlank's slice, and the
+   EE thread waiting for it loses that VBlank (the game's 3-VBlank frames, docs/frame-timing.md). With it, hle.c's
+   idle loop runs the IOP to its next event while the EE waits, and the answer comes at the time it would on the
+   console. A replay (HG_PADPLAY) runs with the mode its recording was made with: the "iopsync N" line in pad.txt,
+   and recordings without one (all before 2026-10-25) the old timing; HG_IOPSYNC overrides both. */
 static int iop_sync = -1; static int64_t ee_off; static int ee_off_set;   /* (debug) EE requests not answered yet */
 int iop_rpc_open(void) { return ee_rpc_open; }
-int iop_sync_on(void) { if (iop_sync < 0) iop_sync = getenv("HG_IOPSYNC") && atoi(getenv("HG_IOPSYNC")); return iop_sync; }
+int iop_sync_on(void) {
+    if (iop_sync >= 0) return iop_sync;
+    const char *e = getenv("HG_IOPSYNC"), *play = getenv("HG_PADPLAY");
+    if (e && *e) iop_sync = atoi(e) != 0;
+    else if (play && *play) {
+        char p[1100], line[512]; snprintf(p, sizeof p, "%s/pad.txt", play);
+        FILE *f = fopen(p, "r"); int v; iop_sync = 0;
+        if (f) { while (fgets(line, sizeof line, f)) if (sscanf(line, "iopsync %d", &v) == 1) { iop_sync = v != 0; break; } fclose(f); }
+    } else iop_sync = 1;
+    L("IOP sync %s\n", iop_sync ? "on" : "off (the IOP runs a VBlank ahead)");
+    return iop_sync;
+}
 static uint64_t ee_to_iop(uint64_t eec) {
     if (!ee_off_set) { ee_off = (int64_t)now - (int64_t)(eec / 8); ee_off_set = 1; }
     const int64_t t = (int64_t)(eec / 8) + ee_off; return t < 0 ? 0 : (uint64_t)t;

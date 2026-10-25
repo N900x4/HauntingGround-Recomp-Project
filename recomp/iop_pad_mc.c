@@ -170,6 +170,7 @@ static void rr_init(void) {
         fprintf(rr_f, "# Haunting Ground input recording (HG_PADPLAY=DIR replays it). Lines: VBlank, buttons (active-high bits), analog rx ry lx ly; hex\n");
         fprintf(rr_f, "clock %lld\n", (long long)rr_base);
         for (size_t i = 0; i < sizeof rr_envs / sizeof rr_envs[0]; i++) fprintf(rr_f, "# env %s=%s\n", rr_envs[i], getenv(rr_envs[i]) ? getenv(rr_envs[i]) : "(unset)");
+        { extern int iop_sync_on(void); fprintf(rr_f, "iopsync %d\n", iop_sync_on()); }   /* the replay's IOP timing (iop_kernel.c) */
         settings_write_header(rr_f);
         fflush(rr_f);
         rr_mode = 1; L("recording input to %s\n", dir);

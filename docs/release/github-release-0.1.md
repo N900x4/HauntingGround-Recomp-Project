@@ -62,10 +62,13 @@ attach anything from `game`, `bin`, `textures` or `crashes`, or your disc image.
 |---|---|---|---|
 | `HauntingGround-Recomp-0.1-win64.zip` | Windows | 1,574.6 MB | `f2571b05dbe4930a1dc4ba3c921e168fb2e3b614418227af9bf3ea95951f38d3` |
 | `HauntingGround-Recomp-0.1-linux-x64.tar.gz` | Linux | 1,633.7 MB | `1a4dd58787ac7d01a2811d1075a81a9cc8db84338e7e8b369e5095e334c4a54b` |
+| `HauntingGround-Recomp-0.1-compiler-sources-win64.tar` | Source of the compiler in the Windows zip (not needed to play) | 334.6 MB | `dabe5331537fb6838f0ad90c8496c999a05e770ed60adf1eec71335c429498d4` |
+| `HauntingGround-Recomp-0.1-compiler-sources-linux-x64.tar` | Source of the compiler in the Linux archive (not needed to play) | 263.1 MB | `2f01eba0da4814dc08564a3eb1c1223f4b4f4b5f68865ead09da8d2a740ae698` |
 
 The Windows zip bundles unmodified GCC, binutils, MinGW-w64, SDL2 and Vulkan loader binaries from MSYS2 and Python
 from python.org; the Linux archive a GCC toolchain from Bootlin and the SDL2 and Vulkan headers. Each keeps its own
-licence (`THIRD_PARTY_NOTICES.txt` in the download). The project itself is GPL-3.0; its source is this repository at
+licence (`THIRD_PARTY_NOTICES.txt` in the download); the source code of the bundled compilers (GPL and LGPL) is attached
+here as the two `compiler-sources` files. The project itself is GPL-3.0; its source is this repository at
 the tagged commit, and a copy of the sources the build uses is inside each download (`engine/src`). The HD textures
 are not covered by the project's licence (see above).
 

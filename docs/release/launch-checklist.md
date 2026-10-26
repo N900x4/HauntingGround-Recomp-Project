@@ -30,8 +30,8 @@ account).
 
 | # | Step | Who | State |
 |---|---|---|---|
-| 3.1 | Licence: GPL-3.0 (`LICENSE` is GPL-3.0) | U to confirm | leaning GPL-3.0 |
-| 3.2 | Compiler sources (GPL): the notices point to MSYS2's and Bootlin's source archives and offer a copy on request. Safer: attach those source archives to the GitHub release too (a download of a few hundred MB, the user's permission) | U decides | open |
+| 3.1 | Licence: GPL-3.0 (`LICENSE` is GPL-3.0) | U | confirmed by the user 2026-10-27 |
+| 3.2 | Compiler sources (GPL): the notices point to MSYS2's and Bootlin's source archives and offer a copy on request. Safer: attach those source archives to the GitHub release too (a download of a few hundred MB, the user's permission) | U decides | the user chose to attach them (2026-10-27): `scratch/release-sources/HauntingGround-Recomp-0.1-compiler-sources-{win64,linux-x64}.tar` (334.6 and 263.1 MB; MSYS2 source packages with their .sig, Bootlin/GNU/kernel.org archives; gcc and Linux checked against GNU's and kernel.org's checksums); sizes and SHA-256 in `github-release-0.1.md` |
 | 3.3 | The HD textures in the downloads: the risk was explained once; the user's decision stands. The texts say plainly what they are | done | |
 | 3.4 | The user's ISO against redump (`SLUS-21075`): the checksums the setup accepts should be redump's | U (or C with permission to look it up) | open |
 

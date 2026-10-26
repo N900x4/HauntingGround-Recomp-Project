@@ -8,7 +8,9 @@
 - **Version is 0.1** (the user, 2026-10-26: "Its 0.1 not 0.2"; 0.1 was never published, so this is the first public
   release, now with Linux and the HD textures). `docs/release/github-release-0.1.md` is the one release page (the 0.2
   draft merged into it and removed); README, known-issues, the Reddit drafts and both mkrelease defaults say 0.1. The
-  user wants the launch prepared soon.
+  user wants the launch prepared soon: **`docs/release/launch-checklist.md`** is the plan. Linux archive rebuilt as
+  `scratch/release-linux/HauntingGround-Recomp-0.1-linux-x64.tar.gz` (1,633.7 MB, sha256
+  e50f87096e927847046009d8e63ddde4536b1c53f2935b54b887f560a5592c91, from 94391f3; the 0.2-labelled one deleted).
 
 - **Linux release built and verified** (`scratch/release-linux/HauntingGround-Recomp-0.2-linux-x64.tar.gz`, 1,633.7
   MB, sha256 c55a5354...9b5c, built from 36d1e27 with the 0.2 README; rebuild it from the latest commit with `tools/release/mkrelease_linux.py

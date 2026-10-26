@@ -1,55 +1,72 @@
-<!-- Draft of the GitHub release page for 0.1. Tag: v0.1. Title: "Haunting Ground Recomp 0.1 (test release)".
-     Asset: HauntingGround-Recomp-0.1-win64.zip (made with tools/release/mkrelease.py; 36.5 MB; put its SHA-256 below).
-     Fill in <REPO URL> and the checksum before publishing. -->
+<!-- Draft of the GitHub release page for 0.1, the first public release. Tag: v0.1.
+     Title: "Haunting Ground Recomp 0.1 (test release)".
+     Assets: HauntingGround-Recomp-0.1-win64.zip (tools/release/mkrelease.py --textures; not built yet: needs the MSYS2
+     tree on the Windows drive) and HauntingGround-Recomp-0.1-linux-x64.tar.gz (tools/release/mkrelease_linux.py).
+     Both under GitHub's 2 GB per file. Fill in <REPO URL>, the sizes and the checksums before publishing. -->
 
 # Haunting Ground Recomp 0.1 (test release)
 
-The first public test build of a native Windows version of *Haunting Ground* (PS2, North American release,
-SLUS-21075). The game's program is statically recompiled to C and compiled on your PC; a hand-written runtime stands
-in for the PS2 hardware. It is not an emulator and it does not use PCSX2 code.
+The first public test build of a native **Windows and Linux** version of *Haunting Ground* (PS2, North American
+release, SLUS-21075). The game's program is statically recompiled to C and compiled on your PC from your own disc; a
+hand-written runtime stands in for the PS2 hardware. It is not an emulator and it does not use PCSX2 code.
 
-**No game code or data is in this download.** You need your own copy of the game, dumped to a plain `.iso`. The
-launcher checks your disc image, copies the files the game needs, and builds the game on your PC with the compiler
-included in the zip. Nothing needs to be installed and nothing is downloaded. Not affiliated with or endorsed by
+**No game code is in this download.** You need your own copy of the game, dumped to a plain `.iso`. The launcher checks
+your disc image, copies the files the game needs, and builds the game on your PC with the compiler included in the
+download (about a minute on a fast PC). Nothing needs to be installed and nothing is downloaded.
+
+**HD textures are included.** The `textures` folder holds high-resolution versions of the game's own textures
+(Capcom's artwork), upscaled with AI models; they are used only together with your own disc. Delete the folder, or
+set *HD textures* to Off in the Options menu, to play with the original textures. Not affiliated with or endorsed by
 Capcom or Sony.
 
 ## What is in 0.1
 
-- Builds the game from your own NTSC-U disc image: double-click `HauntingGround.exe`, choose the `.iso`, wait about
-  1.5 minutes (longer on slower PCs), play. Later starts go straight to the game.
+- **Windows:** unzip, double-click `HauntingGround.exe`, choose the `.iso`, play. **Linux** (64-bit, glibc 2.34 or
+  later: Ubuntu 22.04, Fedora, Debian 12, Arch, SteamOS desktop mode): unpack, run `HauntingGround.sh`, choose the
+  `.iso`; needs python3 and SDL2 (installed on most desktops). The first start builds the game; later starts go
+  straight to it.
 - GPU renderer (Vulkan), pixel-identical to the project's reference software renderer at native resolution;
-  upscaling up to x6 (x5 is about 4K); 60 fps by frame interpolation (120 at native resolution); software renderer as a fallback.
+  upscaling up to x6 (x5 is about 4K); 60 fps by frame interpolation (120 at native resolution); software renderer as
+  a fallback.
+- **HD textures** for the stages, the characters and the menus (BC7-compressed: a quarter of the video memory of
+  plain images), with an *HD textures* On/Off row in the Options menu.
 - Settings inside the game's own Options menu (Down past Screen Position): renderer, resolution, frame rate, display,
-  V-Sync, keyboard and controller remapping, vibration strength, light bar colour. Saved in `hg.ini`.
+  V-Sync, HD textures, keyboard and controller remapping, vibration strength, light bar colour. Saved in `hg.ini`.
 - Native DualSense, DualShock 4 and Xbox controller support (USB and Bluetooth), with the game's vibration.
-- Saving and loading on a memory card folder (`memcards\port0`), verified at the first save point.
+- Sound and cutscenes in sync: the sound processor keeps the console's own timing.
+- Saving and loading on a memory card folder (`memcards/port0`), verified at the first save point.
 - Every session's input is recorded, so bugs can be replayed exactly.
 
 ## Requirements
 
-- Windows 10 or 11, 64-bit; a Vulkan GPU recommended.
+- Windows 10 or 11, 64-bit; or Linux, 64-bit (see above). A Vulkan GPU is recommended.
 - Your own *Haunting Ground* disc, North American release (SLUS-21075), dumped to `.iso`. Other regions are not
   supported yet.
-- About 2 GB of free disk space.
+- About 6 GB of free disk space (most of it the HD textures and the game files copied from your disc).
 
 ## This is a test release
 
-Only the opening, the castle grounds and the first castle rooms have been tested in depth, on one PC (Ryzen 7 9800X3D,
-RTX 5090, Windows 11). We are looking for **playtesters**: how far can you get, and what goes wrong on your hardware?
-Known issues: [docs/known-issues.md](<REPO URL>/blob/main/docs/known-issues.md).
+Tested in depth: the opening, the castle grounds, the first castle rooms and the first meeting with Debilitas, on one
+PC (Ryzen 7 9800X3D, RTX 5090; Windows 11 and CachyOS Linux). We are looking for **playtesters**: how far can you get,
+and what goes wrong on your hardware? Known issues: [docs/known-issues.md](<REPO URL>/blob/main/docs/known-issues.md).
 
-**Reporting bugs:** open an issue with what happened, your PC (Windows version, CPU, GPU), and `logs\play.log`,
-`logs\launcher.log` and, if you can, the newest `recordings\...\pad.txt` from the game folder. Never attach anything
-from `game\`, `bin\` or `crashes\`, or your disc image. Details:
+**Reporting bugs:** open an issue with what happened, your PC (Windows version or Linux distribution, CPU, GPU), and
+`logs/play.log`, `logs/launcher.log` and, if you can, the newest `recordings/.../pad.txt` from the game folder. Never
+attach anything from `game`, `bin`, `textures` or `crashes`, or your disc image. Details:
 [docs/release/crash-reports.md](<REPO URL>/blob/main/docs/release/crash-reports.md).
 
-## Download
+## Downloads
 
-`HauntingGround-Recomp-0.1-win64.zip` (36.5 MB). SHA-256: `<SHA-256 of the zip>`.
+| File | For | Size | SHA-256 |
+|---|---|---|---|
+| `HauntingGround-Recomp-0.1-win64.zip` | Windows | `<size>` | `<SHA-256>` |
+| `HauntingGround-Recomp-0.1-linux-x64.tar.gz` | Linux | `<size>` | `<SHA-256>` |
 
-The zip bundles unmodified GCC, binutils, MinGW-w64, SDL2 and Vulkan loader binaries from MSYS2 and Python 3.14 from
-python.org, under their own licences (`THIRD_PARTY_NOTICES.txt` in the zip). The project itself is GPL-3.0; its source
-is this repository at the tagged commit, and a copy of the sources the build uses is inside the zip (`engine\src`).
+The Windows zip bundles unmodified GCC, binutils, MinGW-w64, SDL2 and Vulkan loader binaries from MSYS2 and Python
+from python.org; the Linux archive a GCC toolchain from Bootlin and the SDL2 and Vulkan headers. Each keeps its own
+licence (`THIRD_PARTY_NOTICES.txt` in the download). The project itself is GPL-3.0; its source is this repository at
+the tagged commit, and a copy of the sources the build uses is inside each download (`engine/src`). The HD textures
+are not covered by the project's licence (see above).
 
 Windows may warn that `HauntingGround.exe` is from an unknown publisher (it is not code-signed): "More info", then
 "Run anyway".

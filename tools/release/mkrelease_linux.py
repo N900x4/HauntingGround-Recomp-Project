@@ -5,7 +5,7 @@ the HD texture pack (the user's decision for the release bundles, 2026-10-25; th
 compiler is gcc from a Bootlin toolchain (x86-64, glibc 2.39 sysroot: the game then needs glibc 2.34, see
 recomp/glibc23.c); zig was tried first, but its clang takes 4 to 8 minutes per compiled VU1 program (gcc: seconds).
 
-    python3 tools/release/mkrelease_linux.py --gcc DIR --gcc-licenses DIR --textures DIR [--out DIR] [--version 0.2] [--no-zip]
+    python3 tools/release/mkrelease_linux.py --gcc DIR --gcc-licenses DIR --textures DIR [--out DIR] [--version 0.1] [--no-zip]
 
 Run it on a Linux development PC with a finished development build in recomp/ (its binary's imports give the link
 stubs' symbols; recomp/gen is not copied), glslangValidator, and the SDL2 and Vulkan headers in /usr/include.
@@ -106,7 +106,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--gcc', required=True); ap.add_argument('--gcc-licenses', required=True); ap.add_argument('--textures', required=True)
     ap.add_argument('--out', default=os.path.join(os.path.dirname(REPO), 'scratch', 'release-linux'))
-    ap.add_argument('--version', default='0.2'); ap.add_argument('--no-zip', action='store_true')   # (no archive)
+    ap.add_argument('--version', default='0.1'); ap.add_argument('--no-zip', action='store_true')   # (no archive)
     ap.add_argument('--skip-rule-check', action='store_true')
     a = ap.parse_args()
     out = os.path.abspath(a.out)

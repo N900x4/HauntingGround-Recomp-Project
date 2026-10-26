@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Build the release folder (and zip) of Haunting Ground Recomp: no game code, a launcher that builds the game on the
-player's PC from their own disc image with a bundled compiler and Python; from 0.2 also the HD texture pack
+player's PC from their own disc image with a bundled compiler and Python, and the HD texture pack
 (--textures; the user's decision, 2026-10-25; the repository never holds it). tools/release/mkrelease_linux.py makes
 the Linux release.
 
-    python tools/release/mkrelease.py [--out DIR] [--version 0.2] [--msys C:/msys64] [--textures DIR] [--no-zip]
+    python tools/release/mkrelease.py [--out DIR] [--version 0.1] [--msys C:/msys64] [--textures DIR] [--no-zip]
 
 Run it on the development PC with the python.org Python whose copy is to be bundled (3.14 for 0.1), MSYS2 UCRT64 with
 the packages the README's developer build lists, and a finished development build in recomp/ (recomp/gen and

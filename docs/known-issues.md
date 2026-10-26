@@ -1,4 +1,4 @@
-# Known issues (release 0.2)
+# Known issues (release 0.1)
 
 What is known not to work, not to be finished, or not to be tested yet. Reports about anything here are still
 welcome, especially with a recording (see the README, "Reporting bugs").
@@ -8,19 +8,19 @@ welcome, especially with a recording (see the README, "Reporting bugs").
 - **Game coverage.** Tested: the logos, movies, title and menus, New Game and the opening cinematic, the castle grounds
   (`ST_02A`, `ST_013`) and a room beyond (`ST_00D`), LOAD GAME into the Castle Suite, and a 6-minute recorded session
   from there through the next rooms (`ST_010`, `ST_020`). Most of the game, its later chapters, bosses and endings
-  have **not** been played on this build. Since 0.1: the user's sessions through the first meeting with Debilitas
+  have **not** been played on this build. Also played: the user's sessions through the first meeting with Debilitas
   and the chase after it. A wrong picture, a missing sound or a stop is possible anywhere beyond.
 - **Saving** is verified at the Castle Suite clock (a new slot, an empty memory card, overwriting a slot; reloading
   gives exactly the saved state). The route from New Game to the first clock has not been played through on this build
   by a script; it has only been checked in parts.
-- **Hardware.** 0.2 has been tested on one PC: Windows 11 and CachyOS Linux (KDE Plasma, Wayland), AMD Ryzen 7 9800X3D, NVIDIA GeForce RTX 5090 (plus the
+- **Hardware.** 0.1 has been tested on one PC: Windows 11 and CachyOS Linux (KDE Plasma, Wayland), AMD Ryzen 7 9800X3D, NVIDIA GeForce RTX 5090 (plus the
   Ryzen's integrated AMD graphics, seen by the launcher but not used). Untested: AMD and Intel graphics cards as the
   game's GPU, Windows 10, laptops, PCs with fewer than 8 CPU threads, high-DPI and multi-monitor setups beyond the
   basics.
 - **Controllers.** A DualSense over USB was detected and drove vibration and the light bar in automated tests; the
   checklist with the controller in hand (feel, Bluetooth, the touchpad) has not been done yet. DualShock 4 and Xbox
   controllers are supported through SDL but were not tried on real hardware.
-- **Linux** has a release since 0.2, tested on one distribution (CachyOS); other distributions and the Steam Deck have
+- **Linux** is tested on one distribution (CachyOS); other distributions and the Steam Deck have
   not been tried. It needs glibc 2.34 or later, python3 and the system's SDL2. There is no macOS release.
 
 ## Graphics
@@ -80,7 +80,7 @@ welcome, especially with a recording (see the README, "Reporting bugs").
 - **Linux**: the launcher is a shell script; the progress window needs kdialog (KDE) or zenity (GNOME); without them
   the progress shows in the terminal. A missing python3 or SDL2 is reported with the package to install.
 
-## Not in 0.2
+## Not in 0.1
 
 An HD font, Hewie's voice replacement, mod loading, effect passes rewritten as native 4K shaders and macOS are planned
 for later versions (`docs/roadmap-native-port.md`).

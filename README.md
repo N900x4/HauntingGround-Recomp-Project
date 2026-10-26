@@ -5,7 +5,7 @@ your PC from **your own copy of the game**. It is not an emulator: the game's pr
 into a native program, with a hand-written runtime standing in for the PS2 hardware. It runs at up to 4K, at 60 fps
 (frame interpolation), with HD textures and native PlayStation and Xbox controller support.
 
-> **Version 0.2 is an early test release.** The opening, the castle grounds, the first rooms of the castle and the
+> **Version 0.1 is an early test release.** The opening, the castle grounds, the first rooms of the castle and the
 > first meeting with Debilitas have been tested, and saving and loading work, but most of the game has not been played
 > through on it yet. Expect bugs; reports are very welcome (see [Reporting bugs](#reporting-bugs)).
 
@@ -33,7 +33,7 @@ Python). Nothing is downloaded while it runs.
 
 **Windows**
 
-1. Unzip `HauntingGround-Recomp-0.2-win64.zip` into a folder of your choice, for example `C:\Games\HauntingGround`.
+1. Unzip `HauntingGround-Recomp-0.1-win64.zip` into a folder of your choice, for example `C:\Games\HauntingGround`.
    Use a folder whose path has only plain English letters, digits and spaces, and that you can write to (not
    `C:\Program Files`).
 2. Double-click **`HauntingGround.exe`**. Windows may warn that the program is from an unknown publisher (it is not
@@ -45,7 +45,7 @@ Python). Nothing is downloaded while it runs.
 
 **Linux**
 
-1. Unpack `HauntingGround-Recomp-0.2-linux-x64.tar.gz` into a folder in your home folder (your file manager can do
+1. Unpack `HauntingGround-Recomp-0.1-linux-x64.tar.gz` into a folder in your home folder (your file manager can do
    it: "Extract here").
 2. Run **`HauntingGround.sh`** (double-click it and choose "Run", or start it from a terminal).
 3. Choose your `.iso` when asked. The launcher checks it, copies the game files, builds the game (about a minute on a
@@ -114,7 +114,7 @@ The full list is in [docs/known-issues.md](docs/known-issues.md). The main ones:
 
 - Only the opening areas and the first rooms of the castle have been tested in depth; later chapters may have
   graphics or sound problems, or stop.
-- 0.2 has been tested on one PC (Windows 11 and CachyOS Linux, AMD Ryzen, NVIDIA RTX). Other GPUs (AMD, Intel),
+- 0.1 has been tested on one PC (Windows 11 and CachyOS Linux, AMD Ryzen, NVIDIA RTX). Other GPUs (AMD, Intel),
   Windows 10, other Linux distributions, the Steam Deck and slower PCs have not been tried yet.
 - In a few heavy scenes at x4 and 60 fps the game shows 30 fps for a few seconds rather than slow down (it switches
   the in-between pictures off while the renderer cannot keep up).

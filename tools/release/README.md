@@ -33,7 +33,7 @@ The output folder must be outside the repository (the script refuses otherwise).
    `THIRD_PARTY_NOTICES.md` with the package table filled in), `engine/licenses/` and `engine/bundle.json`;
 7. zips it (`HauntingGround-Recomp-VERSION-win64.zip`) and prints its SHA-256.
 
-For 0.1: 94 MB unpacked, **36.5 MB zipped**; compiler 82 MB (cc1.exe alone 39 MB), Python 8.7 MB, sources 2.1 MB.
+For the first 0.1 build (2026-10-15, never published, before the HD textures): 94 MB unpacked, **36.5 MB zipped**; compiler 82 MB (cc1.exe alone 39 MB), Python 8.7 MB, sources 2.1 MB.
 
 ## The release folder on the player's PC
 

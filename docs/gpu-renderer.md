@@ -230,6 +230,15 @@ shown for two VBlanks (`docs/frame-timing.md`). With `HG_GSVK_INTERP=1`:
   doubles (at most 20 s). Ignored while `HG_FF` fast-forwards. On the user's recordings: Debilitas' scene and the chase
   after it 0 late pictures and 0 sound underruns (were 30-35 and 12-14). The real fix is replays submitted without the
   GS thread waiting (Next).
+  **Revised after playtest 8:** on the user's desktop the game waited 3-4.6 ms per VBlank during the chase while the
+  display was never short of a picture (held 2 refreshes 100 %, not ready 0), and the rule left out the in-between
+  pictures for 33 % of the session (46 times, the time off doubling to 20 s): the 30/60 fps wobble the user saw while
+  running. It now also needs the game to have slept less than `HG_VI_SLOW_IDLE` ms (1) per VBlank in those 10
+  VBlanks (`host_idle`, the pacing sleep): only when it has really run out of time. Replay of the hallway and the
+  chase: the real heavy moments are still caught (Debilitas' entrance: waited 15 ms, slept 0), 10-100 VBlanks
+  later than before (5 pictures not ready and 2 underruns over the whole replay, were 0). The 600-VBlank GPU log
+  line now also shows the least the game slept, the most it waited, and how many 10-VBlank checks were over the
+  limit.
 - **Shape check (2026-10-25, the user's report: a glitch in the loading screen's spinning globe).** Only the in-between
   pictures had it: long cyan shards across the armillary rings. The rings repeat one part, so a piece culled in one
   frame was paired (as the only one with its identity) with its twin across the ring, and drawn halfway between the

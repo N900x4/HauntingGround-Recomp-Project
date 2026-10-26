@@ -2102,30 +2102,39 @@ static void vi_drop(int j) { if (vi_slot[j] >= 0) { gsvk_pic_release(vi_slot[j])
    - Behind: when a frame completes and the GPU has not finished what was submitted up to the previous VBlank, this
      frame's in-between picture is left out.
    - Slow: the game's thread waits for the GS thread (a full ring) more than HG_VI_SLOW ms per VBlank (default 3; with
-     the window it otherwise waits only for the display): the GS thread is the bottleneck even with the GPU under its
-     budget (it waits for the replays' GPU work, e.g. before Debilitas' first scene at x4: the game at 82 % speed, the
-     sound running dry). Off for 2 s, then tried again; each time it comes back within 10 s the time off doubles (at
-     most 20 s). */
+     the window it otherwise waits only for the display) AND it has almost no time left to sleep before the display
+     wants the next VBlank (under HG_VI_SLOW_IDLE ms per VBlank, default 1): the GS thread is the bottleneck even with
+     the GPU under its budget (it waits for the replays' GPU work, e.g. before Debilitas' first scene at x4: the game at
+     82 % speed, the sound running dry). Waiting alone is not slowness: running with the camera moving, the game waits
+     3-5 ms and still sleeps several ms per VBlank (playtest 8: the rule without the idle test left 33 % of the session
+     at 30 fps with the display never short of a picture). Off for 2 s, then tried again; each time it comes back
+     within 10 s the time off doubles (at most 20 s). */
 double gs_producer_wait_s(void);
+static double vi_st_idmin = 1e9, vi_st_pwmax; static int vi_st_waitw, vi_st_n;   /* for the 10-s log line: per 10 VBlanks, the least sleep, the longest wait, how often the wait passed HG_VI_SLOW */
 static void vi_adapt_tick(uint64_t vb) {
     static double budget = -1; if (budget < 0) { budget = getenv("HG_VI_BUDGET") ? atof(getenv("HG_VI_BUDGET")) : 14.5; if (budget <= 0) budget = 14.5; }
     static double slow = -1; if (slow < 0) { slow = getenv("HG_VI_SLOW") ? atof(getenv("HG_VI_SLOW")) : 3.0; if (slow <= 0) slow = 1e9; }
-    static uint64_t vb0, rep0, el0, since, slow_until, slow_end, vbs0; static double g0, t0, pw0; static int init, slow_hold = 120;
-    uint64_t ns, nd; double g, w; gsvk_stats(&ns, &nd, &g, &w); const double t = gsvk_tag_ms(), pw = gs_producer_wait_s();
-    if (!init || vb < vb0) { init = 1; vb0 = vbs0 = vb; g0 = g; t0 = t; pw0 = pw; rep0 = vi_rep_frames; el0 = vi_elig; return; }
+    static double slow_idle = -1; if (slow_idle < 0) { slow_idle = getenv("HG_VI_SLOW_IDLE") ? atof(getenv("HG_VI_SLOW_IDLE")) : 1.0; if (slow_idle < 0) slow_idle = 1.0; }
+    extern double host_idle;   /* (host_sdl.c: seconds the game's thread slept pacing to the display) */
+    static uint64_t vb0, rep0, el0, since, slow_until, slow_end, vbs0; static double g0, t0, pw0, id0; static int init, slow_hold = 120;
+    uint64_t ns, nd; double g, w; gsvk_stats(&ns, &nd, &g, &w); const double t = gsvk_tag_ms(), pw = gs_producer_wait_s(), idl = host_idle;
+    if (!init || vb < vb0) { init = 1; vb0 = vbs0 = vb; g0 = g; t0 = t; pw0 = pw; id0 = idl; rep0 = vi_rep_frames; el0 = vi_elig; return; }
     {   extern int host_fast_forward(void);   /* (HG_FF: an unpaced replay always waits for the GS thread) */
-        if (host_fast_forward()) { vi_slow = 0; slow_hold = 120; slow_end = 0; pw0 = pw; vbs0 = vb; }
+        if (host_fast_forward()) { vi_slow = 0; slow_hold = 120; slow_end = 0; pw0 = pw; id0 = idl; vbs0 = vb; }
     }
     if (vb - vbs0 >= 10) {   /* slow (see above), every 10 VBlanks */
-        const double pwv = (pw - pw0) / (double)(vb - vbs0) * 1e3; pw0 = pw; vbs0 = vb;
+        const double pwv = (pw - pw0) / (double)(vb - vbs0) * 1e3, idv = (idl - id0) / (double)(vb - vbs0) * 1e3; pw0 = pw; id0 = idl; vbs0 = vb;
+        if (idv < vi_st_idmin) vi_st_idmin = idv;
+        if (pwv > vi_st_pwmax) vi_st_pwmax = pwv;
+        vi_st_waitw += pwv > slow; vi_st_n++;
         static int nl;
         if (vi_slow && vb >= slow_until) {
             vi_slow = 0; slow_end = vb;
             if (!vi_adapt_skip && nl++ < 100) L("GSVK: VB %llu: in-between pictures on again (tried after %d VBlanks)\n", (unsigned long long)vb, slow_hold);
-        } else if (!vi_slow && pwv > slow) {
+        } else if (!vi_slow && pwv > slow && idv < slow_idle) {
             slow_hold = slow_end && vb - slow_end < 600 ? (slow_hold * 2 > 1200 ? 1200 : slow_hold * 2) : 120;
             vi_slow = 1; slow_until = vb + (uint64_t)slow_hold;
-            if (nl++ < 100) L("GSVK: VB %llu: in-between pictures off: the game waited %.1f ms per VBlank for the GS thread (for %d VBlanks)\n", (unsigned long long)vb, pwv, slow_hold);
+            if (nl++ < 100) L("GSVK: VB %llu: in-between pictures off: the game waited %.1f ms per VBlank for the GS thread and slept %.1f (for %d VBlanks)\n", (unsigned long long)vb, pwv, idv, slow_hold);
         }
     }
     if (vb - vb0 < 30) return;
@@ -3223,6 +3232,7 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg) {
         static double ph0[10], g0, w0; double ph[10], g, w; uint64_t ns, nd; gsvk_phase_stats(ph); gsvk_stats(&ns, &nd, &g, &w);
         if (vk_live) { double d[10]; for (int i = 0; i < 10; i++) { d[i] = (ph[i] - ph0[i]) / 600; ph0[i] = ph[i]; }
             L("GSVK GPU ms per VBlank: %.2f (GS thread waited %.2f)", (g - g0) / 600, (w - w0) / 600); g0 = g; w0 = w;
+            if (vi_adapt && vi_st_n) { L("; the game per 10 VBlanks: slept at least %.1f ms, waited for the GS thread at most %.1f ms, more than the slow limit in %d of %d", vi_st_idmin, vi_st_pwmax, vi_st_waitw, vi_st_n); vi_st_idmin = 1e9; vi_st_pwmax = 0; vi_st_waitw = vi_st_n = 0; }
             if (ph[0] + ph[1] > 0) L(": exact %.2f, copies %.2f, single %.2f, compose %.2f, transfers %.2f; replays: exact %.2f, copies %.2f, single %.2f, transfers %.2f",
                 d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[9]);
             if (vi_adapt) { static uint64_t s0; L("; in-between pictures left out: %llu (%llu so far: %llu frames for the budget, %llu with the GPU behind), %s, expected %.1f ms per VBlank with them (interpolation %.2f x the rest)",

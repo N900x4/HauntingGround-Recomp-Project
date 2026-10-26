@@ -577,7 +577,7 @@ void rec_syscall(Ctx *ctx, uint32_t pc) {
         if (a0 == 4) r |= 0x70000;   /* SMFLG: IOP says SIFINIT|CMDINIT|BOOTEND */
         if (a0 == 0x80000000u) r = IOP_CMDBUF;   /* IOP-side SIF command buffer */
         ret = r; L("sceSifGetReg(0x%x) -> 0x%x\n", a0, r); break; }
-    case 0x78: case -0x78: L("sceSifSetDChain()\n"); ret = 0; break;
+    case 0x78: case -0x78: { static int n; if (n++ < 20) L("sceSifSetDChain()%s\n", n == 20 ? " (not logged again)" : ""); } ret = 0; break;   /* (the game calls it about 90 times a second) */
     case 0x77: case -0x77: { /* sceSifSetDma(desc*, count): EE->IOP transfers, handed to the IOP HLE */
         for (uint32_t i = 0; i < a1 && i < 32; i++) { uint32_t d = a0 + i * 16; iop_sifdma(R32(d), R32(d + 4), R32(d + 8), R32(d + 12)); }
         ret = ++sifdma_id; ctx->r[2].s64[0] = ret; if (num > 0) iop_flush(); return; }

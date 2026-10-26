@@ -34,7 +34,7 @@ Debilitas' introduction. Fixed: HD ids by a quick block hash (the GS thread's CP
 with the window, the sound backlog left out instead of resampled away, **IOP sync mode 2** (mode 1's IOP ran 1.7 %
 fast: `frame-timing.md`), ZMSK Z pages read not written (17,343 CLUT read-backs -> 0), the adaptive interpolation's
 "slow" rule and the display lock dropped after 6 late presents (`gpu-renderer.md`). Debug: `HG_FF`,
-`HG_IOPSYNC_AT`, `HG_HOSTPROF_FROM`, `HG_DLLOG`, `HG_HDTEX_CHECK`, `HG_HDTEX_WAIT`, `HG_VI_SLOW`. All gates in mode 2
+`HG_IOPSYNC_AT`, `HG_HOSTPROF_FROM`, `HG_DLLOG`, `HG_HDTEX_CHECK`, `HG_HDTEX_WAIT`, `HG_VI_SLOW`, `HG_VI_SLOW_IDLE`. All gates in mode 2
 (references re-frozen, `tools/verify/REFERENCES.md`). For the release (the user's plan: Windows and Linux bundles
 with the HD textures): BC7 `.dds` replacements (`bc7pack.py`), the `../textures` folder by default, the Options
 menu's HD textures row (`textures.md` 8.1, `options-menu.md`).

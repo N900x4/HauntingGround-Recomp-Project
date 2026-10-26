@@ -1,6 +1,6 @@
 # Reddit drafts for the 0.1 playtest call
 
-Drafts for the user to post (nothing has been posted). Replace `<REPO URL>` with the GitHub repository. Before
+Drafts for the user to post (nothing has been posted). The repository: https://github.com/N900x4/HauntingGround-Recomp-Project. Before
 posting, check each subreddit's rules on self-promotion and on posts about recompilation and disc images (r/emulation
 and r/PS2 both forbid links to game files; these posts contain none). r/HauntingGround: check that it exists and is
 active; if not, r/survivalhorror is an alternative for draft 3.
@@ -35,7 +35,7 @@ a minute on a fast machine). Nothing gets downloaded.
 It's a test build: the opening, the grounds, the first castle rooms and the first Debilitas encounter are tested, and saving/loading is verified,
 but most of the game hasn't been played on it, and it has only run on one PC so far (9800X3D + RTX 5090, Windows 11 and CachyOS). I'm looking
 for people willing to play further and on other hardware (AMD/Intel GPUs, Windows 10, other distros, the Steam Deck, older CPUs) and to report what
-breaks. Known issues and how to report: <REPO URL>
+breaks. Known issues and how to report: https://github.com/N900x4/HauntingGround-Recomp-Project
 
 Happy to answer questions about how it works.
 
@@ -47,7 +47,7 @@ Happy to answer questions about how it works.
 
 **Body:**
 
-*Haunting Ground* never got a PC port, so I've been building one: the game's own program is converted to PC code
+*Haunting Ground* never got an official PC release, so I've been building a native version: the game's own program is converted to PC code
 (static recompilation), and you build it on your PC from your own copy of the game. Version 0.1 is a first test
 release for Windows and Linux.
 
@@ -62,7 +62,7 @@ your .iso, checks it, and builds the game (about a minute, one time).
 
 It's early: the start of the game is tested, much of it isn't yet, and it has run on one PC only. If you have the
 game and some time, I'd love reports on how far you get and what goes wrong (the game folder has logs that make bugs
-easy to track down). Link and details: <REPO URL>
+easy to track down). Link and details: https://github.com/N900x4/HauntingGround-Recomp-Project
 
 Not affiliated with Capcom or Sony.
 
@@ -88,6 +88,6 @@ saving works, but nobody has played much further on it. If you can play through 
 anything odd (graphics, sound, crashes, controls), that would help a lot. Reporting is simple: describe what
 happened and attach two log files from the game folder.
 
-Link, instructions and known issues: <REPO URL>
+Link, instructions and known issues: https://github.com/N900x4/HauntingGround-Recomp-Project
 
 (Fan project, not affiliated with or endorsed by Capcom.)

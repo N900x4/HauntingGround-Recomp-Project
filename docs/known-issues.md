@@ -40,8 +40,11 @@ welcome, especially with a recording (see the README, "Reporting bugs").
 - **HD textures** replace the game's textures in the upscaled picture (stage textures, characters, menu panels): AI
   upscales of the originals, so small details can differ from the PS2's look. Text (the fonts) and effects stay at
   the original resolution. The first time a texture is needed its HD version may appear a moment after the original.
-- **Heavy scenes at x4 and 60 fps** (for example Debilitas' first appearance) can show 30 fps for a few seconds: when
-  the renderer cannot keep up, the in-between pictures are switched off instead of slowing the game and its sound.
+- **Heavy moments at x4 and 60 fps** (Debilitas' entrance in the hallway, two moments of the chase after it) show a
+  brief hitch (a picture or two repeated, rarely a click in the sound), then 30 fps for a second or two: when the
+  renderer cannot keep up, the in-between pictures are switched off instead of slowing the game and its sound. The
+  rest of the time 60 fps holds, also while running. The real fix (in-between pictures made without the game waiting
+  for them) is planned for 0.2.
 - **Pacing.** With V-Sync "On (smooth)" (the default) the game follows the display when its refresh rate is a
   multiple of 60 Hz (60, 120, 240): every picture stays up for the same number of refreshes, the game runs up to
   0.5 % faster than a PS2 (0.1 % at 60/120 Hz) and the sound is resampled to match. About 1 picture in 300 is still held
@@ -82,5 +85,5 @@ welcome, especially with a recording (see the README, "Reporting bugs").
 
 ## Not in 0.1
 
-An HD font, Hewie's voice replacement, mod loading, effect passes rewritten as native 4K shaders and macOS are planned
+An HD font and effect passes rewritten as native 4K shaders 
 for later versions (`docs/roadmap-native-port.md`).

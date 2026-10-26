@@ -2,8 +2,7 @@
      Title: "Haunting Ground Recomp 0.1 (test release)".
      Assets: HauntingGround-Recomp-0.1-win64.zip (tools/release/mkrelease.py --textures, run on Linux with the MSYS2
      tree from the Windows drive under Wine) and HauntingGround-Recomp-0.1-linux-x64.tar.gz
-     (tools/release/mkrelease_linux.py), both built from f920fc2. Both under GitHub's 2 GB per file. Fill in
-     <REPO URL> before publishing. -->
+     (tools/release/mkrelease_linux.py), both built from f920fc2. Both under GitHub's 2 GB per file. -->
 
 # Haunting Ground Recomp 0.1 (test release)
 
@@ -49,12 +48,12 @@ Capcom or Sony.
 
 Tested in depth: the opening, the castle grounds, the first castle rooms and the first meeting with Debilitas, on one
 PC (Ryzen 7 9800X3D, RTX 5090; Windows 11 and CachyOS Linux). We are looking for **playtesters**: how far can you get,
-and what goes wrong on your hardware? Known issues: [docs/known-issues.md](<REPO URL>/blob/main/docs/known-issues.md).
+and what goes wrong on your hardware? Known issues: [docs/known-issues.md](https://github.com/N900x4/HauntingGround-Recomp-Project/blob/main/docs/known-issues.md).
 
 **Reporting bugs:** open an issue with what happened, your PC (Windows version or Linux distribution, CPU, GPU), and
 `logs/play.log`, `logs/launcher.log` and, if you can, the newest `recordings/.../pad.txt` from the game folder. Never
 attach anything from `game`, `bin`, `textures` or `crashes`, or your disc image. Details:
-[docs/release/crash-reports.md](<REPO URL>/blob/main/docs/release/crash-reports.md).
+[docs/release/crash-reports.md](https://github.com/N900x4/HauntingGround-Recomp-Project/blob/main/docs/release/crash-reports.md).
 
 ## Downloads
 

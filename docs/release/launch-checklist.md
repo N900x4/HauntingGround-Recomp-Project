@@ -40,7 +40,7 @@ account).
 | # | Step | Who |
 |---|---|---|
 | 4.1 | Create the GitHub repository (the user's account; public), set the description and topics | U |
-| 4.2 | Replace `<REPO URL>` in `docs/release/github-release-0.1.md` and `reddit-posts.md` | C |
+| 4.2 | Replace `<REPO URL>` in `docs/release/github-release-0.1.md` and `reddit-posts.md` | C: done (https://github.com/N900x4/HauntingGround-Recomp-Project, created by the user 2026-10-27) |
 | 4.3 | Push `main` (the local history only holds code and docs; check once more that nothing game-derived is tracked: `git ls-files` against `recomp/gen`, `*.iso`, `*.elf`, `*.irx`, `*.dds`, `*.png` from texwork) | C checks, U pushes or says go |
 | 4.4 | Tag `v0.1` on the release commit; the release page from `github-release-0.1.md` with both downloads (and the source archives of 3.2) | U or C on the user's word |
 | 4.5 | Download both files back from GitHub once and compare the SHA-256 | C |

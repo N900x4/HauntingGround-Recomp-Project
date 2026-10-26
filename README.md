@@ -1,13 +1,14 @@
 # Haunting Ground Recomp
 
-A native Windows and Linux version of *Haunting Ground* (PlayStation 2, North American release, SLUS-21075), built on
-your PC from **your own copy of the game**. It is not an emulator: the game's program is translated into C and compiled
-into a native program, with a hand-written runtime standing in for the PS2 hardware. It runs at up to 4K, at 60 fps
-(frame interpolation), with HD textures and native PlayStation and Xbox controller support.
+A native Windows and Linux version of *Haunting Ground* (PlayStation 2, USA, SLUS-21075), built on
+your PC from an ISO of **your own disc**. It is not an emulator; the game's program is translated into C and compiled
+into a native program, with a hand-written runtime standing in for the PS2 hardware. It runs at up to 4K and at 60 fps
+using frame interpolation, with HD textures (a blend of 4xHDcube3 for detail and 4x-PBRify_UpscalerV4 for skin and
+smooth surfaces), and supports PlayStation and Xbox controllers over USB or Bluetooth.
 
 > **Version 0.1 is an early test release.** The opening, the castle grounds, the first rooms of the castle and the
 > first meeting with Debilitas have been tested, and saving and loading work, but most of the game has not been played
-> through on it yet. Expect bugs; reports are very welcome (see [Reporting bugs](#reporting-bugs)).
+> through on it yet. Expect bugs! Reports are very welcome (see [Reporting bugs](#reporting-bugs)).
 
 **Not affiliated with or endorsed by Capcom or Sony.** No game code is included in any download: the game is built from
 your own legally obtained copy, dumped to a disc image (.iso) yourself. The download does include **HD textures**: the
@@ -20,9 +21,10 @@ game's own textures, upscaled (see [Legal](#legal)).
   desktops; Debian/Ubuntu: `libsdl2-2.0-0`, Fedora: `SDL2`, Arch: `sdl2`).
 - A graphics card with Vulkan (any NVIDIA, AMD or Intel GPU from roughly the last ten years) is recommended. Without
   Vulkan the game uses its software renderer, which is exact but slower and has no upscaling or 60 fps.
-- A disc image of the **North American** disc, *Haunting Ground*, **SLUS-21075**, as a plain `.iso` file that you
-  made from your own disc (for example with ImgBurn or any DVD dumping tool). European and Japanese (Demento) discs
-  are not supported yet. Compressed images (.chd, .cso, .zip, .7z) must be turned back into a plain .iso first.
+- A disc image (ISO) of the **North American** disc, *Haunting Ground*, version **SLUS-21075**, as a plain `.iso` file that you
+  made from your own disc (look up how to image a disc). European and Japanese (Demento) discs
+  are not supported yet: their game program differs from the US one. Compressed images (.chd, .cso, .zip, .7z) must
+  be turned back into a plain .iso first.
 - About 6 GB of free disk space (the download unpacked is about 2.3 GB, mostly the HD textures; the game files and
   the build need the rest) and a minute or a few for the first start.
 
@@ -116,14 +118,13 @@ The full list is in [docs/known-issues.md](docs/known-issues.md). The main ones:
   graphics or sound problems, or stop.
 - 0.1 has been tested on one PC (Windows 11 and CachyOS Linux, AMD Ryzen, NVIDIA RTX). Other GPUs (AMD, Intel),
   Windows 10, other Linux distributions, the Steam Deck and slower PCs have not been tried yet.
-- In a few heavy scenes at x4 and 60 fps the game shows 30 fps for a few seconds rather than slow down (it switches
-  the in-between pictures off while the renderer cannot keep up).
-- Text is drawn at its original resolution (no HD font yet).
+- A few heavy moments at x4 and 60 fps (Debilitas' entrance, parts of the chase after it) briefly drop to 30 fps. This
+  will be addressed in 0.2.
+- Text is not upscaled yet.
 - 4K together with 60 fps needs a strong GPU; x6 with 60 fps and x5 with 120 fps do not reach full speed even on an RTX
-  5090.
+  5090. Optimizations are underway.
 - 60 fps is made by frame interpolation: fast movement can show small glitches in the in-between pictures.
 - Changing the renderer needs a restart; the analog sticks cannot be remapped.
-- A few dark specks flicker near a door in one room of the castle; it is not yet known whether the original does the same.
 
 ## Reporting bugs
 

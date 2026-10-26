@@ -14,11 +14,17 @@ SLPM_*
 *.IRX
 *.irx
 *.IMG
+*.bin
+*.BIN
+*.part
 
 # Decoded / extracted assets
 *.wav
 *.WAV
 *.png
+*.dds
+*.ppm
+/textures/
 *.tex
 *.TEX
 *.glb
@@ -42,8 +48,13 @@ recomp/hgboot.*
 *.exe
 *.dll
 
-# Logs and local runs
+# Logs and local runs (a release folder's logs/, crash dumps, built game)
 *.log
+logs/
+*.dmp
+build/
+bin/
+*.tar.gz
 funcs_entered*.txt
 
 # Python / editor
@@ -51,6 +62,7 @@ __pycache__/
 *.pyc
 .vscode/
 .idea/
+.*.kate-swp
 memcards/
 hostprof.txt
 recordings/

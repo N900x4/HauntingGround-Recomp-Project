@@ -11,7 +11,7 @@ account).
 | # | Step | Who | State |
 |---|---|---|---|
 | 1.1 | Linux archive `HauntingGround-Recomp-0.1-linux-x64.tar.gz` (`tools/release/mkrelease_linux.py`, from the release commit) | C | built from 94391f3: 1,633.7 MB, SHA-256 `e50f87096e927847046009d8e63ddde4536b1c53f2935b54b887f560a5592c91` |
-| 1.2 | Linux: unpack into an empty folder, first start with the ISO in batch mode, frames identical to hashA, ISO untouched | C | done for the 0.2-labelled build (same code); repeat once on the final commit |
+| 1.2 | Linux: unpack into an empty folder, first start with the ISO in batch mode, frames identical to hashA, ISO untouched | C | done 2026-10-26 on the 0.1 archive: first start 64 s, ISO untouched, 706/706 frames identical to hashA |
 | 1.3 | The Windows drive: boot Windows ~15 min, **or** mount it read-only on Linux (`udisksctl mount -b /dev/nvme0n1p3 -o ro`, needs the password) | U | waiting |
 | 1.4 | Windows zip `HauntingGround-Recomp-0.1-win64.zip` (`mkrelease.py --textures D:/ps2-work/texwork/release_textures`) | C (on Windows or with the drive) | waiting for 1.3 |
 | 1.5 | Windows: first start from an empty folder (real Windows, or Wine as a first check), frames identical to hashA | C, then U on real Windows | waiting for 1.4 |

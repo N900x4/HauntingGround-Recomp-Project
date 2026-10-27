@@ -132,7 +132,7 @@ sounds and footer:
  [pad] Keyboard         Change                -> the keyboard page
  [pad] Controller       PlayStation           -> the controller page (the value: the kind connected)
       one note: the renderer changing at the next start, or the software renderer running (resolution, frame
-      rate and HD need the GPU), or HD at native resolution, else "60 and 120 fps add about 17 ms of delay".
+      rate and HD need the GPU), or HD at native resolution, else "60 fps adds about 17 ms of delay".
  (x):Select  (^):Back  ([]):Reset Defaults
 ```
 

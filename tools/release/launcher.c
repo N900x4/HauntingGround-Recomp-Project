@@ -160,6 +160,8 @@ static int start_game(void) {
     for (char *l = tail; l && *l; ) {
         char *e = strchr(l, '\n'); size_t len = e ? (size_t)(e - l) : strlen(l); if (len > 590) len = 590;
         if (!strncmp(l, "STOP: ", 6)) { memcpy(stopline, l + 6, len - 6); stopline[len - 6] = 0; }
+        /* the stats summary repeats it; after a long session the first one is more than 64 KB from the end */
+        if (!strncmp(l, "==== STOP: ", 11)) { memcpy(stopline, l + 11, len - 11); stopline[len - 11] = 0; }
         if (!strncmp(l, "==== CRASH", 10)) { memcpy(crash, l, len); crash[len] = 0; }
         l = e ? e + 1 : 0;
     }

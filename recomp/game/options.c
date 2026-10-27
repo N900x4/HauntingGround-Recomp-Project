@@ -358,7 +358,7 @@ static void draw_display_page(Draw *d, const Opt *o) {
             d_sprite(d, 448, y, SPR_ARROW_R, a);
         }
     }
-    const char *note = "60 and 120 fps add about 17 ms of delay.";   /* one line: the most useful note */
+    const char *note = "60 fps adds about 17 ms of delay.";   /* one line: the most useful note */
     if (s->renderer_next != s->renderer) note = "The renderer changes at the next start.";
     else if (!s->renderer) note = "Resolution, frame rate and HD need the GPU renderer.";
     else if (s->scale == 1 && s->hd_on && hdtex_available() > 0) note = "HD textures show above native resolution.";

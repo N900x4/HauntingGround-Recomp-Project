@@ -341,7 +341,11 @@ static void draw_display_page(Draw *d, const Opt *o) {
     d_panel(d);
     for (int r = R_RESOLUTION; r <= R_VSYNC; r++) d_row_strip(d, ROW_Y(r));   /* bars where the two-column area was */
     d_row_strip(d, ROW_Y(R_PAD));                                             /* (over the Volume row's slider line) */
-    d_plain(d, ROW_Y(8), 32);                                                 /* the last row: a note */
+    const char *note = 0;                                                     /* the last row: a note, when one applies */
+    if (s->renderer_next != s->renderer) note = "The renderer changes at the next start.";
+    else if (!s->renderer) note = "Resolution, frame rate and HD need the GPU renderer.";
+    else if (s->scale == 1 && s->hd_on && hdtex_available() > 0) note = "HD textures show above native resolution.";
+    d_plain(d, ROW_Y(8), 32);
     for (int r = 0; r < NROWS; r++) {
         const int y = ROW_Y(r), edit = o->editing && o->row == r;
         char val[64];
@@ -358,11 +362,7 @@ static void draw_display_page(Draw *d, const Opt *o) {
             d_sprite(d, 448, y, SPR_ARROW_R, a);
         }
     }
-    const char *note = "60 fps adds about 17 ms of delay.";   /* one line: the most useful note */
-    if (s->renderer_next != s->renderer) note = "The renderer changes at the next start.";
-    else if (!s->renderer) note = "Resolution, frame rate and HD need the GPU renderer.";
-    else if (s->scale == 1 && s->hd_on && hdtex_available() > 0) note = "HD textures show above native resolution.";
-    d_text_centred(d, 256, ROW_Y(8) + 8, COL_NORMAL, note, 14);
+    if (note) d_text_centred(d, 256, ROW_Y(8) + 8, COL_NORMAL, note, 14);
     d_sprite(d, 32, ROW_Y(o->row), SPR_CURSOR, 128);
 }
 static void draw_map_page(Draw *d, const Opt *o) {

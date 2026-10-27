@@ -2,7 +2,7 @@
      Title: "Haunting Ground Recomp 0.1 (test release)".
      Assets: HauntingGround-Recomp-0.1-win64.zip (tools/release/mkrelease.py --textures, run on Linux with the MSYS2
      tree from the Windows drive under Wine) and HauntingGround-Recomp-0.1-linux-x64.tar.gz
-     (tools/release/mkrelease_linux.py), both built from 22108be (after the Windows test: the Esc fix in the launcher, no
+     (tools/release/mkrelease_linux.py), both built from bbf79f6 (= 22108be before the move to the N900x4 account) (after the Windows test: the Esc fix in the launcher, no
      default note in the Options menu). Both under GitHub's 2 GB per file. -->
 
 # Haunting Ground Recomp 0.1 (test release)
@@ -60,8 +60,8 @@ attach anything from `game`, `bin`, `textures` or `crashes`, or your disc image.
 
 | File | For | Size | SHA-256 |
 |---|---|---|---|
-| `HauntingGround-Recomp-0.1-win64.zip` | Windows | 1,574.6 MB | `d761e87bdb75ce5d5f2ef989db39d8d9ae7e499ff463a66462c6569b721e77a5` |
-| `HauntingGround-Recomp-0.1-linux-x64.tar.gz` | Linux | 1,633.7 MB | `74d5a91e7614ebc92dcd4d437742c2d10ea4bacf32eedd73087cec5c403bce0f` |
+| `HauntingGround-Recomp-0.1-win64.zip` | Windows | 1,574.6 MB | `285bcfa7d74ffd3490ed8ed04edbaad878d1a1751ea77b6685fe6ebdf1ff940a` |
+| `HauntingGround-Recomp-0.1-linux-x64.tar.gz` | Linux | 1,633.7 MB | `778902f977cddabab9a97f82d0bdc554576095d77e5481e570acec9b69a8534b` |
 | `HauntingGround-Recomp-0.1-compiler-sources-win64.tar` | Source of the compiler in the Windows zip (not needed to play) | 334.6 MB | `dabe5331537fb6838f0ad90c8496c999a05e770ed60adf1eec71335c429498d4` |
 | `HauntingGround-Recomp-0.1-compiler-sources-linux-x64.tar` | Source of the compiler in the Linux archive (not needed to play) | 263.1 MB | `2f01eba0da4814dc08564a3eb1c1223f4b4f4b5f68865ead09da8d2a740ae698` |
 

@@ -378,8 +378,8 @@ static void log_line(const char *what) {
     char res[16];
     if (eff.scale == 0) snprintf(res, sizeof res, "auto"); else if (eff.scale == 1) snprintf(res, sizeof res, "native"); else snprintf(res, sizeof res, "x%d", eff.scale);
     char envs[256] = ""; for (int i = 0; i < NENV; i++) if (env_set[i]) { strcat(envs, " "); strcat(envs, envmap[i].env); }
-    L("settings%s: renderer %s, resolution %s, %d fps, %s, vsync %s, window x%d, vibration %s, light bar %s, dead zone %d%% (file: %s%s; environment:%s)\n", what,
-      eff.renderer ? "gpu" : "software", res, eff.fps, eff.fullscreen ? "full screen" : "window", vsync_name(eff.vsync), eff.window_scale,
+    L("settings%s: renderer %s, resolution %s, %d fps, %s, %s, vsync %s, window x%d, vibration %s, light bar %s, dead zone %d%% (file: %s%s; environment:%s)\n", what,
+      eff.renderer ? "gpu" : "software", res, eff.fps, eff.fullscreen ? "full screen" : "window", eff.wide ? "widescreen" : "4:3", vsync_name(eff.vsync), eff.window_scale,
       settings_vibration_name(eff.vibration), settings_lightbar_name(eff.lightbar), eff.deadzone,
       ini_off ? "off" : ini_path, loaded ? "" : ", none", envs[0] ? envs : " none");
 }

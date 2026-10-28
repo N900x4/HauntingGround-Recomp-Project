@@ -119,7 +119,8 @@ Native rows are practical and safe. The design (implemented in `recomp/game/opti
 ### The rows
 
 Down from Screen Position (or Up from Controller Type) turns the page: the same panel (the title's "Options" header,
-or the sub-screen's tabs) with eight rows (HD textures added 2026-10-26) in the game's 32-pixel grid, the game's icons, bars, cursor, arrows, colours,
+or the sub-screen's tabs) with nine rows (HD textures added 2026-10-26, Aspect ratio 2026-10-29; since then 30 pixels apart, on parchment of
+our own with a bar per row, so the note still fits above the footer), the game's icons, bars, cursor, arrows, colours,
 sounds and footer:
 
 ```
@@ -127,6 +128,7 @@ sounds and footer:
  [+]  Resolution        x5  3200 x 2240       Native, x2 ... x6, Auto (this display); GPU renderer only
  [~]  Frame rate        60 fps                30 | 60 | 120 (120 only at native resolution); GPU renderer only
  [+]  Display           Window                Window | Full screen
+ [+]  Aspect ratio      4:3 (original)        4:3 (original) | Widescreen (the display's shape, up to 2.4:1; at once)
  [~]  V-Sync            On (smooth)           On (smooth) | Exact 59.94 Hz | Off (may tear)
  [+]  HD textures       On                    On | Off ("Not installed" without a textures folder; GPU renderer only)
  [pad] Keyboard         Change                -> the keyboard page
@@ -199,6 +201,7 @@ stay in its system data and its memory-card save; nothing of ours is written the
 | Resolution, frame rate | at the next VBlank | `gs_vblank` passes the wanted factor and interpolation with each VBlank marker; the GS thread (`vk_reconfigure` in `gs.c`) finishes the GPU's work, reads back what it drew into `vm`, makes local memory again for the new number of copies (`gsvk_resize`: buffers and descriptor), uploads it all from `vm`, and restarts frame interpolation (two whole frames before the first in-between picture). Copy 0 holds the same memory before and after. 2-27 ms. |
 | Presenting rate | when the GS switches | the UI thread follows `gs_interp_now()`: 59.94 or 119.88 presents a second; the picture queue's depth follows (2 or 5) |
 | Full screen | at once | the UI thread compares the setting with the window |
+| Aspect ratio | at once | the camera hook and the 2D squeeze read `settings_wide_factor()` each frame; the window blit uses `settings_display_aspect()`; a window (not full screen) takes the new shape at its height |
 | V-Sync | at the next present | `gsvk_present_mode()`: the swapchain is made again in the new mode |
 | Keyboard, controller | at once | the UI thread copies the maps when the settings' generation changes |
 | Renderer | next start | the software GS and the GPU renderer are chosen when the game starts |

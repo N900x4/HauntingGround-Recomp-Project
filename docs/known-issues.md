@@ -54,6 +54,12 @@ welcome, especially with a recording (see the README, "Reporting bugs").
 - **Linux desktops**: once in a test session (KDE Plasma, Wayland) the desktop showed only every third refresh for a few
   seconds; the game now notices this at once and keeps its own pace (the screen stutters, the game and the sound keep
   running). Full screen avoids most of the desktop's work.
+- **Widescreen** (0.2) shows what the game's camera always had just outside the 4:3 frame. Scenes were framed for 4:3,
+  so at the sides you may sometimes see an unfinished edge of a room, or a character standing just off-camera waiting
+  for a cue. The game's own pictures are only as wide as on the PS2 (512 pixels, drawn at the chosen resolution), so
+  widescreen spreads them over more of the screen: a little softer horizontally; a higher resolution makes up for it.
+  Menus, text and movies are told apart from the 3D scene by how the game draws them; one that is drawn another way
+  would come out stretched or squeezed (please report it with a screenshot).
 
 ## Settings and controls
 

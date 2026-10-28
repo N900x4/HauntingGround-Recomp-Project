@@ -2444,6 +2444,7 @@ static void mark_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int
    - a fill without texture across 7/8 of its scissor box or more (fades, darkening, the letterbox bars).
    (The game's 2D is depth-tested too, so the depth test tells nothing.)
    HG_WIDELOG=FROM:TO logs every sprite in those VBlanks with its class (s squeezed, r effect, f fill, o another buffer). */
+static float wide_k_game = 1.0f, wide_k_gs = 1.0f;   /* widescreen factor: sampled by the game thread at each VBlank, and the GS thread's from that VBlank's marker on */
 static int gif_cur_path;   /* the GIF path of what is being drawn (widescreen: 1 is VU1's, the 3D models) */
 static uint64_t wide_rt[2][8]; static uint32_t wide_rt_key[3]; static int wide_rt_keyok, wide_rt_box[4];   /* the area marked for this frame buffer */
 static long wide_log_from = -2, wide_log_to;
@@ -2535,7 +2536,7 @@ static void vertex_kick(Vtx v, int draw) {
                     L("BIGTRI prim %d tme %d: (%d,%d z%u q%g) (%d,%d z%u q%g) (%d,%d z%u q%g) scissor %d-%d,%d-%d\n", prim, d.tme, xs[0], ys[0], w[0].z, w[0].q, xs[1], ys[1], w[1].z, w[1].q, xs[2], ys[2], w[2].z, w[2].q, d.scx0, d.scx1, d.scy0, d.scy1);
             }
         }
-        {   const float k = settings_wide_factor(); if (k != 1.0f) wide_2d(&d, prim, w, k); }
+        if (wide_k_gs != 1.0f) wide_2d(&d, prim, w, wide_k_gs);
         if (!skip) { if (gsw_n) gsw_issue(&d, prim, w); else rasterize(&d, prim, w); }
         int k = prim == 6 ? 0 : (prim >= 3 && prim <= 5) ? 1 : 2;
         st_prims[k]++; st_px[k] += n_pixels - px0; st_visits[k] += n_visits - vis0; st_time[k] += host_now() - t0;
@@ -3247,9 +3248,14 @@ int gs_display(uint32_t *out, int maxw, int maxh, int *pw, int *ph) {
     pthread_mutex_unlock(&front_mx);
     return ok;
 }
+float gs_wide_factor(void) { return wide_k_game; }   /* game thread (the camera hook): the factor of this frame */
 void gs_vblank(uint64_t vb) {
-    /* the renderer configuration wanted from this VBlank on (settings): factor | interpolation << 8 */
-    const uint64_t cfg = (uint64_t)settings_gs_scale() | (uint64_t)settings_gs_interp() << 8;
+    /* the renderer configuration wanted from this VBlank on (settings): factor | interpolation << 8 | widescreen factor
+       (float bits) << 32. The widescreen factor goes with the VBlank so that the GS thread squeezes the 2D of exactly
+       the frames whose camera was widened (reading the setting itself, it switched a frame early or late at random). */
+    wide_k_game = settings_wide_factor();
+    uint32_t kb; memcpy(&kb, &wide_k_game, 4);
+    const uint64_t cfg = (uint64_t)settings_gs_scale() | (uint64_t)settings_gs_interp() << 8 | (uint64_t)kb << 32;
     if (!mtgs) { gs_vblank_exec(vb, gspriv, cfg); return; }
     memcpy(priv_snap[vb & 3], gspriv, 0xB0);
     atomic_store(&vb_sent, vb);
@@ -3258,6 +3264,7 @@ void gs_vblank(uint64_t vb) {
 }
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg) {
     gsw_drain();   /* the display and frame dumps read local memory */
+    { const uint32_t kb = (uint32_t)(cfg >> 32); memcpy(&wide_k_gs, &kb, 4); }
 #ifdef HAVE_VULKAN
     vk_reconfigure(vb, (int)(cfg & 0xFF), (int)(cfg >> 8 & 0xFF));
     if (hd_live > 0) hdtex_vblank();

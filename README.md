@@ -86,6 +86,9 @@ In the game: **Options**, then press Down past *Screen Position* to reach the ex
   stretched to a 4K screen's height; x5 is about 4K). Changes at once.
 - **Frame rate**: 30 (the original), 60 (the default with the GPU renderer) or 120 (120 at native resolution only).
   60 and 120 add about 17 ms of delay.
+- **Aspect ratio**: 4:3 (the original) or Widescreen. Widescreen fills a 16:9 (or 16:10, or ultrawide up to 21:9)
+  screen without stretching: the camera keeps its position and its framing, and you see more to the left and right.
+  Menus, text and movies stay 4:3 in the middle. Changes at once.
 - **Display**: window or full screen; **V-Sync**: On (smooth, the default: locked to your display, every picture stays
   up equally long on 60/120/240 Hz screens), Exact 59.94 Hz (the PS2's own rate), or Off (may tear).
 - **HD textures**: On (the default) or Off; shown above native resolution with the GPU renderer. Changes at once.

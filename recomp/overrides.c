@@ -79,7 +79,8 @@ static int ov_frame_end(Ctx *c) { return ov_frame_mark(c, "FE"); }
    Only those two calls are changed (their return addresses). */
 static int ov_view_screen(Ctx *c) {
     const uint32_t ra = c->r[31].u32[0];
-    if (ra == 0x122888 || ra == 0x1228c8) { const float k = settings_wide_factor(); if (k != 1.0f) c->f[13] *= k; }
+    extern float gs_wide_factor(void);   /* (gs.c: this frame's, sampled at the VBlank, as the GS thread's 2D squeeze) */
+    if (ra == 0x122888 || ra == 0x1228c8) { const float k = gs_wide_factor(); if (k != 1.0f) c->f[13] *= k; }
     return 0;
 }
 void overrides_init(void) {

@@ -1808,9 +1808,29 @@ static void vi_log_upload(uint32_t word, uint32_t n, const uint32_t *src) {
     L->e = vi_grow(L->e, &L->cap, L->n + 1, sizeof *L->e);
     VkLogEnt *e = &L->e[L->n++]; e->op = 1; e->word = word; e->n = n; e->off = L->nd; L->nd += n;
 }
-typedef struct { uint64_t key; int idx; } ViK;
+typedef struct { uint64_t key; int idx, x; } ViK;   /* x: the first vertex's x (the previous frame's entries) */
 static int vik_cmp(const void *a, const void *b) {
     const ViK *x = a, *y = b; return x->key < y->key ? -1 : x->key > y->key ? 1 : x->idx - y->idx;
+}
+static int vik_cmp_x(const void *a, const void *b) {
+    const ViK *x = a, *y = b; return x->key < y->key ? -1 : x->key > y->key ? 1 : x->x != y->x ? (x->x < y->x ? -1 : 1) : x->idx - y->idx;
+}
+/* the same orders as vik_cmp / vik_cmp_x, by stable radix sorts (the entries are made in index order); qsort's
+   callbacks took 5 ms per frame for the 31,000 entries of the chase after Debilitas' first scene */
+static unsigned vik_digit(const ViK *e, int sh, int onx) { return (unsigned)((onx ? (uint64_t)((uint32_t)e->x ^ 0x80000000u) : e->key) >> sh) & 255; }
+static void vik_pass(ViK *a, ViK *t, size_t n, int sh, int onx) {
+    size_t cnt[257] = {0};
+    for (size_t i = 0; i < n; i++) cnt[vik_digit(&a[i], sh, onx) + 1]++;
+    if (cnt[vik_digit(&a[0], sh, onx) + 1] == n) { memcpy(t, a, n * sizeof *a); return; }   /* one value: as it is */
+    for (int i = 0; i < 256; i++) cnt[i + 1] += cnt[i];
+    for (size_t i = 0; i < n; i++) t[cnt[vik_digit(&a[i], sh, onx)]++] = a[i];
+}
+static void vik_sort(ViK *a, size_t n, int withx) {
+    static ViK *t; static size_t cap;
+    if (n < 2) return;
+    if (cap < n) { free(t); t = malloc(n * sizeof *t); cap = t ? n : 0; if (!t) { qsort(a, n, sizeof *a, withx ? vik_cmp_x : vik_cmp); return; } }
+    if (withx) for (int sh = 0; sh < 32; sh += 8) { vik_pass(a, t, n, sh, 1); memcpy(a, t, n * sizeof *a); }
+    for (int sh = 0; sh < 64; sh += 8) { vik_pass(a, t, n, sh, 0); memcpy(a, t, n * sizeof *a); }
 }
 static int vi_nvtx(int prim) { return prim == 0 ? 1 : prim <= 2 ? 2 : prim <= 5 ? 3 : 2; }
 /* A primitive's identity across frames: its draw state and its vertices' texture coordinates, which come from the
@@ -1892,13 +1912,17 @@ static void vif_at(const ViField *f, int x, int y, int *dx, int *dy) {
 /* match[i] for each entry of C: the entry of P that is the same primitive, or -1. First the identities that occur
    once in each frame (they feed the motion field), then the ambiguous ones: the candidate whose movement agrees
    best with the field, if within 8 pixels per vertex. */
+static uint64_t vi_mchk_n, vi_mchk_bad;   /* HG_VI_MATCHCHECK: ambiguous triangles checked, and chosen differently */
+static double vi_tm[4]; static uint64_t vi_tm_n[2];   /* (HG_GSLOG) the matching's parts: sort, pass 1, field, pass 2; entries */
 static void vi_match(const VkLog *P, const VkLog *C, int *match) {
     static ViK *kp, *kc; static size_t capp, capc; static uint8_t *used; static size_t capu;
     kp = vi_grow(kp, &capp, P->n + 1, sizeof *kp); kc = vi_grow(kc, &capc, C->n + 1, sizeof *kc); used = vi_grow(used, &capu, P->n + 1, 1);
     size_t np = 0, nc = 0;
-    for (size_t i = 0; i < P->n; i++) if (P->e[i].op == 0 && !P->e[i].k) kp[np++] = (ViK){ vi_ident(&P->e[i]), (int)i };
-    for (size_t i = 0; i < C->n; i++) { match[i] = -1; if (C->e[i].op == 0 && !C->e[i].k) kc[nc++] = (ViK){ vi_ident(&C->e[i]), (int)i }; }
-    qsort(kp, np, sizeof *kp, vik_cmp); qsort(kc, nc, sizeof *kc, vik_cmp); memset(used, 0, P->n);
+    for (size_t i = 0; i < P->n; i++) if (P->e[i].op == 0 && !P->e[i].k) kp[np++] = (ViK){ vi_ident(&P->e[i]), (int)i, P->e[i].w[0].x };
+    for (size_t i = 0; i < C->n; i++) { match[i] = -1; if (C->e[i].op == 0 && !C->e[i].k) kc[nc++] = (ViK){ vi_ident(&C->e[i]), (int)i, 0 }; }
+    double tq = host_now();
+    vik_sort(kp, np, 1); vik_sort(kc, nc, 0); memset(used, 0, P->n);
+    vi_tm[0] += host_now() - tq; tq = host_now(); vi_tm_n[0] += np; vi_tm_n[1] += nc;
     for (int i = 0; i < 8; i++) vif[i].used = 0;
     /* pass 1: unique in both */
     for (size_t a = 0, b = 0; a < np && b < nc; ) {
@@ -1918,22 +1942,46 @@ static void vi_match(const VkLog *P, const VkLog *C, int *match) {
         }
         a = a2; b = b2;
     }
+    vi_tm[1] += host_now() - tq; tq = host_now();
     for (int i = 0; i < 8; i++) if (vif[i].used) vif_fill(&vif[i]);
-    /* pass 2: the ambiguous ones, against the field */
+    vi_tm[2] += host_now() - tq; tq = host_now();
+    /* pass 2: the ambiguous ones, against the field. A candidate is taken only within 8 pixels per vertex in all, so its
+       first vertex's x is within that of the expected place: the previous frame's entries of an identity are in x
+       order and only that window is scanned (big groups of identical triangles made a full scan quadratic: 13 ms
+       per frame at the start of the chase after Debilitas' first scene). Ties go to the lowest index, as in the full scan. */
     for (size_t b = 0; b < nc; b++) {
         const int ci = kc[b].idx; if (match[ci] >= 0) continue;
         const VkLogEnt *e = &C->e[ci]; const int nv = vi_nvtx(e->prim);
         const ViField *F = vif_get(e->fbp, 0);
         int ex[3], ey[3]; for (int k = 0; k < nv; k++) vif_at(F, e->w[k].x, e->w[k].y, &ex[k], &ey[k]);
-        size_t lo = 0, hi = np; while (lo < hi) { size_t m = (lo + hi) / 2; if (kp[m].key < kc[b].key) lo = m + 1; else hi = m; }
+        const int lim = nv * 8 * 16, x0 = e->w[0].x + ex[0] - lim, x1 = e->w[0].x + ex[0] + lim;
+        size_t lo = 0, hi = np;
+        while (lo < hi) { size_t m = (lo + hi) / 2; if (kp[m].key < kc[b].key || (kp[m].key == kc[b].key && kp[m].x < x0)) lo = m + 1; else hi = m; }
         int best = -1, bd = 1 << 30;
-        for (size_t j = lo; j < np && kp[j].key == kc[b].key; j++) {
-            const int c = kp[j].idx; if (used[c] || P->e[c].prim != e->prim || !vi_shape_ok(e, &P->e[c])) continue;
+        for (size_t j = lo; j < np && kp[j].key == kc[b].key && kp[j].x <= x1; j++) {   /* (a candidate over the limit, or no better than
+                                                                                            the best so far, is left before the shape test) */
+            const int c = kp[j].idx; if (used[c] || P->e[c].prim != e->prim) continue;
             int dd = 0; for (int k = 0; k < nv; k++) dd += abs(P->e[c].w[k].x - e->w[k].x - ex[k]) + abs(P->e[c].w[k].y - e->w[k].y - ey[k]);
-            if (dd < bd) { bd = dd; best = c; }
+            if (dd > lim || dd > bd || (dd == bd && c > best) || !vi_shape_ok(e, &P->e[c])) continue;
+            bd = dd; best = c;
+        }
+        {   /* HG_VI_MATCHCHECK=1: the full scan of the identity, as before the window; the two must choose the same */
+            static int chk = -1; if (chk < 0) chk = getenv("HG_VI_MATCHCHECK") && atoi(getenv("HG_VI_MATCHCHECK"));
+            if (chk) {
+                size_t l2 = 0, h2 = np; while (l2 < h2) { size_t m = (l2 + h2) / 2; if (kp[m].key < kc[b].key) l2 = m + 1; else h2 = m; }
+                int fb = -1, fd = 1 << 30;
+                for (size_t j = l2; j < np && kp[j].key == kc[b].key; j++) {
+                    const int c = kp[j].idx; if (used[c] || P->e[c].prim != e->prim || !vi_shape_ok(e, &P->e[c])) continue;
+                    int dd = 0; for (int k = 0; k < nv; k++) dd += abs(P->e[c].w[k].x - e->w[k].x - ex[k]) + abs(P->e[c].w[k].y - e->w[k].y - ey[k]);
+                    if (dd < fd || (dd == fd && c < fb)) { fd = dd; fb = c; }
+                }
+                const int a1 = best >= 0 && bd <= nv * 8 * 16 ? best : -1, a2 = fb >= 0 && fd <= nv * 8 * 16 ? fb : -1;
+                vi_mchk_n++; if (a1 != a2) { vi_mchk_bad++; static int nl; if (nl++ < 20) L("GSVK matchcheck: VB %llu: window chose %d, full scan %d\n", (unsigned long long)cur_vb, a1, a2); }
+            }
         }
         if (best >= 0 && bd <= nv * 8 * 16) { match[ci] = best; used[best] = 1; }
     }
+    vi_tm[3] += host_now() - tq;
 }
 static int vi_lerpi(int a, int b, float t) { return a + (int)lroundf((float)(b - a) * t); }
 static Vtx vi_lerp(const Vtx *a, const Vtx *b, float t) {   /* a: the previous frame, b: this one */
@@ -3250,6 +3298,20 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg) {
         gsvk_submit(); vbid[vb & 7] = gsvk_last();
         if (vb >= (uint64_t)lag && vbid[(vb - lag) & 7]) gsvk_wait(vbid[(vb - lag) & 7]);
     }
+    {   /* HG_GSLOG=FROM:TO: per VBlank, the GS thread's time (wall), its GPU waits by site, the interpolation's matching
+           and replay recording, the GPU time collected, and how long the game waited for the GS thread */
+        static long from = -2, to; if (from == -2) { const char *e = getenv("HG_GSLOG"); from = -1; if (e) { from = atol(e); const char *c = strchr(e, ':'); to = c ? atol(c + 1) : from + 600; } }
+        static double t0, ws0[4], m0, r0, g0, pw0, tm0[4]; static uint64_t tn0[2];
+        if (from >= 0 && vk_live) {
+            double ws[4]; gsvk_wait_sites(ws); uint64_t ns, nd; double g, w; gsvk_stats(&ns, &nd, &g, &w); const double t = host_now(), pw = gs_producer_wait_s();
+            if ((long)vb > from && (long)vb <= to)
+                L("GSLOG VB %llu: %5.2f ms; waited: cmd %5.2f ring %5.2f readback %5.2f lag %5.2f; match %5.2f replay %5.2f; GPU %5.2f; game waited %5.2f%s; match: sort %.2f pass1 %.2f field %.2f pass2 %.2f, %llu/%llu entries\n", (unsigned long long)vb,
+                  (t - t0) * 1e3, ws[0] - ws0[0], ws[1] - ws0[1], ws[2] - ws0[2], ws[3] - ws0[3], (vi_t_match - m0) * 1e3, (vi_t_replay - r0) * 1e3, g - g0, (pw - pw0) * 1e3,
+                  vi_show ? " (in-between)" : "", (vi_tm[0] - tm0[0]) * 1e3, (vi_tm[1] - tm0[1]) * 1e3, (vi_tm[2] - tm0[2]) * 1e3, (vi_tm[3] - tm0[3]) * 1e3,
+                  (unsigned long long)(vi_tm_n[0] - tn0[0]), (unsigned long long)(vi_tm_n[1] - tn0[1]));
+            t0 = t; memcpy(ws0, ws, sizeof ws0); memcpy(tm0, vi_tm, sizeof tm0); memcpy(tn0, vi_tm_n, sizeof tn0); m0 = vi_t_match; r0 = vi_t_replay; g0 = g; pw0 = pw;
+        }
+    }
 #endif
 }
 #if defined(__x86_64__)
@@ -3303,6 +3365,7 @@ void gs_dump_stats(void) {
               ph[0], ph[1], ph[2], ph[3], ph[4], ph[5], ph[6], ph[7], ph[9]);
     }
     if (vi_selftest) L("GSVK selftest: %llu frames replayed with no movement, %llu differ from the real frame\n", (unsigned long long)vi_st_frames, (unsigned long long)vi_st_bad);
+    if (vi_mchk_n) L("GSVK matchcheck: %llu ambiguous triangles, %llu chosen differently by the window\n", (unsigned long long)vi_mchk_n, (unsigned long long)vi_mchk_bad);
     if (vk_interp) L("GSVK interpolation time: match %.1f s, replay %.1f s, compose %.1f s, logging %.1f s, presenting %.1f s; %llu submissions during replays, waiting %.1f s\n", vi_t_match, vi_t_replay, vi_t_compose, vi_t_log, vi_t_present, (unsigned long long)vi_r_sub, vi_r_wait / 1000.0);
     if (vk_interp) L("GSVK interpolation: %llu in-between pictures, %llu camera cuts, %llu frames off the 30 Hz cadence; %llu primitives replayed, %llu moved halfway, %llu too far, %llu carried along by neighbours; %llu pairs refused for their shape\n",
         (unsigned long long)vi_frames, (unsigned long long)vi_cut, (unsigned long long)vi_off_cadence, (unsigned long long)vi_prims, (unsigned long long)vi_matched, (unsigned long long)vi_far, (unsigned long long)vi_carried, (unsigned long long)vi_shape_bad);

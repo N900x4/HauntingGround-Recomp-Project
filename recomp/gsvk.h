@@ -55,6 +55,7 @@ int gsvk_poll(uint64_t id);                                                /* 1:
 void gsvk_tag(int on);                                                     /* command buffers opened from now on: tagged (1) or not */
 double gsvk_tag_ms(void);                                                  /* GPU ms of the tagged command buffers so far */
 uint64_t gsvk_done(void);                                                  /* any thread: the last submission done (0 without the window) */
+void gsvk_wait_sites(double ms[4]);   /* wall ms waited for: a command buffer, a ring half, everything (finish), gsvk_wait */
 void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms);   /* wait: wall ms in submit+wait */
 /* HG_GSVK_TIMING=1: GPU ms per phase: exact batches, copies batches, single primitives, compose, transfers; then the
    same five for the replays of frame interpolation */

@@ -25,7 +25,8 @@ static VkDescriptorSetLayout dsl; static VkPipelineLayout pl; static VkPipeline 
 /* command buffers in rotation: one is recorded while earlier ones may still run (gsvk_submit); gsvk_finish waits for all.
    A buffer is submitted every few batches (HG_GSVK_EAGER, default 2) so that the GPU works while the GS thread records
    the rest; otherwise it would sit idle until the next read-back and the GS thread would then wait for all of it. */
-enum { NCMD = 32 };
+enum { NCMD = 256 };   /* 32 until 0.2: a frame's interpolation replay is about 45 submissions, so the GS thread waited for the GPU at every one (HG_GSVK_NCMD: fewer in rotation) */
+static int ncmd_use = NCMD;
 static int eager = -1, nb_open;
 static VkCommandPool cpool; static VkCommandBuffer cmds[NCMD]; static VkFence fences[NCMD]; static int busy[NCMD]; static uint64_t sub_id[NCMD], n_sub_id; static int ci;
 #define cmd (cmds[ci])
@@ -91,6 +92,8 @@ static int vfresh = 1;   /* the mirror does not hold the GPU's memory */
 static uint32_t ncopy = 1;   /* copies of local memory in dvram, 4 MB apart */
 static uint32_t mbase_add, up_first, up_count = 1;   /* gsvk_set_target() */
 static uint64_t n_submits, n_dispatch; static double gpu_ms_all, wait_ms_all;
+/* where the waits were (gsvk_wait_sites): a command buffer to record into, a ring half, everything (gsvk_finish), gs.c's gsvk_wait */
+static double wait_site_ms[4]; static int wsite = 3;
 
 /* mode: 0 host coherent, 1 + cached, 2 device local, 3 device local and host visible (else host coherent) */
 static int mkbuf_(Buf *b, VkDeviceSize n, VkBufferUsageFlags use, int mode) {
@@ -344,6 +347,7 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     }
     L("GSVK: Vulkan compute on %s%s%s%s\n", pr.deviceName, can_present ? (shared_q ? " (can present the window from video memory; one queue)" : " (can present the window from video memory)") : "",
       can_wait ? " (present wait: yes)" : "", ufam != qfam ? (ui_prio ? " (GS on an async compute queue; the window's at high priority)" : " (GS on an async compute queue)") : "");
+    if (getenv("HG_GSVK_NCMD")) { ncmd_use = atoi(getenv("HG_GSVK_NCMD")); if (ncmd_use < 2) ncmd_use = 2; if (ncmd_use > NCMD) ncmd_use = NCMD; }
     state = 1; return 1;
 }
 
@@ -358,7 +362,7 @@ static void slot_wait(int k) {   /* the submission in command buffer k is done; 
     if (!busy[k]) return;
     struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
     if (vkWaitForFences(dev, 1, &fences[k], VK_TRUE, 10000000000ull)) { L("GSVK: wait failed\n"); state = -1; }
-    clock_gettime(CLOCK_MONOTONIC, &t1); wait_ms_all += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+    clock_gettime(CLOCK_MONOTONIC, &t1); { const double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6; wait_ms_all += ms; wait_site_ms[wsite] += ms; }
     static uint64_t ts[QPER]; const int nq = qcnt[k];
     if (nq >= 2 && !vkGetQueryPoolResults(dev, qpool, QPER * k, (uint32_t)nq, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT)) {
         gpu_ms_all += (double)(ts[nq - 1] - ts[0]) * tsperiod / 1e6;
@@ -373,7 +377,7 @@ static void slot_wait(int k) {   /* the submission in command buffer k is done; 
 }
 static void rec_open(void) {
     if (open_) return;
-    ci = (ci + 1) % NCMD; slot_wait(ci);
+    ci = (ci + 1) % ncmd_use; { const int w = wsite; wsite = 0; slot_wait(ci); wsite = w; }
     VkCommandBufferBeginInfo cbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
     vkResetCommandBuffer(cmd, 0); vkBeginCommandBuffer(cmd, &cbi);
     vkCmdResetQueryPool(cmd, qpool, QPER * ci, tim_on ? QPER : 2);
@@ -472,12 +476,12 @@ static uint64_t submit(int wait) {
         if (r) { L("GSVK: submit failed\n"); state = -1; return 0; }
         busy[ci] = 1; sub_id[ci] = id; n_sub_id = id; n_submits++;
     }
-    if (wait) { for (int k = 0; k < NCMD; k++) slot_wait(k); nprim = nclut = 0; upoff = 0; nbin = 0; naux = 0; rh = 0; clut_ok = 0; }
+    if (wait) { const int w = wsite; wsite = 2; for (int k = 0; k < NCMD; k++) slot_wait(k); wsite = w; nprim = nclut = 0; upoff = 0; nbin = 0; naux = 0; rh = 0; clut_ok = 0; }
     return id;
 }
 static void ring_switch(void) {
     submit(0); half_id[rh] = n_sub_id; rh ^= 1;
-    gsvk_wait(half_id[rh]);
+    { const int w = wsite; wsite = 1; gsvk_wait(half_id[rh]); wsite = w; }
     nprim = rh * (PRIM_MAX / 2); nclut = rh * (CLUT_MAX / 2); upoff = rh * (UP_BYTES / 2); nbin = (uint32_t)rh * (BIN_MAX / 2); naux = (uint32_t)rh * (AUX_MAX / 2); clut_ok = 0;
 }
 void gsvk_finish(void) { submit(1); }
@@ -687,6 +691,7 @@ int gsvk_compose(const GsVkSprite *s0, uint32_t *dst) {
     gsvk_compose_fetch(0, dst, (size_t)s0->px1 * s0->py1);
     return 1;
 }
+void gsvk_wait_sites(double ms[4]) { for (int i = 0; i < 4; i++) ms[i] = wait_site_ms[i]; }
 void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double *wait_ms) { *submits = n_submits; *dispatches = n_dispatch; *gpu_ms = gpu_ms_all; *wait_ms = wait_ms_all; }
 void gsvk_dprof_print(void) {
     if (dprof <= 0) return;

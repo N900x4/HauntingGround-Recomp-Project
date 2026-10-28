@@ -3231,7 +3231,9 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg) {
         /* GPU ms per VBlank since the last line; per phase with HG_GSVK_TIMING */
         static double ph0[10], g0, w0; double ph[10], g, w; uint64_t ns, nd; gsvk_phase_stats(ph); gsvk_stats(&ns, &nd, &g, &w);
         if (vk_live) { double d[10]; for (int i = 0; i < 10; i++) { d[i] = (ph[i] - ph0[i]) / 600; ph0[i] = ph[i]; }
-            L("GSVK GPU ms per VBlank: %.2f (GS thread waited %.2f)", (g - g0) / 600, (w - w0) / 600); g0 = g; w0 = w;
+            {   static double ws0[4]; double ws[4]; gsvk_wait_sites(ws);
+                L("GSVK GPU ms per VBlank: %.2f (GS thread waited %.2f: command buffer %.2f, ring %.2f, read-backs %.2f, GPU lag %.2f)", (g - g0) / 600, (w - w0) / 600,
+                  (ws[0] - ws0[0]) / 600, (ws[1] - ws0[1]) / 600, (ws[2] - ws0[2]) / 600, (ws[3] - ws0[3]) / 600); g0 = g; w0 = w; memcpy(ws0, ws, sizeof ws0); }
             if (vi_adapt && vi_st_n) { L("; the game per 10 VBlanks: slept at least %.1f ms, waited for the GS thread at most %.1f ms, more than the slow limit in %d of %d", vi_st_idmin, vi_st_pwmax, vi_st_waitw, vi_st_n); vi_st_idmin = 1e9; vi_st_pwmax = 0; vi_st_waitw = vi_st_n = 0; }
             if (ph[0] + ph[1] > 0) L(": exact %.2f, copies %.2f, single %.2f, compose %.2f, transfers %.2f; replays: exact %.2f, copies %.2f, single %.2f, transfers %.2f",
                 d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[9]);

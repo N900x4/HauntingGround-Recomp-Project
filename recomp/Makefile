@@ -41,7 +41,7 @@ $(O)/hle.o: hle.c ee_runtime.h hle.h compat.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/iop_pad_mc.o: iop_pad_mc.c ee_runtime.h hle.h compat.h settings.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
-$(O)/overrides.o: overrides.c ee_runtime.h hle.h
+$(O)/overrides.o: overrides.c ee_runtime.h hle.h settings.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/options.o: game/options.c game/guest.h ee_runtime.h hle.h settings.h hdtex.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
@@ -53,7 +53,7 @@ gen/gs_batch_spv.h: vk/gs_sprite.comp
 	glslangValidator -V --target-env vulkan1.1 -DBATCH --vn gs_batch_spv -o $@ $<
 gen/gs_batchc_spv.h: vk/gs_sprite.comp
 	glslangValidator -V --target-env vulkan1.1 -DBATCH -DCOPIES --vn gs_batchc_spv -o $@ $<
-$(O)/gsvk.o: gsvk.c gsvk.h gen/gs_sprite_spv.h gen/gs_batch_spv.h gen/gs_batchc_spv.h ee_runtime.h hle.h
+$(O)/gsvk.o: gsvk.c gsvk.h gen/gs_sprite_spv.h gen/gs_batch_spv.h gen/gs_batchc_spv.h ee_runtime.h hle.h settings.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/hdtex.o: hdtex.c hdtex.h settings.h ee_runtime.h hle.h third_party/stb_image.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) $(VK_CFLAGS) -O2 -c $< -o $@

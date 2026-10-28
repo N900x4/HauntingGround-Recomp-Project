@@ -12,6 +12,7 @@
 #include "ee_runtime.h"
 #include "hle.h"
 #include "gsvk.h"
+#include "settings.h"
 #include "gen/gs_sprite_spv.h"
 #include "gen/gs_batch_spv.h"
 #include "gen/gs_batchc_spv.h"
@@ -977,9 +978,12 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, int ovw, int ovh, 
     const VkClearColorValue black = { { 0, 0, 0, 1 } }; const VkImageSubresourceRange all = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     vkCmdClearColorImage(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &all);
     imgbar(cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    /* the picture in a 640:448 rectangle as large as the window allows, centred */
-    const double sx = scext.width / 640.0, sy = scext.height / 448.0, s = sx < sy ? sx : sy;
-    const int rw = (int)(640 * s + 0.5), rh = (int)(448 * s + 0.5), x0 = ((int)scext.width - rw) / 2, y0 = ((int)scext.height - rh) / 2;
+    /* the picture in a 640:448 rectangle (widescreen: the display's shape, settings_display_aspect) as large as the
+       window allows, centred */
+    settings_ui_window_size((int)scext.width, (int)scext.height);
+    const double aw = 448.0 * settings_display_aspect();
+    const double sx = scext.width / aw, sy = scext.height / 448.0, s = sx < sy ? sx : sy;
+    const int rw = (int)(aw * s + 0.5), rh = (int)(448 * s + 0.5), x0 = ((int)scext.width - rw) / 2, y0 = ((int)scext.height - rh) / 2;
     if (ucur >= 0) {
         VkImageBlit b = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffsets = { { 0, 0, 0 }, { pic[ucur].w, pic[ucur].h, 1 } },
                           .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstOffsets = { { x0, y0, 0 }, { x0 + rw, y0 + rh, 1 } } };
@@ -991,7 +995,7 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, int ovw, int ovh, 
         VkBufferImageCopy r2 = { .bufferOffset = (VkDeviceSize)f * OVW * OVH * 4, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { (uint32_t)ovw, (uint32_t)ovh, 1 } };
         vkCmdCopyBufferToImage(cb, ovbuf.b, ovimg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r2);
         imgbar(cb, ovimg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        const double k2 = rw / 640.0; const int ox = x0 + (int)(4 * k2), oy = y0 + (int)(4 * k2);
+        const double k2 = rh / 448.0; const int ox = x0 + (int)(4 * k2), oy = y0 + (int)(4 * k2);
         VkImageBlit b = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffsets = { { 0, 0, 0 }, { ovw, ovh, 1 } },
                           .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstOffsets = { { ox, oy, 0 }, { ox + (int)(ovw * k2), oy + (int)(ovh * k2), 1 } } };
         vkCmdBlitImage(cb, ovimg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_NEAREST);

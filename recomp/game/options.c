@@ -190,12 +190,13 @@ static void d_columns(Draw *d, int y, int h) {
 
 /* ------------------------------------------------------------------ our pages */
 enum { PG_NONE, PG_DISPLAY, PG_KEYBOARD, PG_PAD };
-enum { R_RENDERER, R_RESOLUTION, R_FPS, R_DISPLAY, R_VSYNC, R_HD, R_KEYBOARD, R_PAD, NROWS };
-static const char *const row_label[NROWS] = { "Renderer", "Resolution", "Frame rate", "Display", "V-Sync", "HD textures", "Keyboard", "Controller" };
+enum { R_RENDERER, R_RESOLUTION, R_FPS, R_DISPLAY, R_ASPECT, R_VSYNC, R_HD, R_KEYBOARD, R_PAD, NROWS };
+static const char *const row_label[NROWS] = { "Renderer", "Resolution", "Frame rate", "Display", "Aspect ratio", "V-Sync", "HD textures", "Keyboard", "Controller" };
 static const int row_icon[NROWS] = {
-    SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_SCREEN, SPR_ICON_PAD, SPR_ICON_PAD,
+    SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_SCREEN, SPR_ICON_PAD, SPR_ICON_PAD,
 };
-#define ROW_Y(r) (84 + 32 * (r))   /* the icon's top; the label 6 below (the game's rows: 84, 244, 276, 308, 340) */
+#define ROW_Y(r) (82 + 30 * (r))   /* the icon's top; the label 6 below (the game's rows were 32 apart from 84: nine rows and the
+                                     note need 30, on parchment of our own with a bar per row) */
 /* the mapping pages: the keyboard has the 16 buttons and the left stick's 4 directions, the controller 16 buttons */
 static const int map_order[PB_N] = {
     PB_CROSS, PB_CIRCLE, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_L2, PB_R2, PB_L3, PB_R3,
@@ -254,6 +255,10 @@ static int values(int row, int *v, const char **names) {
         v[k] = 0; names[k++] = "Window";
         v[k] = 1; names[k++] = "Full screen";
         break;
+    case R_ASPECT:
+        v[k] = 0; names[k++] = "4:3 (original)";
+        v[k] = 1; names[k++] = "Widescreen";
+        break;
     case R_VSYNC:
         v[k] = VSYNC_ON; names[k++] = "On (smooth)";
         v[k] = VSYNC_MAILBOX; names[k++] = "Exact 59.94 Hz";
@@ -273,6 +278,7 @@ static int current(int row) {
     case R_RESOLUTION: return s->scale;
     case R_FPS: return s->fps;
     case R_DISPLAY: return s->fullscreen;
+    case R_ASPECT: return s->wide;
     case R_VSYNC: return s->vsync;
     case R_HD: return s->hd_on;
     }
@@ -302,6 +308,7 @@ static void commit(int row, int val) {
         break;
     case R_FPS: settings_set("fps", b, "Options menu"); break;
     case R_DISPLAY: settings_set("fullscreen", b, "Options menu"); break;
+    case R_ASPECT: settings_set("aspect", val ? "wide" : "4:3", "Options menu"); break;
     case R_VSYNC: settings_set("vsync", val == VSYNC_ON ? "on" : val == VSYNC_OFF ? "off" : "mailbox", "Options menu"); break;
     case R_HD: settings_set("hd", val ? "on" : "off", "Options menu"); break;
     }
@@ -339,13 +346,12 @@ static int pad_value_index(int e, int val) {
 static void draw_display_page(Draw *d, const Opt *o) {
     const Settings *s = settings();
     d_panel(d);
-    for (int r = R_RESOLUTION; r <= R_VSYNC; r++) d_row_strip(d, ROW_Y(r));   /* bars where the two-column area was */
-    d_row_strip(d, ROW_Y(R_PAD));                                             /* (over the Volume row's slider line) */
+    d_plain(d, ROW_Y(0), ROW_Y(NROWS) + 32 - ROW_Y(0));       /* the game's rows and two-column area away */
+    for (int r = 0; r < NROWS; r++) d_row_strip(d, ROW_Y(r));   /* a bar per row */
     const char *note = 0;                                                     /* the last row: a note, when one applies */
     if (s->renderer_next != s->renderer) note = "The renderer changes at the next start.";
     else if (!s->renderer) note = "Resolution, frame rate and HD need the GPU renderer.";
     else if (s->scale == 1 && s->hd_on && hdtex_available() > 0) note = "HD textures show above native resolution.";
-    d_plain(d, ROW_Y(8), 32);
     for (int r = 0; r < NROWS; r++) {
         const int y = ROW_Y(r), edit = o->editing && o->row == r;
         char val[64];
@@ -362,7 +368,7 @@ static void draw_display_page(Draw *d, const Opt *o) {
             d_sprite(d, 448, y, SPR_ARROW_R, a);
         }
     }
-    if (note) d_text_centred(d, 256, ROW_Y(8) + 8, COL_NORMAL, note, 14);
+    if (note) d_text_centred(d, 256, ROW_Y(NROWS) + 8, COL_NORMAL, note, 14);
     d_sprite(d, 32, ROW_Y(o->row), SPR_CURSOR, 128);
 }
 static void draw_map_page(Draw *d, const Opt *o) {

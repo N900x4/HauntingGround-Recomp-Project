@@ -56,6 +56,8 @@ typedef struct {
     int audio_offset;   /* ms the sound reaches the ear later than the A/V control can measure (speakers, TV), -200..200 */
     char hd_textures[256];   /* folder of HD texture replacements (hdtex.c), "": ../textures (the release's folder next to bin/); HG_HDTEX overrides */
     int hd_on;          /* 1: HD textures used when a folder has them (the Options menu's "HD textures"); applies at once */
+    int wide;           /* 0: the original 4:3 picture; 1: widescreen, the picture fills the display's shape (up to 21:9: the camera
+                           sees more at the sides, menus and text stay 4:3 in the middle); applies at once */
 } Settings;
 
 void settings_init(void);                 /* load, apply the environment, log; once, at start */
@@ -91,6 +93,9 @@ int settings_ui_display_rate_x2(void);   /* 1 at 120 fps (two presents per VBlan
 void settings_ui_auto_scale(int display_height);   /* the display the window is on: resolves "auto" */
 int settings_auto_scale(void);
 int settings_pad_type(void);             /* PADKIND_* (as recorded for the names) */
+void settings_ui_window_size(int w, int h);   /* UI thread: the window's (swapchain's) size in pixels */
+double settings_display_aspect(void);    /* any thread: the picture's shape on the display, width / height (640 / 448, or wider) */
+float settings_wide_factor(void);        /* any thread: horizontal scale of the camera and of menus and text (1: the 4:3 picture) */
 void settings_set_pad_type_live(int t);  /* UI thread: a controller came or went (recorded as an event) */
 
 /* "press a key" / "press a button" (the mapping pages): the game thread names the target (kind 0 keyboard, 1

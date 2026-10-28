@@ -188,6 +188,7 @@ static void value_of(const Settings *s, const char *key, char *out, size_t n) {
     else if (!strcmp(key, "audio_offset")) snprintf(out, n, "%d", s->audio_offset);
     else if (!strcmp(key, "hd_textures")) snprintf(out, n, "%s", s->hd_textures);
     else if (!strcmp(key, "hd")) snprintf(out, n, "%s", s->hd_on ? "on" : "off");
+    else if (!strcmp(key, "aspect")) snprintf(out, n, "%s", s->wide ? "wide" : "4:3");
     else if (!strncmp(key, "kb.", 3)) {
         for (int i = 0; i < PB_N; i++) if (!strcmp(key + 3, pb_key[i])) snprintf(out, n, "%s", settings_key_name(s->kb[i]));
     } else if (!strncmp(key, "pad.", 4)) {
@@ -247,6 +248,11 @@ static int apply_to(Settings *s, const char *key, const char *v, int swap) {
         if (!strcasecmp(v, "off") || !strcmp(v, "0")) { s->hd_on = 0; return 1; }
         return 0;
     }
+    if (!strcmp(key, "aspect")) {
+        if (!strcasecmp(v, "wide") || !strcmp(v, "1")) { s->wide = 1; return 1; }
+        if (!strcmp(v, "4:3") || !strcmp(v, "0")) { s->wide = 0; return 1; }
+        return 0;
+    }
     if (!strncmp(key, "kb.", 3)) {
         for (int i = 0; i < PB_N; i++) if (!strcmp(key + 3, pb_key[i])) {
             int sc; if (!key_parse(v, &sc)) return 0;
@@ -271,7 +277,7 @@ static int apply_to(Settings *s, const char *key, const char *v, int swap) {
 typedef struct { const char *env, *key; } EnvMap;
 static const EnvMap envmap[] = {
     { "HG_GSVK", "renderer" }, { "HG_GSVK_SCALE", "resolution" }, { "HG_GSVK_INTERP", "fps" },
-    { "HG_VSYNC", "vsync" }, { "HG_SCALE", "window_scale" }, { "HG_FULLSCREEN", "fullscreen" },
+    { "HG_VSYNC", "vsync" }, { "HG_SCALE", "window_scale" }, { "HG_FULLSCREEN", "fullscreen" }, { "HG_WIDE", "aspect" },
 };
 #define NENV (int)(sizeof envmap / sizeof envmap[0])
 static int env_set[NENV];
@@ -336,14 +342,15 @@ void settings_save(void) {
     FILE *f = fopen(tmp, "w"); if (!f) { L("settings: cannot write %s\n", tmp); return; }
     char v[64];
     fprintf(f, "# Haunting Ground Recomp settings, written by the game's Options menu (the rows after Screen Position).\n");
-    fprintf(f, "# Environment variables (HG_GSVK, HG_GSVK_SCALE, HG_GSVK_INTERP, HG_VSYNC, HG_SCALE, HG_FULLSCREEN) override this file.\n\n");
+    fprintf(f, "# Environment variables (HG_GSVK, HG_GSVK_SCALE, HG_GSVK_INTERP, HG_VSYNC, HG_SCALE, HG_FULLSCREEN, HG_WIDE) override this file.\n\n");
     fprintf(f, "renderer = %s        # software | gpu (takes effect at the next start)\n", file.renderer ? "gpu" : "software");
     value_of(&file, "resolution", v, sizeof v);
     fprintf(f, "resolution = %s      # 1 (native) .. 8, or auto (from the display); the GPU renderer only\n", v);
     fprintf(f, "fps = %d               # 30 | 60 | 120 (60 and 120 add about 17 ms of delay; 120 at native resolution)\n", file.fps);
     fprintf(f, "fullscreen = %d\n", file.fullscreen);
     fprintf(f, "vsync = %s       # on (smooth: locked to the display, default) | mailbox (exact 59.94 Hz, no tearing) | off (may tear)\n", vsync_name(file.vsync));
-    fprintf(f, "window_scale = %d      # the window's size at start, times 640 x 448\n\n", file.window_scale);
+    fprintf(f, "window_scale = %d      # the window's size at start, times 640 x 448\n", file.window_scale);
+    fprintf(f, "aspect = %s           # 4:3 (the original picture) | wide (fills the display, up to 21:9; menus stay 4:3)\n\n", file.wide ? "wide" : "4:3");
     fprintf(f, "# keyboard: SDL key names (\"none\" for no key)\n");
     for (int i = 0; i < PB_N; i++) fprintf(f, "kb.%s = %s\n", pb_key[i], settings_key_name(file.kb[i]));
     fprintf(f, "\n# controller: a b x y back guide start leftstick rightstick leftshoulder rightshoulder dpup dpdown dpleft\n");
@@ -407,6 +414,18 @@ void settings_ui_auto_scale(int h) {
 }
 uint32_t settings_generation(void) { return atomic_load(&gen); }
 int settings_pad_type(void) { return pad_type_rec; }
+/* widescreen (eff.wide): the shape the picture is shown in, width / height. 4:3 is the console's 640 x 448 on a TV;
+   wide follows the window (the UI thread reports its size), from that up to 2.4 (3440 x 1440); with no window, 16:9. */
+static _Atomic int win_w, win_h;
+void settings_ui_window_size(int w, int h) { atomic_store(&win_w, w); atomic_store(&win_h, h); }
+double settings_display_aspect(void) {
+    const double a43 = 640.0 / 448.0;
+    if (!eff.wide) return a43;
+    const int w = atomic_load(&win_w), h = atomic_load(&win_h);
+    const double a = w > 0 && h > 0 ? (double)w / h : 16.0 / 9.0;
+    return a < a43 ? a43 : a > 2.4 ? 2.4 : a;
+}
+float settings_wide_factor(void) { return (float)(640.0 / 448.0 / settings_display_aspect()); }
 
 /* ------------------------------------------------------------------ changes */
 int settings_set(const char *key, const char *value, const char *why) {
@@ -435,13 +454,13 @@ int settings_set(const char *key, const char *value, const char *why) {
 void settings_reset(const char *group, const char *why) {
     Settings d, t = eff;
     settings_defaults(&d);
-    if (!strcmp(group, "display")) { t.scale = d.scale; t.fps = d.fps; t.fullscreen = d.fullscreen; t.vsync = d.vsync; t.hd_on = d.hd_on; }
+    if (!strcmp(group, "display")) { t.scale = d.scale; t.fps = d.fps; t.fullscreen = d.fullscreen; t.vsync = d.vsync; t.hd_on = d.hd_on; t.wide = d.wide; }
     else if (!strcmp(group, "keyboard")) memcpy(t.kb, d.kb, sizeof t.kb);
     else if (!strcmp(group, "controller")) { memcpy(t.pad, d.pad, sizeof t.pad); t.vibration = d.vibration; t.lightbar = d.lightbar; }
     else return;
     if (!memcmp(&t, &eff, sizeof t)) return;
     eff = t;
-    if (!strcmp(group, "display")) { file.scale = d.scale; file.fps = d.fps; file.fullscreen = d.fullscreen; file.vsync = d.vsync; file.hd_on = d.hd_on; }
+    if (!strcmp(group, "display")) { file.scale = d.scale; file.fps = d.fps; file.fullscreen = d.fullscreen; file.vsync = d.vsync; file.hd_on = d.hd_on; file.wide = d.wide; }
     else if (!strcmp(group, "keyboard")) memcpy(file.kb, d.kb, sizeof file.kb);
     else { memcpy(file.pad, d.pad, sizeof file.pad); file.vibration = d.vibration; file.lightbar = d.lightbar; }
     L("settings: %s back to the defaults (%s)\n", group, why);
@@ -451,7 +470,7 @@ void settings_reset(const char *group, const char *why) {
 
 /* ------------------------------------------------------------------ recordings */
 static const char *const rec_keys[] = { "renderer", "renderer_next", "resolution", "fps", "fullscreen", "vsync", "window_scale",
-                                        "vibration", "lightbar" };   /* (the last two: shown on the controller page) */
+                                        "vibration", "lightbar", "aspect" };   /* (the last two: shown on the controller page) */
 void settings_write_header(FILE *f) {
     char v[64];
     for (size_t i = 0; i < sizeof rec_keys / sizeof rec_keys[0]; i++) { value_of(&eff, rec_keys[i], v, sizeof v); fprintf(f, "# set %s=%s\n", rec_keys[i], v); }

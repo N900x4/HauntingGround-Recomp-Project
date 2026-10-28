@@ -6,6 +6,7 @@
 #include <string.h>
 #include "ee_runtime.h"
 #include "hle.h"
+#include "settings.h"
 
 void set_hook(uint32_t a, RecHook h);
 
@@ -69,7 +70,20 @@ static int ov_rpc_call(Ctx *c) {
 }
 static int ov_frame_begin(Ctx *c) { return ov_frame_mark(c, "FB"); }
 static int ov_frame_end(Ctx *c) { return ov_frame_mark(c, "FE"); }
+/* ------------------------------------------------------------------ widescreen
+   The camera's projection (0x122810, called through the camera object's table) makes its screen matrix (+144) and,
+   from a second one at half scale, its clip and cull matrices (+464, +528) with sceVu0ViewScreenMatrix (0x10e2b8;
+   f12 scrz, f13 ax, f14 ay, f15 cx, f16 cy, f17 zmin, f18 zmax, f19 nearz, farz on the stack). ax is the horizontal
+   scale: times the wide factor (3/4 and less) the same camera, from the same place and with the same vertical framing,
+   sees as much wider as the display is, and its culling widens with it; the middle of the picture stays as in 4:3.
+   Only those two calls are changed (their return addresses). */
+static int ov_view_screen(Ctx *c) {
+    const uint32_t ra = c->r[31].u32[0];
+    if (ra == 0x122888 || ra == 0x1228c8) { const float k = settings_wide_factor(); if (k != 1.0f) c->f[13] *= k; }
+    return 0;
+}
 void overrides_init(void) {
+    set_hook(0x10e2b8, ov_view_screen);
     { extern FILE *hle_prof(void); if (hle_prof()) { set_hook(0x1b86a0, ov_frame_begin); set_hook(0x1b8750, ov_frame_end); set_hook(0x2700e8, ov_rpc_call); } }
     extern void options_init(void); options_init();
     const char *m = getenv("HG_MOVIES");

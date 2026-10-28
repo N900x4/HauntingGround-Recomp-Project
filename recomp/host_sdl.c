@@ -201,7 +201,8 @@ static int host_init(void) {   /* on the UI thread */
 #if defined HAVE_VULKAN && !defined _WIN32
     if (settings()->renderer) wflags |= SDL_WINDOW_VULKAN;   /* Linux: SDL makes the GPU renderer's surface (ui_mksurf) */
 #endif
-    win = SDL_CreateWindow("Haunting Ground Recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 640 * scale, 448 * scale, wflags);
+    const int ww = settings()->wide ? 448 * scale * 16 / 9 : 640 * scale;   /* widescreen: a 16:9 window */
+    win = SDL_CreateWindow("Haunting Ground Recomp", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, ww, 448 * scale, wflags);
     if (!win) { L("host: no window: %s (running headless)\n", SDL_GetError()); SDL_Quit(); return 0; }
 #ifdef HAVE_VULKAN   /* the GPU renderer presents itself once it is set up (at the first primitive): no SDL renderer on the window */
     const char *pp = getenv("HG_PRESENT");
@@ -386,6 +387,11 @@ static void ui_settings(void) {
         gsvk_present_fullscreen(fs);   /* (HG_FSE=1: full-screen exclusive mode while full screen) */
 #endif
     }
+    static int wide_now = -1;   /* widescreen switched in a window: the window takes the new shape at its height */
+    if (settings()->wide != wide_now) {
+        if (wide_now >= 0 && !fs) { int w, h; SDL_GetWindowSize(win, &w, &h); SDL_SetWindowSize(win, settings()->wide ? h * 16 / 9 : h * 640 / 448, h); }
+        wide_now = settings()->wide;
+    }
 }
 static const uint32_t *ov_full(int *w, int *h);
 /* the F3 overlay for the GPU path (176 x 54, or the full one), or 0 when it is off */
@@ -442,7 +448,11 @@ static uint64_t ui_present(void) {   /* the timer's way: the next picture (or th
     if (!tex || w != tex_w || h != tex_h) {
         if (tex) SDL_DestroyTexture(tex);
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_XBGR8888, SDL_TEXTUREACCESS_STREAMING, w, h); tex_w = w; tex_h = h;
-        SDL_RenderSetLogicalSize(ren, 640, 448);    /* 4:3 output; the PS2 picture is stretched to the TV like the console did */
+    }
+    {   /* 4:3 output, the PS2 picture stretched to the TV like the console did; widescreen: the display's shape */
+        int ow, oh; if (!SDL_GetRendererOutputSize(ren, &ow, &oh)) settings_ui_window_size(ow, oh);
+        const int lw = (int)(448 * settings_display_aspect() + 0.5); static int last_lw;
+        if (lw != last_lw) { SDL_RenderSetLogicalSize(ren, lw, 448); last_lw = lw; }
     }
     ov_paint(frame, w, h);
     SDL_UpdateTexture(tex, 0, frame, w * 4);

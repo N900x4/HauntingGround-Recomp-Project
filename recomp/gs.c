@@ -2433,6 +2433,76 @@ static void gsw_init(void) {}
 static void mark_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int x0, int y0, int x1, int y1) { (void)pages; (void)bp; (void)bw; (void)psm; (void)x0; (void)y0; (void)x1; (void)y1; }
 #endif
 
+/* Widescreen (settings_wide_factor() < 1): the camera sees wider (overrides.c) and the picture is shown wider, so 2D
+   laid out for 4:3 would come out stretched. A sprite is squeezed towards the middle of its scissor box by the same
+   factor (text, menus, movie frames: they keep their shape and stay 4:3 in the middle) when it is drawn into the
+   picture: a frame buffer the display showed in the last VBlanks, or the one the game composes the picture in and
+   copies there at the end of a frame (8704; its effect passes also work in other buffers, in strips with narrow
+   scissor boxes), around the display's middle, unless it is
+   - an effect pass: its texture was drawn into (as a frame buffer) in this VBlank or the last one and not uploaded
+     since (the font shares memory with a 16-bit effect buffer and is uploaded again before the text), a copy of the picture;
+   - a fill without texture across 7/8 of its scissor box or more (fades, darkening, the letterbox bars).
+   (The game's 2D is depth-tested too, so the depth test tells nothing.)
+   HG_WIDELOG=FROM:TO logs every sprite in those VBlanks with its class (s squeezed, r effect, f fill, o another buffer). */
+static int gif_cur_path;   /* the GIF path of what is being drawn (widescreen: 1 is VU1's, the 3D models) */
+static uint64_t wide_rt[2][8]; static uint32_t wide_rt_key[3]; static int wide_rt_keyok, wide_rt_box[4];   /* the area marked for this frame buffer */
+static long wide_log_from = -2, wide_log_to;
+static uint32_t wide_disp[2] = { ~0u, ~0u }, wide_comp = ~0u; static int wide_disp_w = 512;   /* the last two frame buffers shown, the one copied there, the display's width */
+static void wide_vblank(const uint8_t *priv) {
+    memcpy(wide_rt[1], wide_rt[0], sizeof wide_rt[0]); memset(wide_rt[0], 0, sizeof wide_rt[0]); wide_rt_keyok = 0;
+    if (!priv) return;
+    uint64_t pmode, dispfb, display; memcpy(&pmode, priv, 8); const int c2 = (pmode >> 1) & 1;
+    memcpy(&dispfb, priv + (c2 ? 0x90 : 0x70), 8); memcpy(&display, priv + (c2 ? 0xa0 : 0x80), 8);
+    const uint32_t fbp = BITS(dispfb, 0, 9) * 32;
+    if (fbp != wide_disp[0]) { wide_disp[1] = wide_disp[0]; wide_disp[0] = fbp; }
+    const int w = (BITS(display, 32, 12) + 1) / (BITS(display, 23, 4) + 1); if (w >= 256 && w <= 1024) wide_disp_w = w;
+}
+static void wide_upload(const uint64_t pages[8]) {   /* an image from the CPU: those pages hold a texture now, not a picture */
+    for (int i = 0; i < 8; i++) { wide_rt[0][i] &= ~pages[i]; wide_rt[1][i] &= ~pages[i]; }
+    wide_rt_keyok = 0;
+}
+static void wide_2d(const Draw *d, int prim, Vtx *w, float k) {
+    {   /* the pages drawn are render targets: the primitive's box within the scissor box (the scissor box alone can
+           be far larger: 1024 lines over the font's pages), marked as the area drawn into this frame buffer grows */
+        const uint32_t key[3] = { d->fbp, d->fbw, (uint32_t)d->fpsm };
+        const int nv = prim == 6 || prim == 1 || prim == 2 ? 2 : prim >= 3 && prim <= 5 ? 3 : 1;
+        int x0 = w[0].x, x1 = w[0].x, y0 = w[0].y, y1 = w[0].y;
+        for (int i = 1; i < nv; i++) { if (w[i].x < x0) x0 = w[i].x; if (w[i].x > x1) x1 = w[i].x; if (w[i].y < y0) y0 = w[i].y; if (w[i].y > y1) y1 = w[i].y; }
+        x0 >>= 4; x1 >>= 4; y0 >>= 4; y1 >>= 4;
+        if (x0 < d->scx0) x0 = d->scx0; if (x1 > d->scx1) x1 = d->scx1; if (y0 < d->scy0) y0 = d->scy0; if (y1 > d->scy1) y1 = d->scy1;
+        if (x0 <= x1 && y0 <= y1) {
+            if (!wide_rt_keyok || memcmp(key, wide_rt_key, sizeof key)) { memcpy(wide_rt_key, key, sizeof key); wide_rt_keyok = 1; wide_rt_box[0] = x0; wide_rt_box[1] = x1; wide_rt_box[2] = y0; wide_rt_box[3] = y1; }
+            else if (x0 >= wide_rt_box[0] && x1 <= wide_rt_box[1] && y0 >= wide_rt_box[2] && y1 <= wide_rt_box[3]) goto marked;
+            if (x0 < wide_rt_box[0]) wide_rt_box[0] = x0; if (x1 > wide_rt_box[1]) wide_rt_box[1] = x1; if (y0 < wide_rt_box[2]) wide_rt_box[2] = y0; if (y1 > wide_rt_box[3]) wide_rt_box[3] = y1;
+            mark_pages(wide_rt[0], d->fbp, d->fbw, d->fpsm, wide_rt_box[0], wide_rt_box[2], wide_rt_box[1], wide_rt_box[3]);
+        }
+    }
+    marked:
+    if (prim != 6) {
+        if (wide_log_from >= 0 && (long)cur_vb >= wide_log_from && (long)cur_vb <= wide_log_to && gif_cur_path != 1 && (d->fbp == wide_disp[0] || d->fbp == wide_disp[1] || d->fbp == wide_comp)) {
+            int x0 = w[0].x, x1 = w[0].x; const int nv = prim >= 3 && prim <= 5 ? 3 : prim ? 2 : 1;
+            for (int i = 1; i < nv; i++) { if (w[i].x < x0) x0 = w[i].x; if (w[i].x > x1) x1 = w[i].x; }
+            L("WIDE VB %llu t: prim %d path %d x %d-%d y %d fbp %u tme %d tbp %u psm %02x zte %d:%d z %u abe %d rgba %08x\n", (unsigned long long)cur_vb, prim, gif_cur_path,
+              x0 >> 4, x1 >> 4, w[0].y >> 4, d->fbp, d->tme, d->tex.tbp, d->tex.psm, d->zte, d->ztst, w[0].z, d->abe, w[0].rgba);
+        }
+        return;
+    }
+    char cls = 's';
+    const int shown = d->fbp == wide_disp[0] || d->fbp == wide_disp[1];
+    if (shown && d->tme && d->tex.tbp != d->fbp) wide_comp = d->tex.tbp;   /* a copy into the shown buffer: its source is the picture too */
+    if (!shown && d->fbp != wide_comp) cls = 'o';
+    else if (d->tme) {
+        uint64_t tp[8] = {0}; mark_pages(tp, d->tex.tbp, d->tex.tbw, d->tex.psm, 0, 0, (int)d->tex.tw - 1, (int)d->tex.th - 1);
+        for (int i = 0; i < 8; i++) if (tp[i] & (wide_rt[0][i] | wide_rt[1][i])) { cls = 'r'; break; }
+    } else if ((abs(w[1].x - w[0].x) >> 4) * 8 >= (d->scx1 - d->scx0 + 1) * 7) cls = 'f';
+    if (wide_log_from == -2) { const char *e = getenv("HG_WIDELOG"); wide_log_from = -1; if (e) { wide_log_from = atol(e); const char *c = strchr(e, ':'); wide_log_to = c ? atol(c + 1) : wide_log_from + 1; } }
+    if (wide_log_from >= 0 && (long)cur_vb >= wide_log_from && (long)cur_vb <= wide_log_to)
+        L("WIDE VB %llu %c: x %d-%d y %d-%d fbp %u scissor %d-%d tme %d tbp %u tbw %u psm %02x %dx%d zte %d:%d z %u abe %d rgba %08x (shown %u %u, composed in %u)\n", (unsigned long long)cur_vb, cls,
+          w[0].x >> 4, w[1].x >> 4, w[0].y >> 4, w[1].y >> 4, d->fbp, d->scx0, d->scx1, d->tme, d->tex.tbp, d->tex.tbw, d->tex.psm, (int)d->tex.tw, (int)d->tex.th, d->zte, d->ztst, w[0].z, d->abe, w[0].rgba, wide_disp[0], wide_disp[1], wide_comp);
+    if (cls != 's') return;
+    const int cx = wide_disp_w * 8;   /* the display's middle, 1/16 pixel */
+    for (int i = 0; i < 2; i++) w[i].x = cx + (int)lroundf((float)(w[i].x - cx) * k);
+}
 static void vertex_kick(Vtx v, int draw) {
     Draw d; int prim = BITS(r_prim, 0, 3);
     {   /* HG_VTXLOG=path:vb writes every vertex kicked during that VBlank and the next (x, y in 1/16 pixel with offset, z, drawing kick) */
@@ -2465,6 +2535,7 @@ static void vertex_kick(Vtx v, int draw) {
                     L("BIGTRI prim %d tme %d: (%d,%d z%u q%g) (%d,%d z%u q%g) (%d,%d z%u q%g) scissor %d-%d,%d-%d\n", prim, d.tme, xs[0], ys[0], w[0].z, w[0].q, xs[1], ys[1], w[1].z, w[1].q, xs[2], ys[2], w[2].z, w[2].q, d.scx0, d.scx1, d.scy0, d.scy1);
             }
         }
+        {   const float k = settings_wide_factor(); if (k != 1.0f) wide_2d(&d, prim, w, k); }
         if (!skip) { if (gsw_n) gsw_issue(&d, prim, w); else rasterize(&d, prim, w); }
         int k = prim == 6 ? 0 : (prim >= 3 && prim <= 5) ? 1 : 2;
         st_prims[k]++; st_px[k] += n_pixels - px0; st_visits[k] += n_visits - vis0; st_time[k] += host_now() - t0;
@@ -2655,7 +2726,7 @@ static void trxdir_write(uint64_t v) {
         if (tl_on < 0) tl_init();
         hd_flush();   /* (the previous transfer is written by now) */
         tl.want = 0; tl.hd = xfer.active && hdtex_wants(xfer.psm);
-        if (xfer.active) { uint64_t hp[8] = {0}; mark_pages(hp, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1); hd_touch(hp); }
+        if (xfer.active) { uint64_t hp[8] = {0}; mark_pages(hp, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1); hd_touch(hp); wide_upload(hp); }
         if ((tl_on > 0 || tl.hd) && xfer.active) tl_begin();
         if (xfer.active && gsw_n) {   /* queued draws must be done with the pages the image goes to */
             uint64_t pg[8] = {0}; mark_pages(pg, xfer.bp, xfer.bw, xfer.psm, xfer.sx, xfer.sy, xfer.sx + xfer.w - 1, xfer.sy + xfer.h - 1); gsw_access(pg, 1);
@@ -2772,7 +2843,7 @@ static void packed(int r, const uint64_t q[2]) {
 }
 static uint64_t n_gif_tags;
 static void gif_qword_exec(int path, const uint64_t q[2]) {
-    GifPath *g = &gpath[path & 3];
+    GifPath *g = &gpath[path & 3]; gif_cur_path = path & 3;
     if (!g->in_packet) { gif_tag(g, q); n_gif_tags++; return; }
     switch (g->flg) {
     case 0:
@@ -3242,6 +3313,7 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg) {
 #endif
     }
     n_kicks_frame = 0;
+    wide_vblank(priv);
 #ifdef HAVE_VULKAN
     if (vk_live) {   /* the GPU at most HG_GSVK_LAG (2) VBlanks behind: pictures come out in time, and late input is not buffered */
         uint64_t *vbid = vk_vbid; static int lag = -1; if (lag < 0) { lag = getenv("HG_GSVK_LAG") ? atoi(getenv("HG_GSVK_LAG")) : 2; if (lag < 1) lag = 1; if (lag > 7) lag = 7; }

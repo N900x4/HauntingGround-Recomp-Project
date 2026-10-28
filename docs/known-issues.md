@@ -40,11 +40,11 @@ welcome, especially with a recording (see the README, "Reporting bugs").
 - **HD textures** replace the game's textures in the upscaled picture (stage textures, characters, menu panels): AI
   upscales of the originals, so small details can differ from the PS2's look. Text (the fonts) and effects stay at
   the original resolution. The first time a texture is needed its HD version may appear a moment after the original.
-- **Heavy moments at x4 and 60 fps** (Debilitas' entrance in the hallway, two moments of the chase after it) show a
-  brief hitch (a picture or two repeated, rarely a click in the sound), then 30 fps for a second or two: when the
-  renderer cannot keep up, the in-between pictures are switched off instead of slowing the game and its sound. The
-  rest of the time 60 fps holds, also while running. The real fix (in-between pictures made without the game waiting
-  for them) is planned for 0.2.
+- **Heavy moments at 60 fps.** In 0.1, Debilitas' entrance in the hallway and the start of the chase after it showed
+  a brief hitch at x4, then 30 fps for a second or two. Fixed in 0.2 (the renderer no longer waits for the in-between
+  pictures, and matching them is faster): replayed in real time at x4 + 60 fps, that whole stretch has no hitch, no
+  picture left out and no sound underrun. If the renderer still cannot keep up on a slower PC, the in-between pictures
+  are switched off for a moment instead of slowing the game and its sound (the F3 overlay's SKIP).
 - **Pacing.** With V-Sync "On (smooth)" (the default) the game follows the display when its refresh rate is a
   multiple of 60 Hz (60, 120, 240): every picture stays up for the same number of refreshes, the game runs up to
   0.5 % faster than a PS2 (0.1 % at 60/120 Hz) and the sound is resampled to match. About 1 picture in 300 is still held

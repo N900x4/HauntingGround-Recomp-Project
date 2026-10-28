@@ -56,6 +56,9 @@ The build finds Vulkan through `pkg-config vulkan` (MSYS2 packages `mingw-w64-uc
 | `HG_VI_SELFTEST=1` | With `HG_GSVK_INTERP`: every frame also replayed with no movement and compared with the real one. |
 | `HG_VI_ADAPT=0` / `1` | Adaptive interpolation (in-between pictures left out when the GPU is short of time, see 60 fps): default on with the window, off headless; `0` always off (every frame interpolated, the old behaviour), `1` on headless too. |
 | `HG_VI_BUDGET=MS` | Adaptive interpolation: GPU ms per VBlank, with interpolation, above which the in-between pictures stop (default 14.5; back below MS - 1). |
+| `HG_GSVK_NCMD=N` | Command buffers in rotation (default and most 256; 32 was the rule until 0.2). |
+| `HG_GSLOG=FROM:TO` | Per VBlank: the GS thread's time, its GPU waits by site, the matching's parts and the replay's recording, how long the game waited for it. |
+| `HG_VI_MATCHCHECK=1` | The matching's pass 2 also scans every candidate in full and counts the triangles it would match differently (expected 0). |
 | `HG_FRAMES_SHOWN=dir:FROM:TO[:PERIOD]` | Dump the pictures handed to the window in those VBlanks (4 every PERIOD). |
 | `HG_PRESENTLOG=S[:N]` | Log the time and picture of N (600) presents from S seconds on: `PRESENT`, `SHOWN` (present wait), `SCAN` (first pixel out, present timing); `tools/verify/cadence.py`, `pacing.py`. |
 | `HG_FRAMES_HR=dir` | With `HG_GSVK_SCALE`: dump the upscaled picture (`hr_VVVVVV.ppm`, every `HG_FRAME_EVERY` VBlanks). |
@@ -239,6 +242,19 @@ shown for two VBlanks (`docs/frame-timing.md`). With `HG_GSVK_INTERP=1`:
   later than before (5 pictures not ready and 2 underruns over the whole replay, were 0). The 600-VBlank GPU log
   line now also shows the least the game slept, the most it waited, and how many 10-VBlank checks were over the
   limit.
+- **The heavy moments, fixed (0.2, 2026-10-29).** Measured per VBlank (`HG_GSLOG`) in the replay of playtest 7 at x4:
+  (1) the GS thread's GPU waits were all for a free command buffer: a frame's replay is about 45 submissions and there
+  were 32 command buffers, so the GS thread could never get a replay ahead of the GPU (71 s of waiting in the replay;
+  Debilitas' entrance and the chase at 0.82-0.84x real time headless). `NCMD` is now 256 (`HG_GSVK_NCMD` for fewer):
+  0.1 s; the only wait left is the 2-VBlank GPU lag limit. (2) At the start of the chase the matching took 13 ms per
+  frame (31,000 entries; groups of identical triangles scanned in full for each member in pass 2), so the GS thread
+  needed 33.5 ms per two VBlanks and the "slow" rule turned the pictures off for 2 s. Pass 2 now scans only the
+  candidates within the acceptance limit in x (entries sorted by identity, then x; the shape test last; ties to the
+  lowest index as before; `HG_VI_MATCHCHECK=1` compares it with the full scan: 27 million ambiguous triangles, 0
+  different), and the identities are radix-sorted (qsort took 5 ms): 13 -> about 5 ms. Real time in headless
+  gamescope, VB 18,600-25,200 (the entrance, the movie, the chase): hitches 249 -> 0, in-between pictures left out
+  243 -> 0, not ready 2 -> 0, sound underruns 2 -> 0. (The split between triangles moved as matched and carried by
+  neighbours varies a little from run to run, as before: the matching's input, not its result.)
 - **Shape check (2026-10-25, the user's report: a glitch in the loading screen's spinning globe).** Only the in-between
   pictures had it: long cyan shards across the armillary rings. The rings repeat one part, so a piece culled in one
   frame was paired (as the only one with its identity) with its twin across the ring, and drawn halfway between the

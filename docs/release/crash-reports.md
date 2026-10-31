@@ -11,7 +11,7 @@ safe or not to share, and how a developer uses it.
 | `logs\play.prev.log` | if the problem was in the session before | the same, one session older | yes |
 | `logs\launcher.log` | problems with the first start or with starting at all | every launcher start; the disc check (the files' names, sizes and "sha256 ok"), the compiler's messages, the Vulkan devices found, how the game ended | yes |
 | `recordings\<date-time>\pad.txt` | to make a bug replayable | the settings in effect and every change of the controller state with its VBlank; nothing else | yes |
-| `recordings\<date-time>\card\port0\BASLUS-21075HG\BASLUS-21075HG` | only if asked (a replay of a session that started from a save needs it) | your save data as it was when the session started | yes (it is your save, written by the game) |
+| `recordings\<date-time>\card\port0\BASLUS-21075HG\BASLUS-21075HG` | when the session loaded a save (its replay needs it: without it the replay goes its own way from the first load) | your save data as it was when the session started | yes (it is your save, written by the game) |
 | `hg.ini` | settings problems | your settings | yes |
 
 ## What not to attach
@@ -31,6 +31,7 @@ safe or not to share, and how a developer uses it.
 - `launcher.log` holds the disc image's path, the names, sizes and check results of the copied files, compiler warnings
   about our own runtime sources, and the GPU names. No file contents.
 - `pad.txt` holds only button states, stick positions and settings.
+- Press **F9** in the game at the moment something looks wrong: the log notes that moment ("mark 1 ... VBlank ..."), so it can be found in the replay.
 - Privacy: the logs contain folder paths (the disc image's path, the game folder), which can include the Windows user
   name. Players can replace it before posting.
 

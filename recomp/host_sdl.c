@@ -770,6 +770,8 @@ static int ui_refresh(int x2) {
     static int minrd_win = 99;
     static int timed_ok = -1; static double slack;
     static int capped, cap_n, cap_blk;   /* the driver holding presents back (a frame-rate cap below the refresh), see below */
+    static int cap_rel = -1; static double cap_early;   /* capped: HG_PRESENT_REL=0 no target time for the driver; HG_PRESENT_EARLY refreshes before (0.8) */
+    if (cap_rel < 0) { cap_rel = !getenv("HG_PRESENT_REL") || atoi(getenv("HG_PRESENT_REL")); cap_early = getenv("HG_PRESENT_EARLY") ? atof(getenv("HG_PRESENT_EARLY")) : 0.8; if (cap_early < 0.1) cap_early = 0.1; if (cap_early > 0.95) cap_early = 0.95; }
     if (depth < 0) { depth = getenv("HG_PRESENT_DEPTH") ? atoi(getenv("HG_PRESENT_DEPTH")) : 1; if (depth < 1) depth = 1; if (depth > 3) depth = 3; }
     if (timed_ok < 0) { timed_ok = getenv("HG_PRESENT_TIMED") && atoi(getenv("HG_PRESENT_TIMED"));   /* (opt-in: not yet measured long enough) */ slack = (getenv("HG_PRESENT_SLACK") ? atof(getenv("HG_PRESENT_SLACK")) : 10.0) / 1000; }
     const int m = x2 ? 2 : 1;
@@ -780,12 +782,13 @@ static int ui_refresh(int x2) {
        Capped: a frame-rate cap in the driver below the refresh (NVIDIA's Max Frame Rate 117 on 120 Hz, common with
        frame generation and G-Sync; the 0.2 Windows playtest) lets only ~117 presents a second through, so a present at
        every refresh misses one refresh in ~40 and the game cannot follow the display. Then each picture is presented
-       once, 0.6 refresh before its refresh (FIFO shows it there; the margin is larger on the late side, where the blit
-       and the compositor need time; with relative target times the driver is told too): 60 presents a second, under
-       any such cap. */
+       once, 0.8 refresh before its refresh (FIFO shows it there; with relative target times the driver is told too):
+       60 presents a second, under any such cap. The driver still holds some present calls for 5-8 ms, so the margin
+       is on the late side: 90 s at x6 widescreen with the 117 cap held 2 refreshes 99.51 % at 0.6 refresh early,
+       99.84 % at 0.8 (99.82 % without the target time). */
     const int timed = locked && (timed_ok || capped) && (capped || gsvk_present_timed()) && gen == gsvk_present_gen();
     if (timed && t_last > 0) {
-        const double due = t_last + hold * rp - (capped ? 0.6 * rp : slack);
+        const double due = t_last + hold * rp - (capped ? cap_early * rp : slack);
         for (double tn = host_now(); tn < due; tn = host_now()) { if (due - tn > 0.002) SDL_Delay((Uint32)((due - tn - 0.0015) * 1000)); }
     }
     const double now = host_now();
@@ -848,7 +851,7 @@ static int ui_refresh(int x2) {
     sm_tick(0);
     const double t_pc = host_now();
     int ow = 0, oh = 0; const uint32_t *ov = ov_build(&ow, &oh);
-    const uint64_t pid = gsvk_present(s, id, ov, ow, oh, timed ? (uint64_t)(hold * rp * 1e9 + 0.5) : 0);
+    const uint64_t pid = gsvk_present(s, id, ov, ow, oh, timed && (cap_rel || !capped) ? (uint64_t)(hold * rp * 1e9 + 0.5) : 0);
     const double t_pr = host_now();
     if (pid && !timed) { cap_n++; if (t_pr - t_pc > rp / 2) cap_blk++; }   /* (a present call held over half a refresh: the driver limiting the rate) */
     if (!pid) { if (s >= 0) { } SDL_Delay(8); t_last = 0; lock_set(0, 0, 0, 0, 0); locked = 0; return 1; }   /* (minimized, the swapchain being made again) */

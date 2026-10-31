@@ -29,7 +29,7 @@ STRINGOP = ['-mstringop-strategy=libcall']
 # runtime object -> (source relative to recomp/, extra flags after RTFLAGS); same order as the Makefile's link line
 RUNTIME = [
     ('runtime', 'runtime.c', []), ('hle', 'hle.c', []), ('interp', 'interp.c', []), ('iop_pad_mc', 'iop_pad_mc.c', []),
-    ('overrides', 'overrides.c', []), ('options', 'game/options.c', []), ('settings', 'settings.c', ['SDL']),
+    ('overrides', 'overrides.c', []), ('options', 'game/options.c', []), ('keycaps', 'game/keycaps.c', []), ('settings', 'settings.c', ['SDL']),
     ('gs', 'gs.c', VK + O2FP), ('dmac', 'dmac.c', []), ('host_sdl', 'host_sdl.c', ['SDL'] + VK), ('vu1', 'vu1.c', O2FP),
     ('vu1_ref', 'vu1_ref.c', O2FP), ('ipu', 'ipu.c', ['-O2']), ('iop_cpu', 'iop_cpu.c', ['-O2']),
     ('iop_kernel', 'iop_kernel.c', ['-O2']), ('spu2', 'spu2.c', ['-O2']), ('compat', 'compat.c', []), ('hdtex', 'hdtex.c', VK + ['-O2']), ('gsvk', 'gsvk.c', []),

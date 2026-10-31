@@ -190,13 +190,13 @@ static void d_columns(Draw *d, int y, int h) {
 
 /* ------------------------------------------------------------------ our pages */
 enum { PG_NONE, PG_DISPLAY, PG_KEYBOARD, PG_PAD };
-enum { R_RENDERER, R_RESOLUTION, R_FPS, R_DISPLAY, R_ASPECT, R_UPSCALE, R_VSYNC, R_HD, R_KEYBOARD, R_PAD, NROWS };
-static const char *const row_label[NROWS] = { "Renderer", "Resolution", "Frame rate", "Display", "Aspect ratio", "Upscaling", "V-Sync", "HD textures", "Keyboard", "Controller" };
+enum { R_RENDERER, R_RESOLUTION, R_FPS, R_DISPLAY, R_ASPECT, R_UPSCALE, R_SOFT, R_VSYNC, R_HD, R_KEYBOARD, R_PAD, NROWS };
+static const char *const row_label[NROWS] = { "Renderer", "Resolution", "Frame rate", "Display", "Aspect ratio", "Upscaling", "Soft focus", "V-Sync", "HD textures", "Keyboard", "Controller" };
 static const int row_icon[NROWS] = {
-    SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_SCREEN, SPR_ICON_PAD, SPR_ICON_PAD,
+    SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_SCREEN, SPR_ICON_WAVES, SPR_ICON_SCREEN, SPR_ICON_PAD, SPR_ICON_PAD,
 };
-#define ROW_Y(r) (82 + 28 * (r))   /* the icon's top; the label 6 below (the game's rows were 32 apart from 84: ten rows and the
-                                     note need 28, on parchment of our own with a bar per row) */
+#define ROW_Y(r) (82 + 26 * (r))   /* the icon's top; the label 6 below (the game's rows were 32 apart from 84: eleven rows and
+                                     the note need 26, on parchment of our own with a bar per row) */
 /* the mapping pages: the keyboard has the 16 buttons and the left stick's 4 directions, the controller 16 buttons */
 static const int map_order[PB_N] = {
     PB_CROSS, PB_CIRCLE, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_L2, PB_R2, PB_L3, PB_R3,
@@ -263,6 +263,10 @@ static int values(int row, int *v, const char **names) {
         v[k] = 1; names[k++] = "FSR (sharp)";
         v[k] = 0; names[k++] = "Bilinear (soft)";
         break;
+    case R_SOFT:   /* the game's glow: at the upscaled resolution, or as the game made it (vk/gs_sprite.comp sample_hr) */
+        v[k] = 1; names[k++] = "High-res";
+        v[k] = 0; names[k++] = "Original";
+        break;
     case R_VSYNC:
         v[k] = VSYNC_ON; names[k++] = "On (smooth)";
         v[k] = VSYNC_MAILBOX; names[k++] = "Exact 59.94 Hz";
@@ -284,6 +288,7 @@ static int current(int row) {
     case R_DISPLAY: return s->fullscreen;
     case R_ASPECT: return s->wide;
     case R_UPSCALE: return s->upscaler;
+    case R_SOFT: return s->softfocus;
     case R_VSYNC: return s->vsync;
     case R_HD: return s->hd_on;
     }
@@ -315,6 +320,7 @@ static void commit(int row, int val) {
     case R_DISPLAY: settings_set("fullscreen", b, "Options menu"); break;
     case R_ASPECT: settings_set("aspect", val ? "wide" : "4:3", "Options menu"); break;
     case R_UPSCALE: settings_set("upscaler", val ? "fsr" : "bilinear", "Options menu"); break;
+    case R_SOFT: settings_set("softfocus", val ? "hires" : "original", "Options menu"); break;
     case R_VSYNC: settings_set("vsync", val == VSYNC_ON ? "on" : val == VSYNC_OFF ? "off" : "mailbox", "Options menu"); break;
     case R_HD: settings_set("hd", val ? "on" : "off", "Options menu"); break;
     }

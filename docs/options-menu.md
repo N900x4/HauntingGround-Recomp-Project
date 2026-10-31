@@ -119,7 +119,7 @@ Native rows are practical and safe. The design (implemented in `recomp/game/opti
 ### The rows
 
 Down from Screen Position (or Up from Controller Type) turns the page: the same panel (the title's "Options" header,
-or the sub-screen's tabs) with ten rows (HD textures added 2026-10-26, Aspect ratio 2026-10-29, Upscaling 2026-10-31: 28 pixels apart since, on parchment of
+or the sub-screen's tabs) with eleven rows (HD textures added 2026-10-26, Aspect ratio 2026-10-29, Upscaling and Soft focus 2026-10-31: 26 pixels apart since, on parchment of
 our own with a bar per row, so the note still fits above the footer), the game's icons, bars, cursor, arrows, colours,
 sounds and footer:
 
@@ -130,6 +130,7 @@ sounds and footer:
  [+]  Display           Window                Window | Full screen
  [+]  Aspect ratio      4:3 (original)        4:3 (original) | Widescreen (the display's shape, up to 2.4:1; at once)
  [+]  Upscaling         FSR (sharp)           FSR (sharp) | Bilinear (soft): how the picture is enlarged to the window (at once)
+ [+]  Soft focus        High-res              High-res | Original: the game's glow at the upscaled resolution or the game's (at once)
  [~]  V-Sync            On (smooth)           On (smooth) | Exact 59.94 Hz | Off (may tear)
  [+]  HD textures       On                    On | Off ("Not installed" without a textures folder; GPU renderer only)
  [pad] Keyboard         Change                -> the keyboard page
@@ -204,6 +205,7 @@ stay in its system data and its memory-card save; nothing of ours is written the
 | Full screen | at once | the UI thread compares the setting with the window |
 | Aspect ratio | at once | the camera hook and the 2D squeeze read `settings_wide_factor()` each frame; the window blit uses `settings_display_aspect()`; a window (not full screen) takes the new shape at its height |
 | Upscaling | at once | the UI thread reads `settings_ui_upscaler()` at every present: FSR 1 (gsvk.c) when the picture is smaller than the window's rectangle, else the blit |
+| Soft focus | at once | `gs.c` marks sprites that read a render target `rt` 2 when it is on; the copies shader reads an enlarged one as one image of all copies (`sample_hr`) |
 | V-Sync | at the next present | `gsvk_present_mode()`: the swapchain is made again in the new mode |
 | Keyboard, controller | at once | the UI thread copies the maps when the settings' generation changes |
 | Renderer | next start | the software GS and the GPU renderer are chosen when the game starts |

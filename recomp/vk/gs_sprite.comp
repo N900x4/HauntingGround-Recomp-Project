@@ -59,6 +59,7 @@ layout(push_constant) uniform PC { int n, bx0, by0, first, ncopy; } pc;
 // covers() until 2026-10-31: 17 % of the copies' time went into moving the geometry).
 int pi;
 float g_ox, g_oy; int g_oxi, g_oyi;
+bool g_hr = false; float g_hu, g_hv;   // sample_hr(): this pixel's texture coordinates in the scene's frame, texels
 #define PF(f) PF_##f
 #define PF_px0 prims[pi].px0
 #define PF_px1 prims[pi].px1
@@ -308,11 +309,33 @@ vec2 tri_uv(float px, float py) {   // a triangle's texture coordinates at (px, 
     return uv / 16.0;
 }
 #endif
+#ifdef COPIES
+// The copies' pictures of a render target together: copy 1 + ci + cj*N holds its texel (t, s) at the scene's (t + (ci +
+// 0.5) / N, s + (cj + 0.5) / N), so all of them are one image N times finer. Bilinear on that image at (g_hu, g_hv); each
+// tap read with texel() from its copy (wrap and clamp as the GS does).
+int fdiv(int a, int n) { return a >= 0 ? a / n : -((-a + n - 1) / n); }
+uint sample_hr() {
+    const int N = PF(cn); const uint kb = va_b, ks = va_s, setb = prims[pi].mbase + (1u << 20) - 1u;
+    const float K = g_hu * float(N) - 0.5, L = g_hv * float(N) - 0.5;
+    const int k0 = int(floor(K)), l0 = int(floor(L)); const float fk = K - float(k0), fl = L - float(l0);
+    vec4 acc = vec4(0.0);
+    [[dont_unroll]] for (int q = 0; q < 4; q++) {
+        const int k = k0 + (q & 1), l = l0 + (q >> 1), t = fdiv(k, N), tv = fdiv(l, N);
+        va_b = setb + uint(1 + (k - t * N) + (l - tv * N) * N); va_s = uint(N * N);
+        const uint c = texel(t, tv);
+        const float w = ((q & 1) != 0 ? fk : 1.0 - fk) * ((q >> 1) != 0 ? fl : 1.0 - fl);
+        acc += w * vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u), float(c >> 24));
+    }
+    va_b = kb; va_s = ks;
+    const uvec4 r = uvec4(acc + 0.5);
+    return r.x | (r.y << 8u) | (r.z << 16u) | (r.w << 24u);
+}
+#endif
 uint shade(uint vcol, int u16, int v16, uint fog) {
     uint c = vcol;
     if (PF(tme) != 0) {
 #ifdef COPIES
-        uint t = hd_use ? sample_hd() : sample_(u16, v16);
+        uint t = hd_use ? sample_hd() : g_hr ? sample_hr() : sample_(u16, v16);
 #else
         uint t = sample_(u16, v16);
 #endif
@@ -398,7 +421,7 @@ void draw_at(int x, int y) {
     // the copy's geometry, evaluated at the pixel: the same arithmetic apply_copy() did on a moved copy of the primitive
     // (sprites and points moved by whole 1/16 pixels, triangles by the float offset, render-target texture coordinates
     // with them); then one shade() and one pixel()
-    hd_use = false; hd_box = false;
+    hd_use = false; hd_box = false; g_hr = false;
     uint zv, vcol, fogv; int u16 = 0, v16 = 0;
     const int pk = PF(prim);
     if (pk == 3) {   // a point
@@ -428,6 +451,11 @@ void draw_at(int x, int y) {
         if (PF(py1) > PF(scy1)) py1 = PF(scy1) + 1;
         if (x < px0 || x >= px1 || y < py0 || y >= py1) return;
         precise const float du = x1 != x0 ? (u1 - u0) / float(x1 - x0) : 0.0, dv = y1 != y0 ? (v1 - v0) / float(y1 - y0) : 0.0;
+        // a render target enlarged (the glow's blurred half and quarter pictures stretched back over the frame): read as
+        // one image made of all the copies (sample_hr), at the scene's position of this pixel (the coordinates before
+        // the shift below; each copy's own picture is the game's coarse one, and 36 of them side by side read as lines)
+        g_hr = PF(rt) == 2 && prims[pi].hd == 0 && PF(tme) != 0 && abs(du) < 0.999 && abs(dv) < 0.999 && du != 0.0 && dv != 0.0;
+        if (g_hr) { g_hu = (u0 + float((x << 4) - x0) * du) / 16.0; g_hv = (v0 + float((y << 4) - y0) * dv) / 16.0; }
         if (PF(rt) != 0 && prims[pi].hd == 0) { u0 -= float(oxi); v0 -= float(oyi); }
         precise const float uu = u0 + float((x << 4) - x0) * du, vv = v0 + float((y << 4) - y0) * dv;
         if (prims[pi].hd != 0) { hd_use = true; hd_uv = vec2(uu, vv) / 16.0; hd_gx = vec2(du, 0.0); hd_gy = vec2(0.0, dv);

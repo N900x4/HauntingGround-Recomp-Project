@@ -61,6 +61,8 @@ typedef struct {
     int upscaler;       /* how the GPU renderer's picture is enlarged to the window: 0 bilinear (the GPU's blit), 1 AMD FSR 1
                            (edge-adaptive upscaling + sharpening); only when the picture is smaller than the window; applies at once */
     int sharpness;      /* FSR's sharpening, tenths of a stop of reduction: 0 the sharpest .. 20 (2 stops) the softest */
+    int softfocus;      /* the game's glow (a blurred half- and quarter-size picture stretched back over the frame): 1 high-res (the
+                           upscaling copies read it as one fine image, vk/gs_sprite.comp sample_hr), 0 as the game made it; at once */
 } Settings;
 
 void settings_init(void);                 /* load, apply the environment, log; once, at start */

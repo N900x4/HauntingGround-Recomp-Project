@@ -280,6 +280,19 @@ primitive); without that read, normal GPU rendering went from 9.5 to 8.4 ms per 
 120 fps (`HG_GSVK_INTERP=2`: pictures at 1/4, 1/2, 3/4, presents every 8.34 ms) runs at full speed at native
 resolution since phase 1; with upscaling it is GPU-bound (three replays per frame: x5 55 %).
 
+## The glow at the upscaled resolution (2026-10-31, the user's report: Fiona's face blurry, with lines, outdoors)
+
+The game's glow shrinks the frame (buffer 8704) to half (256 x 224) and quarter size (128 x 112), blurs those by blending
+shifted copies, and stretches them back over the frame with blending (some tinted). Each upscaling copy holds its own
+half- and quarter-size picture, consistent with its sub-pixel offset, so each stretch back was the game's coarse picture:
+36 of them side by side at x6 made a ghost outline and streaks (GitHub issue #1's "doubling at the edges"; at native
+resolution the same layer just looks soft). Now a sprite that enlarges a render target (`rt` 2 from `gs.c`, |du| and
+|dv| under 1) reads it in the copies as one image made of all of them: copy `1 + ci + cj*N` holds texel (t, s) at the
+scene's (t + (ci + 0.5) / N, s + (cj + 0.5) / N), so `sample_hr()` filters bilinearly on that N times finer grid at the
+pixel's position in the scene. The exact copy is untouched (G1/G2 identical). Brightness is the same (mean within 0.1
+level); the cost at x6 is about 6 % of the copies' time (the heaviest stretch of the opening 1.03 -> 1.00x unpaced).
+Setting `softfocus = hires | original` (Options "Soft focus", `HG_HRFX=0` for original).
+
 ## FSR 1 for the window (2026-10-31)
 
 When the picture is enlarged to the window's rectangle (both ways: x4 on a 4K display, 4:3 and widescreen), the UI

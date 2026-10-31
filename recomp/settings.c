@@ -170,6 +170,7 @@ void settings_defaults(Settings *s) {
     s->hd_on = 1;
     s->upscaler = 1;             /* FSR 1 where the picture is enlarged */
     s->sharpness = 2;            /* 0.2 stops: AMD's usual setting */
+    s->softfocus = 1;            /* the glow at the upscaled resolution */
 }
 
 /* ------------------------------------------------------------------ values as text */
@@ -193,6 +194,7 @@ static void value_of(const Settings *s, const char *key, char *out, size_t n) {
     else if (!strcmp(key, "aspect")) snprintf(out, n, "%s", s->wide ? "wide" : "4:3");
     else if (!strcmp(key, "upscaler")) snprintf(out, n, "%s", s->upscaler ? "fsr" : "bilinear");
     else if (!strcmp(key, "sharpness")) snprintf(out, n, "%d.%d", s->sharpness / 10, s->sharpness % 10);
+    else if (!strcmp(key, "softfocus")) snprintf(out, n, "%s", s->softfocus ? "hires" : "original");
     else if (!strncmp(key, "kb.", 3)) {
         for (int i = 0; i < PB_N; i++) if (!strcmp(key + 3, pb_key[i])) snprintf(out, n, "%s", settings_key_name(s->kb[i]));
     } else if (!strncmp(key, "pad.", 4)) {
@@ -252,6 +254,11 @@ static int apply_to(Settings *s, const char *key, const char *v, int swap) {
         if (!strcasecmp(v, "off") || !strcmp(v, "0")) { s->hd_on = 0; return 1; }
         return 0;
     }
+    if (!strcmp(key, "softfocus")) {
+        if (!strcasecmp(v, "hires") || !strcmp(v, "1")) { s->softfocus = 1; return 1; }
+        if (!strcasecmp(v, "original") || !strcmp(v, "0")) { s->softfocus = 0; return 1; }
+        return 0;
+    }
     if (!strcmp(key, "upscaler")) {
         if (!strcasecmp(v, "fsr") || !strcmp(v, "1")) { s->upscaler = 1; return 1; }
         if (!strcasecmp(v, "bilinear") || !strcmp(v, "0")) { s->upscaler = 0; return 1; }
@@ -287,7 +294,7 @@ static int apply_to(Settings *s, const char *key, const char *v, int swap) {
 typedef struct { const char *env, *key; } EnvMap;
 static const EnvMap envmap[] = {
     { "HG_GSVK", "renderer" }, { "HG_GSVK_SCALE", "resolution" }, { "HG_GSVK_INTERP", "fps" },
-    { "HG_VSYNC", "vsync" }, { "HG_SCALE", "window_scale" }, { "HG_FULLSCREEN", "fullscreen" }, { "HG_WIDE", "aspect" }, { "HG_FSR", "upscaler" },
+    { "HG_VSYNC", "vsync" }, { "HG_SCALE", "window_scale" }, { "HG_FULLSCREEN", "fullscreen" }, { "HG_WIDE", "aspect" }, { "HG_FSR", "upscaler" }, { "HG_HRFX", "softfocus" },
 };
 #define NENV (int)(sizeof envmap / sizeof envmap[0])
 static int env_set[NENV];
@@ -362,7 +369,8 @@ void settings_save(void) {
     fprintf(f, "window_scale = %d      # the window's size at start, times 640 x 448\n", file.window_scale);
     fprintf(f, "aspect = %s           # 4:3 (the original picture) | wide (fills the display, up to 21:9; menus stay 4:3)\n", file.wide ? "wide" : "4:3");
     fprintf(f, "upscaler = %s         # fsr (AMD FSR 1: sharper when the picture is enlarged to the window) | bilinear\n", file.upscaler ? "fsr" : "bilinear");
-    fprintf(f, "sharpness = %d.%d        # FSR's sharpening: 0.0 (sharpest) .. 2.0 (softest)\n\n", file.sharpness / 10, file.sharpness % 10);
+    fprintf(f, "sharpness = %d.%d        # FSR's sharpening: 0.0 (sharpest) .. 2.0 (softest)\n", file.sharpness / 10, file.sharpness % 10);
+    fprintf(f, "softfocus = %s       # hires (the game's glow at the upscaled resolution) | original (at the game's, lines at high factors)\n\n", file.softfocus ? "hires" : "original");
     fprintf(f, "# keyboard: SDL key names (\"none\" for no key)\n");
     for (int i = 0; i < PB_N; i++) fprintf(f, "kb.%s = %s\n", pb_key[i], settings_key_name(file.kb[i]));
     fprintf(f, "\n# controller: a b x y back guide start leftstick rightstick leftshoulder rightshoulder dpup dpdown dpleft\n");
@@ -467,13 +475,13 @@ int settings_set(const char *key, const char *value, const char *why) {
 void settings_reset(const char *group, const char *why) {
     Settings d, t = eff;
     settings_defaults(&d);
-    if (!strcmp(group, "display")) { t.scale = d.scale; t.fps = d.fps; t.fullscreen = d.fullscreen; t.vsync = d.vsync; t.hd_on = d.hd_on; t.wide = d.wide; t.upscaler = d.upscaler; t.sharpness = d.sharpness; }
+    if (!strcmp(group, "display")) { t.scale = d.scale; t.fps = d.fps; t.fullscreen = d.fullscreen; t.vsync = d.vsync; t.hd_on = d.hd_on; t.wide = d.wide; t.upscaler = d.upscaler; t.sharpness = d.sharpness; t.softfocus = d.softfocus; }
     else if (!strcmp(group, "keyboard")) memcpy(t.kb, d.kb, sizeof t.kb);
     else if (!strcmp(group, "controller")) { memcpy(t.pad, d.pad, sizeof t.pad); t.vibration = d.vibration; t.lightbar = d.lightbar; }
     else return;
     if (!memcmp(&t, &eff, sizeof t)) return;
     eff = t;
-    if (!strcmp(group, "display")) { file.scale = d.scale; file.fps = d.fps; file.fullscreen = d.fullscreen; file.vsync = d.vsync; file.hd_on = d.hd_on; file.wide = d.wide; file.upscaler = d.upscaler; file.sharpness = d.sharpness; }
+    if (!strcmp(group, "display")) { file.scale = d.scale; file.fps = d.fps; file.fullscreen = d.fullscreen; file.vsync = d.vsync; file.hd_on = d.hd_on; file.wide = d.wide; file.upscaler = d.upscaler; file.sharpness = d.sharpness; file.softfocus = d.softfocus; }
     else if (!strcmp(group, "keyboard")) memcpy(file.kb, d.kb, sizeof file.kb);
     else { memcpy(file.pad, d.pad, sizeof file.pad); file.vibration = d.vibration; file.lightbar = d.lightbar; }
     L("settings: %s back to the defaults (%s)\n", group, why);

@@ -1314,6 +1314,9 @@ static uint64_t pg_gpu[8], pg_cpu[8], vk_downloads, vk_dl_pages, vk_ul_pages;
 static const uint64_t all_pages[8] = { ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull, ~0ull };
 static int vk_pending = -1; static int vk_box[4];   /* a single checked primitive waiting for the CPU's drawing */
 static void draw_triangle_cpu(const Draw *d, const Vtx *v0, const Vtx *v1, const Vtx *v2);
+/* rt 2 (sprites): a render target the copies may read as one image of all of them, when the sprite enlarges it (the
+   glow's stretch back: vk/gs_sprite.comp sample_hr); settings softfocus original (HG_HRFX=0): each copy reads its own */
+static int vk_hrfx(void) { return settings()->softfocus != 0; }
 static void gsvk_setup(void) {
     if (vkchk_from != -2) return;
     vkchk_from = -1;
@@ -1607,7 +1610,7 @@ static void gsvk_sprite_prim(const Draw *d, const Vtx *a, const Vtx *b) {
     s.rgba = b->rgba; s.fog = (uint32_t)b->f; s.z = b->z; s.prim = 0; s.serial = serial;
     if (vk_ncopy > 1 && !serial) {   /* batched: the GPU makes the copies */
         float uu0 = 0, vv0 = 0, uu1 = 0, vv1 = 0; if (d->tme) { vtx_uv(d, a, &uu0, &vv0); vtx_uv(d, b, &uu1, &vv1); }
-        s.gcopy = 1; s.cn = vk_scale; s.rt = gsvk_tex_is_rt(d); s.sx0 = a->x; s.sy0 = a->y; s.sx1 = b->x; s.sy1 = b->y; s.su0 = uu0; s.sv0 = vv0; s.su1 = uu1; s.sv1 = vv1;
+        s.gcopy = 1; s.cn = vk_scale; s.rt = gsvk_tex_is_rt(d) ? 1 + vk_hrfx() : 0; s.sx0 = a->x; s.sy0 = a->y; s.sx1 = b->x; s.sy1 = b->y; s.su0 = uu0; s.sv0 = vv0; s.su1 = uu1; s.sv1 = vv1;
     }
     if (gsvk_take(d, &s, g.px0, g.py0, g.px1 - 1, g.py1 - 1, serial, 0)) {
         const int rt = gsvk_tex_is_rt(d);

@@ -9,9 +9,9 @@
 // Local memory is one array of 32-bit words; 16-bit pixels are written with atomics, as two neighbours share a word.
 // Not covered (gsvk_sprite_supported() in gs.c): sprites whose texture, frame or Z buffer overlap in memory, since
 // their result depends on the order of the pixels.
-#ifdef COPIES   // the upscaling copies (batch shader, workgroup z + 1 = the copy): presentation only, no exactness needed
-#define precise
-#endif
+
+// (the copies build keeps `precise` too since 2026-10-31: without it the compiler fused multiply-adds as it liked, so any
+// change to the shader's code moved edge pixels of the copies; glslang's analysis hung on the moved fields of apply_copy)
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(std430, binding = 0) buffer Vram { uint vm[]; };
 layout(std430, binding = 1) readonly buffer Xoff { uint xoff[]; };   // [0, 32*2048): xoff32, [33*2048, ...): xoff32z
@@ -52,24 +52,24 @@ const int BIN = 16;
 layout(push_constant) uniform PC { int n, bx0, by0, first, ncopy; } pc;
 #endif
 #ifdef COPIES
-// The copies build reads a primitive's fields straight from the ring (prims[pi]), apart from those its copy
-// changes (apply_copy), which are kept in c_ variables: a private copy of the whole primitive (about 130 words)
-// per invocation cost registers and local memory, and the copies are most of the GPU's time.
+// The copies build reads a primitive's fields straight from the ring (prims[pi]): a private copy of the whole primitive
+// (about 130 words) per invocation cost registers and local memory, and the copies are most of the GPU's time. An
+// invocation always draws the same copy, so its sub-pixel offset is set once (g_ox ..., main()); the copy's geometry is
+// evaluated where it is used (draw_at), no longer copied and moved per pixel and primitive (apply_copy, load_mod and
+// covers() until 2026-10-31: 17 % of the copies' time went into moving the geometry).
 int pi;
-uint c_mbase;
-int c_px0, c_px1, c_py0, c_py1, c_x0, c_y0, c_lx0, c_ly0;
-float c_u0, c_v0, c_du, c_dv, c_tx0, c_ty0, c_tx1, c_ty1, c_tx2, c_ty2, c_tu0, c_tu1, c_tu2, c_tv0, c_tv1, c_tv2;
+float g_ox, g_oy; int g_oxi, g_oyi;
 #define PF(f) PF_##f
-#define PF_px0 c_px0
-#define PF_px1 c_px1
-#define PF_py0 c_py0
-#define PF_py1 c_py1
-#define PF_x0 c_x0
-#define PF_y0 c_y0
-#define PF_u0 c_u0
-#define PF_v0 c_v0
-#define PF_du c_du
-#define PF_dv c_dv
+#define PF_px0 prims[pi].px0
+#define PF_px1 prims[pi].px1
+#define PF_py0 prims[pi].py0
+#define PF_py1 prims[pi].py1
+#define PF_x0 prims[pi].x0
+#define PF_y0 prims[pi].y0
+#define PF_u0 prims[pi].u0
+#define PF_v0 prims[pi].v0
+#define PF_du prims[pi].du
+#define PF_dv prims[pi].dv
 #define PF_rgba prims[pi].rgba
 #define PF_fog prims[pi].fog
 #define PF_fbp prims[pi].fbp
@@ -129,19 +129,19 @@ float c_u0, c_v0, c_du, c_dv, c_tx0, c_ty0, c_tx1, c_ty1, c_tx2, c_ty2, c_tu0, c
 #define PF_prim prims[pi].prim
 #define PF_iip prims[pi].iip
 #define PF_fst prims[pi].fst
-#define PF_tx0 c_tx0
-#define PF_ty0 c_ty0
-#define PF_tx1 c_tx1
-#define PF_ty1 c_ty1
-#define PF_tx2 c_tx2
-#define PF_ty2 c_ty2
+#define PF_tx0 prims[pi].tx0
+#define PF_ty0 prims[pi].ty0
+#define PF_tx1 prims[pi].tx1
+#define PF_ty1 prims[pi].ty1
+#define PF_tx2 prims[pi].tx2
+#define PF_ty2 prims[pi].ty2
 #define PF_tinv prims[pi].tinv
-#define PF_tu0 c_tu0
-#define PF_tu1 c_tu1
-#define PF_tu2 c_tu2
-#define PF_tv0 c_tv0
-#define PF_tv1 c_tv1
-#define PF_tv2 c_tv2
+#define PF_tu0 prims[pi].tu0
+#define PF_tu1 prims[pi].tu1
+#define PF_tu2 prims[pi].tu2
+#define PF_tv0 prims[pi].tv0
+#define PF_tv1 prims[pi].tv1
+#define PF_tv2 prims[pi].tv2
 #define PF_tq0 prims[pi].tq0
 #define PF_tq1 prims[pi].tq1
 #define PF_tq2 prims[pi].tq2
@@ -154,14 +154,14 @@ float c_u0, c_v0, c_du, c_dv, c_tx0, c_ty0, c_tx1, c_ty1, c_tx2, c_ty2, c_tu0, c
 #define PF_tf0 prims[pi].tf0
 #define PF_tf1 prims[pi].tf1
 #define PF_tf2 prims[pi].tf2
-#define PF_lx0 c_lx0
-#define PF_ly0 c_ly0
+#define PF_lx0 prims[pi].lx0
+#define PF_ly0 prims[pi].ly0
 #define PF_lx1 prims[pi].lx1
 #define PF_ly1 prims[pi].ly1
 #define PF_ln prims[pi].ln
 #define PF_serial prims[pi].serial
 #define PF_clutoff prims[pi].clutoff
-#define PF_mbase c_mbase
+#define PF_mbase prims[pi].mbase
 #define PF_gcopy prims[pi].gcopy
 #define PF_rt prims[pi].rt
 #define PF_cn prims[pi].cn
@@ -173,7 +173,6 @@ float c_u0, c_v0, c_du, c_dv, c_tx0, c_ty0, c_tx1, c_ty1, c_tx2, c_ty2, c_tu0, c
 #define PF_sv0 prims[pi].sv0
 #define PF_su1 prims[pi].su1
 #define PF_sv1 prims[pi].sv1
-void load_mod() { c_mbase = prims[pi].mbase; c_px0 = prims[pi].px0; c_px1 = prims[pi].px1; c_py0 = prims[pi].py0; c_py1 = prims[pi].py1; c_x0 = prims[pi].x0; c_y0 = prims[pi].y0; c_u0 = prims[pi].u0; c_v0 = prims[pi].v0; c_du = prims[pi].du; c_dv = prims[pi].dv; c_tx0 = prims[pi].tx0; c_ty0 = prims[pi].ty0; c_tx1 = prims[pi].tx1; c_ty1 = prims[pi].ty1; c_tx2 = prims[pi].tx2; c_ty2 = prims[pi].ty2; c_tu0 = prims[pi].tu0; c_tu1 = prims[pi].tu1; c_tu2 = prims[pi].tu2; c_tv0 = prims[pi].tv0; c_tv1 = prims[pi].tv1; c_tv2 = prims[pi].tv2; c_lx0 = prims[pi].lx0; c_ly0 = prims[pi].ly0; }
 #else
 Prim p;
 #define PF(f) p.f
@@ -394,6 +393,80 @@ void pixel(int x, int y, uint zv, uint col) {
     if (z_ok && PF(zmsk) == 0) write_px(PF(zbp), PF(fbw), PF(zpsm), x, y, zv);
 }
 // one pixel of a sprite, triangle or point, at (x, y) inside its rectangle
+#ifdef COPIES
+void draw_at(int x, int y) {
+    // the copy's geometry, evaluated at the pixel: the same arithmetic apply_copy() did on a moved copy of the primitive
+    // (sprites and points moved by whole 1/16 pixels, triangles by the float offset, render-target texture coordinates
+    // with them); then one shade() and one pixel()
+    hd_use = false; hd_box = false;
+    uint zv, vcol, fogv; int u16 = 0, v16 = 0;
+    const int pk = PF(prim);
+    if (pk == 3) {   // a point
+        if (x != (PF(sx0) - g_oxi) >> 4 || y != (PF(sy0) - g_oyi) >> 4) return;
+        zv = PF(z); vcol = PF(rgba); u16 = PF(x0); v16 = PF(y0); fogv = PF(fog);
+    } else if (pk == 0) {   // sprite_geo() for the copy
+        int oxi = g_oxi, oyi = g_oyi;
+        // a render target copied one texel per pixel (along an axis) is a memory operation, not a scene: the effect passes
+        // that shuffle channels through 16-bit views draw 8-pixel strips with gaps, and moving those strips by under a
+        // pixel left a column out at one edge and wrote one too many at the other in half the copies (dark lines every
+        // 16 pixels, fixed on the screen). Each copy does the same operation on its own memory, unmoved.
+        if (PF(rt) != 0) {
+            if (PF(su1) - PF(su0) == float(PF(sx1) - PF(sx0))) oxi = 0;
+            if (PF(sv1) - PF(sv0) == float(PF(sy1) - PF(sy0))) oyi = 0;
+        }
+        int x0 = PF(sx0) - oxi, x1 = PF(sx1) - oxi, y0 = PF(sy0) - oyi, y1 = PF(sy1) - oyi;
+        float u0 = PF(su0), v0 = PF(sv0), u1 = PF(su1), v1 = PF(sv1);
+        if (x0 > x1) { int t = x0; x0 = x1; x1 = t; float f = u0; u0 = u1; u1 = f; }
+        if (y0 > y1) { int t = y0; y0 = y1; y1 = t; float f = v0; v0 = v1; v1 = f; }
+        int px0 = (x0 + 15) >> 4, px1 = (x1 + 15) >> 4, py0 = (y0 + 15) >> 4, py1 = (y1 + 15) >> 4;
+        px0 = max(px0, PF(scx0)); px1 = min(px1, PF(scx1) + 1); py0 = max(py0, PF(scy0)); py1 = min(py1, PF(scy1) + 1);
+        // a sprite that reaches the scissor's edge in the frame (PF(px0) ..: copy 0's rectangle) reaches it in every copy:
+        // moved by under a pixel it left the edge column of half the copies undrawn (a dark line at the border)
+        if (PF(px0) <= PF(scx0)) px0 = PF(scx0);
+        if (PF(px1) > PF(scx1)) px1 = PF(scx1) + 1;
+        if (PF(py0) <= PF(scy0)) py0 = PF(scy0);
+        if (PF(py1) > PF(scy1)) py1 = PF(scy1) + 1;
+        if (x < px0 || x >= px1 || y < py0 || y >= py1) return;
+        precise const float du = x1 != x0 ? (u1 - u0) / float(x1 - x0) : 0.0, dv = y1 != y0 ? (v1 - v0) / float(y1 - y0) : 0.0;
+        if (PF(rt) != 0 && prims[pi].hd == 0) { u0 -= float(oxi); v0 -= float(oyi); }
+        precise const float uu = u0 + float((x << 4) - x0) * du, vv = v0 + float((y << 4) - y0) * dv;
+        if (prims[pi].hd != 0) { hd_use = true; hd_uv = vec2(uu, vv) / 16.0; hd_gx = vec2(du, 0.0); hd_gy = vec2(0.0, dv);
+                                 hd_box = true; hd_lo = vec2(min(PF(su0), PF(su1)), min(PF(sv0), PF(sv1))) / 16.0; hd_hi = vec2(max(PF(su0), PF(su1)), max(PF(sv0), PF(sv1))) / 16.0; }
+        zv = PF(z); vcol = PF(rgba); u16 = cvt(uu); v16 = cvt(vv); fogv = PF(fog);
+    } else {   // draw_triangle() with the vertices moved by the copy's offset
+        const float px = float(x), py = float(y);
+        precise const float tx0 = PF(tx0) - g_ox, tx1 = PF(tx1) - g_ox, tx2 = PF(tx2) - g_ox, ty0 = PF(ty0) - g_oy, ty1 = PF(ty1) - g_oy, ty2 = PF(ty2) - g_oy;
+        precise float w0 = ((tx1 - px) * (ty2 - py) - (tx2 - px) * (ty1 - py)) * PF(tinv);
+        precise float w1 = ((tx2 - px) * (ty0 - py) - (tx0 - px) * (ty2 - py)) * PF(tinv);
+        precise float w2 = 1.0 - w0 - w1;
+        if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) return;
+        if (PF(iip) != 0) {
+            vcol = 0u;
+            for (int s = 0; s < 32; s += 8) {
+                precise float c = float((PF(tc0) >> s) & 255u) * w0 + float((PF(tc1) >> s) & 255u) * w1 + float((PF(tc2) >> s) & 255u) * w2;
+                int ci = cvt(c + 0.5); vcol |= uint(ci < 0 ? 0 : ci > 255 ? 255 : ci) << s;
+            }
+        } else vcol = PF(tc2);
+        precise double zf = double(PF(tz0)) * double(w0) + double(PF(tz1)) * double(w1) + double(PF(tz2)) * double(w2);
+        zv = zf <= 0.0lf ? 0u : zf >= 4294967295.0lf ? 0xFFFFFFFFu : uint(zf);
+        if (PF(tme) != 0) {
+            float tu0 = PF(tu0), tu1 = PF(tu1), tu2 = PF(tu2), tv0 = PF(tv0), tv1 = PF(tv1), tv2 = PF(tv2);
+            if (PF(rt) != 0 && prims[pi].hd == 0) {   // a render target is read at its coordinates minus the offset too
+                tu0 -= g_ox * 16.0 * PF(tq0); tu1 -= g_ox * 16.0 * PF(tq1); tu2 -= g_ox * 16.0 * PF(tq2);
+                tv0 -= g_oy * 16.0 * PF(tq0); tv1 -= g_oy * 16.0 * PF(tq1); tv2 -= g_oy * 16.0 * PF(tq2);
+            }
+            precise float q = PF(tq0) * w0 + PF(tq1) * w1 + PF(tq2) * w2;
+            precise float uu = tu0 * w0 + tu1 * w1 + tu2 * w2, vv = tv0 * w0 + tv1 * w1 + tv2 * w2;
+            if (PF(fst) == 0 && q != 0.0) { uu = divx(uu, q); vv = divx(vv, q); }
+            u16 = cvt(uu); v16 = cvt(vv);
+            if (prims[pi].hd != 0) { hd_use = true; hd_uv = vec2(uu, vv) / 16.0; hd_gx = tri_uv(px + 1.0 + g_ox, py + g_oy) - hd_uv; hd_gy = tri_uv(px + g_ox, py + 1.0 + g_oy) - hd_uv; }
+        }
+        precise float ff = float(PF(tf0)) * w0 + float(PF(tf1)) * w1 + float(PF(tf2)) * w2;
+        fogv = uint(cvt(ff));
+    }
+    pixel(x, y, zv, shade(vcol, u16, v16, fogv));
+}
+#else
 void draw_at(int x, int y) {
     // each kind sets the vertex colour, texture coordinates, depth and fog; then one shade() and one pixel() (they are
     // inlined at every call: three calls made the shader far larger, 2026-10-31)
@@ -440,75 +513,14 @@ void draw_at(int x, int y) {
     }
     pixel(x, y, zv, shade(vcol, u16, v16, fogv));
 }
+#endif
 #ifdef BATCH
 // The workgroup's 8x8 tile first marks, 256 primitives at a time, those whose rectangle meets it (one bit each, so
 // the order stays), then every invocation draws the marked ones at its pixel.
 shared uint hits[8];
 #ifdef COPIES
-// Upscaling: copy z of a primitive whose copies the GPU derives (gcopy): its geometry moved by the copy's sub-pixel
-// offset, as gs.c moves the vertices for the copies it makes itself (sprites and points in whole 1/16 pixels; a
-// primitive that textures from a render target reads at its coordinates minus the offset too). cn = N.
-void apply_copy(int z) {
-    load_mod();
-    if (z == 0 || PF(gcopy) == 0) { set_va(PF(mbase)); return; }
-    int N = PF(cn), ci = (z - 1) % N, cj = (z - 1) / N;
-    float ox = float(2 * ci + 1) * 0.5 / float(N) - 0.5, oy = float(2 * cj + 1) * 0.5 / float(N) - 0.5;
-    va_b = PF(mbase) + (1u << 20) + uint(z) - 1u; va_s = uint(N * N);   // (the set's copy z: set_va without the division)
-    PF(mbase) += uint(z) << 20;
-    if (PF(prim) == 1) {
-        PF(tx0) -= ox; PF(tx1) -= ox; PF(tx2) -= ox; PF(ty0) -= oy; PF(ty1) -= oy; PF(ty2) -= oy;
-        if (PF(rt) != 0 && prims[pi].hd == 0) {   // (a replaced texture is a disc texture, not a render target)
-            PF(tu0) -= ox * 16.0 * PF(tq0); PF(tu1) -= ox * 16.0 * PF(tq1); PF(tu2) -= ox * 16.0 * PF(tq2);
-            PF(tv0) -= oy * 16.0 * PF(tq0); PF(tv1) -= oy * 16.0 * PF(tq1); PF(tv2) -= oy * 16.0 * PF(tq2);
-        }
-        int nx0 = int(floor(min(PF(tx0), min(PF(tx1), PF(tx2))))), nx1 = int(ceil(max(PF(tx0), max(PF(tx1), PF(tx2)))));
-        int ny0 = int(floor(min(PF(ty0), min(PF(ty1), PF(ty2))))), ny1 = int(ceil(max(PF(ty0), max(PF(ty1), PF(ty2)))));
-        nx0 = max(nx0, PF(scx0)); nx1 = min(nx1, PF(scx1)); ny0 = max(ny0, PF(scy0)); ny1 = min(ny1, PF(scy1));
-        PF(px0) = nx0; PF(px1) = nx1 >= nx0 ? nx1 + 1 : nx0; PF(py0) = ny0; PF(py1) = ny1 >= ny0 ? ny1 + 1 : ny0;
-        return;
-    }
-    int oxi = int(round(ox * 16.0)), oyi = int(round(oy * 16.0));
-    // A render target copied one texel per pixel (along an axis) is a memory operation, not a scene: the effect passes
-    // that shuffle channels through 16-bit views draw 8-pixel strips with gaps, and moving those strips by under a
-    // pixel left a column out at one edge and wrote one too many at the other in half the copies (dark lines every
-    // 16 pixels, fixed on the screen). Each copy does the same operation on its own memory, unmoved.
-    if (PF(rt) != 0) {
-        if (PF(su1) - PF(su0) == float(PF(sx1) - PF(sx0))) oxi = 0;
-        if (PF(sv1) - PF(sv0) == float(PF(sy1) - PF(sy0))) oyi = 0;
-    }
-    if (PF(prim) == 3) { PF(lx0) = (PF(sx0) - oxi) >> 4; PF(ly0) = (PF(sy0) - oyi) >> 4; PF(px0) = PF(lx0); PF(px1) = PF(lx0) + 1; PF(py0) = PF(ly0); PF(py1) = PF(ly0) + 1; return; }
-    if (PF(prim) != 0) return;
-    int x0 = PF(sx0) - oxi, x1 = PF(sx1) - oxi, y0 = PF(sy0) - oyi, y1 = PF(sy1) - oyi;   // sprite_geo()
-    float u0 = PF(su0), v0 = PF(sv0), u1 = PF(su1), v1 = PF(sv1);
-    if (x0 > x1) { int t = x0; x0 = x1; x1 = t; float f = u0; u0 = u1; u1 = f; }
-    if (y0 > y1) { int t = y0; y0 = y1; y1 = t; float f = v0; v0 = v1; v1 = f; }
-    int px0 = (x0 + 15) >> 4, px1 = (x1 + 15) >> 4, py0 = (y0 + 15) >> 4, py1 = (y1 + 15) >> 4;
-    px0 = max(px0, PF(scx0)); px1 = min(px1, PF(scx1) + 1); py0 = max(py0, PF(scy0)); py1 = min(py1, PF(scy1) + 1);
-    // a sprite that reaches the scissor's edge in the frame (c_px0 .. still hold copy 0's rectangle) reaches it in
-    // every copy: moved by under a pixel it left the edge column of half the copies undrawn (a dark line at the border)
-    if (PF(px0) <= PF(scx0)) px0 = PF(scx0);
-    if (PF(px1) > PF(scx1)) px1 = PF(scx1) + 1;
-    if (PF(py0) <= PF(scy0)) py0 = PF(scy0);
-    if (PF(py1) > PF(scy1)) py1 = PF(scy1) + 1;
-    PF(du) = x1 != x0 ? (u1 - u0) / float(x1 - x0) : 0.0; PF(dv) = y1 != y0 ? (v1 - v0) / float(y1 - y0) : 0.0;
-    PF(px0) = px0; PF(px1) = px1; PF(py0) = py0; PF(py1) = py1; PF(x0) = x0; PF(y0) = y0; PF(u0) = u0; PF(v0) = v0;
-    if (PF(rt) != 0 && prims[pi].hd == 0) { PF(u0) -= float(oxi); PF(v0) -= float(oyi); }
-}
-// Does copy z of triangle i cover pixel (x, y)? Decided from its few geometry fields, so the whole primitive (about 120
-// words) is loaded only for the triangles of a tile's list that do (about 7 % of the copies' time). The test is
-// draw_at()'s with a looser bound (no `precise` here), so a pixel it keeps may still be dropped there, never the reverse.
-bool covers(int i, int z, int x, int y) {
-    if (prims[i].prim != 1) return true;
-    int N = prims[i].cn, ci = (z - 1) % N, cj = (z - 1) / N;
-    float ox = float(2 * ci + 1) * 0.5 / float(N) - 0.5, oy = float(2 * cj + 1) * 0.5 / float(N) - 0.5;
-    float tx0 = prims[i].tx0 - ox, tx1 = prims[i].tx1 - ox, tx2 = prims[i].tx2 - ox, ty0 = prims[i].ty0 - oy, ty1 = prims[i].ty1 - oy, ty2 = prims[i].ty2 - oy;
-    float px = float(x), py = float(y), tinv = prims[i].tinv;
-    float w0 = ((tx1 - px) * (ty2 - py) - (tx2 - px) * (ty1 - py)) * tinv;
-    float w1 = ((tx2 - px) * (ty0 - py) - (tx0 - px) * (ty2 - py)) * tinv;
-    return w0 >= -1e-5 && w1 >= -1e-5 && 1.0 - w0 - w1 >= -1e-5;
-}
 #endif
-// A batch holds each primitive once; the GPU derives its copies (apply_copy). The exact build: a workgroup is an 8x8
+// A batch holds each primitive once; the GPU derives its copies (draw_at). The exact build: a workgroup is an 8x8
 // tile of local memory. The copies build: an 8x8 tile of the upscaled picture, invocation (X, Y) drawing copy
 // 1 + X%N + (Y%N)*N at pixel (X/N, Y/N), so the invocations of a workgroup draw the copies of one small area: a
 // triangle that covers a pixel covers it in most copies, which keeps them busy together (one tile per copy, as
@@ -519,6 +531,9 @@ void main() {
     const int N = int(sqrt(float(pc.ncopy - 1)) + 0.5), nper = pc.n;
     const int X = int(gl_GlobalInvocationID.x), Y = int(gl_GlobalInvocationID.y), HX = int(gl_WorkGroupID.x) * 8, HY = int(gl_WorkGroupID.y) * 8;
     const int zc = 1 + X % N + (Y % N) * N, x = pc.bx0 + X / N, y = pc.by0 + Y / N;
+    {   const int ci = (zc - 1) % N, cj = (zc - 1) / N;   // the copy's sub-pixel offset (gs.c vk_offf, vk_off)
+        g_ox = float(2 * ci + 1) * 0.5 / float(N) - 0.5; g_oy = float(2 * cj + 1) * 0.5 / float(N) - 0.5;
+        g_oxi = int(round(g_ox * 16.0)); g_oyi = int(round(g_oy * 16.0)); }
     const int tx0 = pc.bx0 + HX / N, tx1 = pc.bx0 + (HX + 7) / N + 1, ty0 = pc.by0 + HY / N, ty1 = pc.by0 + (HY + 7) / N + 1;   // the tile's pixels
 #else
     const int zc = 0, nper = pc.n;
@@ -554,17 +569,13 @@ void main() {
             while (m != 0u) {
                 int i = pc.first + base + w * 32 + findLSB(m); m &= m - 1u;
 #ifdef COPIES
-                if (!covers(i, zc, x, y)) continue;
-#endif
-#ifdef COPIES
                 pi = i;
+                if (x < PF(px0) - 1 || x >= PF(px1) + 1 || y < PF(py0) - 1 || y >= PF(py1) + 1) continue;   // (a copy moves by under a pixel)
+                va_b = PF(mbase) + (1u << 20) + uint(zc) - 1u; va_s = uint(N * N);   // the set's copy zc (set_va without the division)
 #else
                 p = prims[i]; set_va(p.mbase);
-#endif
-#ifdef COPIES
-                apply_copy(zc);
-#endif
                 if (x < PF(px0) || x >= PF(px1) || y < PF(py0) || y >= PF(py1)) continue;
+#endif
                 draw_at(x, y);
             }
         }

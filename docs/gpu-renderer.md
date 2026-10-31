@@ -280,6 +280,19 @@ primitive); without that read, normal GPU rendering went from 9.5 to 8.4 ms per 
 120 fps (`HG_GSVK_INTERP=2`: pictures at 1/4, 1/2, 3/4, presents every 8.34 ms) runs at full speed at native
 resolution since phase 1; with upscaling it is GPU-bound (three replays per frame: x5 55 %).
 
+## FSR 1 for the window (2026-10-31)
+
+When the picture is enlarged to the window's rectangle (both ways: x4 on a 4K display, 4:3 and widescreen), the UI
+thread runs AMD FidelityFX Super Resolution 1 (`vk/fsr.comp`, `third_party/fsr1`, MIT) instead of the linear blit: the
+picture is copied 1:1 into an image of its own, EASU scales it to the rectangle, RCAS sharpens it, and the result is
+blitted 1:1. A picture as large as the rectangle or larger (x5 and up on 4K in 4:3) keeps the blit. Settings:
+`upscaler = fsr | bilinear` (default fsr, `HG_FSR=0/1`), `sharpness = 0.0 .. 2.0` (RCAS stops, default 0.2).
+`HG_FSRDUMP=FILE:VB` saves the window's picture (and the picture before it, `FILE.in.ppm`) once VBlank VB is shown.
+In 3D rooms FSR is clearly sharper (brick joints, faces, the mantelpiece) without halos; the menus' engraved text
+(the game draws a lighter copy one pixel aside) comes out more doubled than with the blit, at any sharpness. This is
+the answer for slower GPUs (x2-x3 rendered, FSR to the display); temporal upscalers (DLSS, FSR 2/3, OptiScaler,
+which only redirects a game's existing calls to them) need motion vectors and depth the game does not have.
+
 ## Presenting the window (phase 1)
 
 **Display lock dropped at once (2026-10-26).** Display-locked pacing makes the game follow the display's refreshes. In

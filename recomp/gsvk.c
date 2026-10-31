@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <vulkan/vulkan.h>
 #include "ee_runtime.h"
 #include "hle.h"
@@ -16,6 +17,8 @@
 #include "gen/gs_sprite_spv.h"
 #include "gen/gs_batch_spv.h"
 #include "gen/gs_batchc_spv.h"
+#include "gen/gs_fsr_easu_spv.h"
+#include "gen/gs_fsr_rcas_spv.h"
 #include <time.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -965,6 +968,102 @@ static int present_init_(void) {
     L("GSVK: the window is presented from video memory (%s)\n", mode_name(pmode));
     atomic_store(&pres_ok, 1); return 1;
 }
+/* AMD FSR 1 for the window (vk/fsr.comp, third_party/fsr1; settings "upscaler", "sharpness"): when the picture is
+   enlarged to the window's rectangle (both ways), the UI thread copies it into fin (its size), EASU scales that into fmid
+   (the rectangle), RCAS sharpens it into fout, which is blitted 1:1; otherwise the linear blit as before. The images are
+   the UI thread's (made again when a size changes); one of each serves the frames in flight, their barriers order them. */
+static VkDescriptorSetLayout fdsl; static VkPipelineLayout fpl; static VkPipeline fpe, fpr; static VkDescriptorPool fdp; static VkDescriptorSet fds[2];
+static VkSampler fsamp; static VkImage fimg[3]; static VkDeviceMemory fmem[3]; static VkImageView fview[3]; static int fsr_state, fsr_w, fsr_h, fsr_ow, fsr_oh;
+static int fsr_mkimg(int i, int w, int h, VkImageUsageFlags u) {
+    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { (uint32_t)w, (uint32_t)h, 1 },
+        .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = u, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    if (vkCreateImage(dev, &ii, 0, &fimg[i])) { fimg[i] = 0; return 0; }
+    VkMemoryRequirements mr; vkGetImageMemoryRequirements(dev, fimg[i], &mr);
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = memtype(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    if (ai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory(dev, &ai, 0, &fmem[i])) { vkDestroyImage(dev, fimg[i], 0); fimg[i] = 0; return 0; }
+    vkBindImageMemory(dev, fimg[i], fmem[i], 0);
+    VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = fimg[i], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    return !vkCreateImageView(dev, &vi, 0, &fview[i]);
+}
+static void fsr_free(void) {
+    for (int i = 0; i < 3; i++) { if (fview[i]) vkDestroyImageView(dev, fview[i], 0); if (fimg[i]) vkDestroyImage(dev, fimg[i], 0); if (fmem[i]) vkFreeMemory(dev, fmem[i], 0); fview[i] = 0; fimg[i] = 0; fmem[i] = 0; }
+    fsr_w = fsr_h = fsr_ow = fsr_oh = 0;
+}
+/* the pipelines once (fsr_state 1, or -1: FSR not possible here), the images for a picture of w x h shown at ow x oh */
+static int fsr_ready(int w, int h, int ow, int oh) {
+    if (!fsr_state) {
+        fsr_state = -1;
+        VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(phys, VK_FORMAT_R8G8B8A8_UNORM, &fp);
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT | VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+        if ((fp.optimalTilingFeatures & need) != need) { L("GSVK: FSR not possible (RGBA8 storage images)\n"); return 0; }
+        VkDescriptorSetLayoutBinding lb[2] = { { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0 }, { 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0 } };
+        VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = lb };
+        VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 64 };
+        VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &fdsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr };
+        if (vkCreateDescriptorSetLayout(dev, &dli, 0, &fdsl) || vkCreatePipelineLayout(dev, &pli, 0, &fpl)) return 0;
+        for (int k = 0; k < 2; k++) {
+            VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = k ? sizeof gs_fsr_rcas_spv : sizeof gs_fsr_easu_spv, .pCode = k ? gs_fsr_rcas_spv : gs_fsr_easu_spv };
+            VkShaderModule sm; if (vkCreateShaderModule(dev, &smi, 0, &sm)) return 0;
+            VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = fpl,
+                .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" } };
+            const VkResult r = vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, 0, k ? &fpr : &fpe); vkDestroyShaderModule(dev, sm, 0);
+            if (r) return 0;
+        }
+        VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
+        VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 }, { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 } };
+        VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 2, .poolSizeCount = 2, .pPoolSizes = ps };
+        const VkDescriptorSetLayout two[2] = { fdsl, fdsl };
+        VkDescriptorSetAllocateInfo dai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorSetCount = 2, .pSetLayouts = two };
+        if (vkCreateSampler(dev, &sci, 0, &fsamp) || vkCreateDescriptorPool(dev, &dpi, 0, &fdp)) return 0;
+        dai.descriptorPool = fdp; if (vkAllocateDescriptorSets(dev, &dai, fds)) return 0;
+        fsr_state = 1; L("GSVK: FSR 1 ready for the window\n");
+    }
+    if (fsr_state < 0) return 0;
+    if (w == fsr_w && h == fsr_h && ow == fsr_ow && oh == fsr_oh) return 1;
+    if (shared_q) pthread_mutex_lock(&qmx);
+    vkQueueWaitIdle(uqueue);   /* (the old images no longer in use) */
+    if (shared_q) pthread_mutex_unlock(&qmx);
+    fsr_free();
+    if (!fsr_mkimg(0, w, h, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) || !fsr_mkimg(1, ow, oh, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+        || !fsr_mkimg(2, ow, oh, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) { fsr_free(); return 0; }
+    VkDescriptorImageInfo ii[4] = { { fsamp, fview[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }, { 0, fview[1], VK_IMAGE_LAYOUT_GENERAL },
+                                    { fsamp, fview[1], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }, { 0, fview[2], VK_IMAGE_LAYOUT_GENERAL } };
+    VkWriteDescriptorSet wr[4];
+    for (int i = 0; i < 4; i++) wr[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = fds[i / 2], .dstBinding = (uint32_t)(i & 1), .descriptorCount = 1,
+        .descriptorType = (i & 1) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[i] };
+    vkUpdateDescriptorSets(dev, 4, wr, 0, 0);
+    fsr_w = w; fsr_h = h; fsr_ow = ow; fsr_oh = oh;
+    { static int nl; if (nl++ < 8) L("GSVK: FSR 1: %dx%d to %dx%d\n", w, h, ow, oh); }
+    return 1;
+}
+static Buf fsr_dump_buf, fsr_dump_in; static int fsr_dump_w, fsr_dump_h, fsr_dump_iw, fsr_dump_ih; static char fsr_dump_fn[512];
+static uint32_t fbits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+/* record FSR from picture image src (TRANSFER_SRC_OPTIMAL, w x h) into fout (left TRANSFER_SRC_OPTIMAL): FsrEasuCon and
+   FsrRcasCon's float constants (ffx_fsr1.h), the input the whole image */
+static void fsr_record(VkCommandBuffer cb, VkImage src, int w, int h, int ow, int oh, float sharpness) {
+    imgbar(cb, fimg[0], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkImageCopy c = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .extent = { (uint32_t)w, (uint32_t)h, 1 } };
+    vkCmdCopyImage(cb, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, fimg[0], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    imgbar(cb, fimg[0], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    imgbar(cb, fimg[1], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    const float iw = 1.0f / w, ih = 1.0f / h;
+    const uint32_t ec[16] = { fbits((float)w / ow), fbits((float)h / oh), fbits(0.5f * w / ow - 0.5f), fbits(0.5f * h / oh - 0.5f),
+                              fbits(iw), fbits(ih), fbits(iw), fbits(-ih), fbits(-iw), fbits(2 * ih), fbits(iw), fbits(2 * ih), fbits(0), fbits(4 * ih), 0, 0 };
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, fpe);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, fpl, 0, 1, &fds[0], 0, 0);
+    vkCmdPushConstants(cb, fpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof ec, ec);
+    vkCmdDispatch(cb, (uint32_t)(ow + 7) / 8, (uint32_t)(oh + 7) / 8, 1);
+    imgbar(cb, fimg[1], VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    imgbar(cb, fimg[2], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    const uint32_t rc[16] = { fbits(exp2f(-sharpness)) };   /* (con.y, the half-precision copy, is for the FP16 path) */
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, fpr);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, fpl, 0, 1, &fds[1], 0, 0);
+    vkCmdPushConstants(cb, fpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof rc, rc);
+    vkCmdDispatch(cb, (uint32_t)(ow + 7) / 8, (uint32_t)(oh + 7) / 8, 1);
+    imgbar(cb, fimg[2], VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+}
 /* UI thread: show picture k (k < 0: the current one again) once GS submission id is done, with the overlay ov
    (OVW x OVH, 0x00BBGGRR, or 0) at the picture's top left */
 uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, int ovw, int ovh, uint64_t rel_ns) {
@@ -1019,9 +1118,40 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, int ovw, int ovh, 
     const double sx = scext.width / aw, sy = scext.height / 448.0, s = sx < sy ? sx : sy;
     const int rw = (int)(aw * s + 0.5), rh = (int)(448 * s + 0.5), x0 = ((int)scext.width - rw) / 2, y0 = ((int)scext.height - rh) / 2;
     if (ucur >= 0) {
-        VkImageBlit b = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffsets = { { 0, 0, 0 }, { pic[ucur].w, pic[ucur].h, 1 } },
+        float sharp = 0.2f;
+        const int pw = pic[ucur].w, ph = pic[ucur].h;
+        const int fsr = settings_ui_upscaler(&sharp) && rw >= pw && rh >= ph && (rw > pw || rh > ph) && fsr_ready(pw, ph, rw, rh);
+        if (fsr) fsr_record(cb, pic[ucur].img, pw, ph, rw, rh, sharp);
+        {   /* HG_FSRDUMP=FILE:VB (debugging): the window's picture once it shows VBlank VB, as PPMs: FILE (FSR's output, or
+               the blit's) and FILE.in.ppm (the picture) */
+            static const char *dp = (const char *)1; static long dn; static int done;
+            if (dp == (const char *)1) { dp = getenv("HG_FSRDUMP"); if (dp) { const char *c = strrchr(dp, ':'); dn = c ? atol(c + 1) : 600; } }
+            extern uint64_t gs_display_tag(void);   /* the picture's VBlank << 2 (gs.c) */
+            if (dp && !done && (long)(gs_display_tag() >> 2) >= dn) {
+                done = 1; Buf hb = { 0 };
+                if (mkbuf(&hb, (VkDeviceSize)rw * rh * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {
+                    VkImage im = fsr ? fimg[2] : 0;
+                    if (!fsr && fsr_ready(rw, rh, rw, rh)) {   /* bilinear: the same blit into fout, then saved */
+                        imgbar(cb, fimg[2], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                        VkImageBlit b2 = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffsets = { { 0, 0, 0 }, { pw, ph, 1 } },
+                                           .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstOffsets = { { 0, 0, 0 }, { rw, rh, 1 } } };
+                        vkCmdBlitImage(cb, pic[ucur].img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, fimg[2], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b2, VK_FILTER_LINEAR);
+                        imgbar(cb, fimg[2], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                        im = fimg[2];
+                    }
+                    if (mkbuf(&fsr_dump_in, (VkDeviceSize)pw * ph * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT)) {   /* and the picture itself (FILE.in.ppm) */
+                        VkBufferImageCopy r4 = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { (uint32_t)pw, (uint32_t)ph, 1 } };
+                        vkCmdCopyImageToBuffer(cb, pic[ucur].img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, fsr_dump_in.b, 1, &r4); fsr_dump_iw = pw; fsr_dump_ih = ph;
+                    }
+                    if (im) { VkBufferImageCopy r3 = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { (uint32_t)rw, (uint32_t)rh, 1 } };
+                              vkCmdCopyImageToBuffer(cb, im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, hb.b, 1, &r3); fsr_dump_buf = hb; fsr_dump_w = rw; fsr_dump_h = rh;
+                              char fn[512]; snprintf(fn, sizeof fn, "%s", dp); char *c = strrchr(fn, ':'); if (c) *c = 0; snprintf(fsr_dump_fn, sizeof fsr_dump_fn, "%s", fn); }
+                }
+            }
+        }
+        VkImageBlit b = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffsets = { { 0, 0, 0 }, { fsr ? rw : pw, fsr ? rh : ph, 1 } },
                           .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstOffsets = { { x0, y0, 0 }, { x0 + rw, y0 + rh, 1 } } };
-        vkCmdBlitImage(cb, pic[ucur].img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
+        vkCmdBlitImage(cb, fsr ? fimg[2] : pic[ucur].img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, fsr ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
     }
     if (ov) {   /* the F3 overlay: 4 picture pixels from the corner, scaled with the picture */
         ring_put((uint8_t *)ovbuf.p + (size_t)f * OVW * OVH * 4, ov, (size_t)ovw * ovh * 4);
@@ -1062,6 +1192,18 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, int ovw, int ovh, 
     gsvk_present_ms[0] = (p1 - p0) * 1e3; gsvk_present_ms[1] = (p2 - p1) * 1e3; gsvk_present_ms[2] = (p3 - p2) * 1e3; gsvk_present_ms[3] = (p4 - p3) * 1e3; gsvk_present_ms[4] = (p5 - p4) * 1e3;
     if (shared_q) pthread_mutex_unlock(&qmx);
     if (r) { L("GSVK: window submit failed (%d)\n", (int)r); atomic_store(&pres_ok, 0); return 0; }
+    if (fsr_dump_buf.b) {   /* (HG_FSRDUMP) */
+        vkWaitForFences(dev, 1, &ufence[f], VK_TRUE, UINT64_MAX);
+        FILE *df = fopen(fsr_dump_fn, "wb");
+        if (df) { fprintf(df, "P6\n%d %d\n255\n", fsr_dump_w, fsr_dump_h); const uint8_t *px = fsr_dump_buf.p;
+                  for (int i = 0; i < fsr_dump_w * fsr_dump_h; i++) fwrite(px + 4 * i, 1, 3, df); fclose(df); L("GSVK: FSR picture saved in %s\n", fsr_dump_fn); }
+        if (fsr_dump_in.b) {
+            char fn2[540]; snprintf(fn2, sizeof fn2, "%s.in.ppm", fsr_dump_fn); FILE *d2 = fopen(fn2, "wb");
+            if (d2) { fprintf(d2, "P6\n%d %d\n255\n", fsr_dump_iw, fsr_dump_ih); const uint8_t *px = fsr_dump_in.p; for (int i = 0; i < fsr_dump_iw * fsr_dump_ih; i++) fwrite(px + 4 * i, 1, 3, d2); fclose(d2); }
+            free_buf(&fsr_dump_in); memset(&fsr_dump_in, 0, sizeof fsr_dump_in);
+        }
+        free_buf(&fsr_dump_buf); memset(&fsr_dump_buf, 0, sizeof fsr_dump_buf);
+    }
     if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR || (int)pr == -1000255000) sc_stale = 1;   /* (or full-screen exclusive lost) */
     usub[f] = 1; uslot[f] = ucur; if (ucur >= 0) uref[ucur]++;
     ufr = (f + 1) % NFR;

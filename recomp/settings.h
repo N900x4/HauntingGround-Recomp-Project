@@ -58,6 +58,9 @@ typedef struct {
     int hd_on;          /* 1: HD textures used when a folder has them (the Options menu's "HD textures"); applies at once */
     int wide;           /* 0: the original 4:3 picture; 1: widescreen, the picture fills the display's shape (up to 21:9: the camera
                            sees more at the sides, menus and text stay 4:3 in the middle); applies at once */
+    int upscaler;       /* how the GPU renderer's picture is enlarged to the window: 0 bilinear (the GPU's blit), 1 AMD FSR 1
+                           (edge-adaptive upscaling + sharpening); only when the picture is smaller than the window; applies at once */
+    int sharpness;      /* FSR's sharpening, tenths of a stop of reduction: 0 the sharpest .. 20 (2 stops) the softest */
 } Settings;
 
 void settings_init(void);                 /* load, apply the environment, log; once, at start */
@@ -94,6 +97,7 @@ void settings_ui_auto_scale(int display_height);   /* the display the window is 
 int settings_auto_scale(void);
 int settings_pad_type(void);             /* PADKIND_* (as recorded for the names) */
 void settings_ui_window_size(int w, int h);   /* UI thread: the window's (swapchain's) size in pixels */
+int settings_ui_upscaler(float *sharpness);   /* UI thread: 1 FSR (and its sharpness in stops), 0 bilinear */
 double settings_display_aspect(void);    /* any thread: the picture's shape on the display, width / height (640 / 448, or wider) */
 float settings_wide_factor(void);        /* any thread: horizontal scale of the camera and of menus and text (1: the 4:3 picture) */
 void settings_set_pad_type_live(int t);  /* UI thread: a controller came or went (recorded as an event) */

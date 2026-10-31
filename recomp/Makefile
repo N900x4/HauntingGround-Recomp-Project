@@ -53,7 +53,11 @@ gen/gs_batch_spv.h: vk/gs_sprite.comp
 	glslangValidator -V --target-env vulkan1.1 -DBATCH --vn gs_batch_spv -o $@ $<
 gen/gs_batchc_spv.h: vk/gs_sprite.comp
 	glslangValidator -V --target-env vulkan1.1 -DBATCH -DCOPIES --vn gs_batchc_spv -o $@ $<
-$(O)/gsvk.o: gsvk.c gsvk.h gen/gs_sprite_spv.h gen/gs_batch_spv.h gen/gs_batchc_spv.h ee_runtime.h hle.h settings.h
+gen/gs_fsr_easu_spv.h: vk/fsr.comp third_party/fsr1/ffx_a.h third_party/fsr1/ffx_fsr1.h
+	glslangValidator -V --target-env vulkan1.1 -DEASU -Ithird_party/fsr1 --vn gs_fsr_easu_spv -o $@ $<
+gen/gs_fsr_rcas_spv.h: vk/fsr.comp third_party/fsr1/ffx_a.h third_party/fsr1/ffx_fsr1.h
+	glslangValidator -V --target-env vulkan1.1 -DRCAS -Ithird_party/fsr1 --vn gs_fsr_rcas_spv -o $@ $<
+$(O)/gsvk.o: gsvk.c gsvk.h gen/gs_sprite_spv.h gen/gs_batch_spv.h gen/gs_batchc_spv.h gen/gs_fsr_easu_spv.h gen/gs_fsr_rcas_spv.h ee_runtime.h hle.h settings.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/hdtex.o: hdtex.c hdtex.h settings.h ee_runtime.h hle.h third_party/stb_image.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) $(VK_CFLAGS) -O2 -c $< -o $@

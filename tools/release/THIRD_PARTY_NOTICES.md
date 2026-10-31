@@ -43,6 +43,10 @@ also lists the licences of the components Python itself includes): runs the reco
 conditions in Python's licence ("Microsoft Distributable Code"): they may only be used on Microsoft operating systems,
 and their copyright notices must not be altered.
 
+**AMD FidelityFX Super Resolution 1** (MIT; `engine/src/recomp/third_party/fsr1/LICENSE.txt`, Copyright (c) 2021
+Advanced Micro Devices, Inc.): the shaders that scale and sharpen the GPU renderer's picture for the window
+(Options: upscaler FSR), compiled into the game.
+
 ## Source code
 
 The source code of this project is the repository it was released from; the exact commit is in

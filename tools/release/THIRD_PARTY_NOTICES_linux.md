@@ -24,6 +24,10 @@ So that you do not have to install a compiler, the release bundles one:
   `engine/licenses/Vulkan-Headers-LICENSE.txt`): the interfaces the game is compiled against. `engine/link` holds
   link stubs made from them (function names only); at run time the game uses your system's SDL2 and Vulkan loader.
 
+**AMD FidelityFX Super Resolution 1** (MIT; `engine/src/recomp/third_party/fsr1/LICENSE.txt`, Copyright (c) 2021
+Advanced Micro Devices, Inc.): the shaders that scale and sharpen the GPU renderer's picture for the window
+(Options: upscaler FSR), compiled into the game.
+
 Your system needs python3 (3.8 or later), the SDL2 library and, for the GPU renderer, a Vulkan driver.
 
 ## Source code

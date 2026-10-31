@@ -70,7 +70,7 @@ def main():
     if a.sdl_include: sdl_inc = a.sdl_include
     else:   # <toolchain>/bin/gcc.exe -> <toolchain>/include/SDL2
         sdl_inc = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(a.cc))), 'include', 'SDL2') if os.path.isabs(a.cc) else 'SDL2'
-    for need in ('table.c', 'gs_sprite_spv.h', 'gs_batch_spv.h', 'gs_batchc_spv.h'):
+    for need in ('table.c', 'gs_sprite_spv.h', 'gs_batch_spv.h', 'gs_batchc_spv.h', 'gs_fsr_easu_spv.h', 'gs_fsr_rcas_spv.h'):
         if not os.path.exists(os.path.join(a.gen, need)) and not a.print:
             print('@error missing ' + os.path.join(a.gen, need), flush=True); return 2
     jobs = plan(a.src, a.gen, a.obj, sdl_inc, LINUX_SDL if linux else None, a.include)

@@ -128,6 +128,9 @@ def main():
     comp = os.path.join(REPO, 'recomp', 'vk', 'gs_sprite.comp')
     for vn, defs in (('gs_sprite_spv', []), ('gs_batch_spv', ['-DBATCH']), ('gs_batchc_spv', ['-DBATCH', '-DCOPIES'])):
         run(['glslangValidator', '-V', '--target-env', 'vulkan1.1'] + defs + ['--vn', vn, '-o', os.path.join(pre, vn + '.h'), comp])
+    fsr = os.path.join(REPO, 'recomp', 'vk', 'fsr.comp'); fsri = '-I' + os.path.join(REPO, 'recomp', 'third_party', 'fsr1')   # FSR 1 for the window
+    for vn, d in (('gs_fsr_easu_spv', '-DEASU'), ('gs_fsr_rcas_spv', '-DRCAS')):
+        run(['glslangValidator', '-V', '--target-env', 'vulkan1.1', d, fsri, '--vn', vn, '-o', os.path.join(pre, vn + '.h'), fsr])
     commit = run(['git', '-C', REPO, 'rev-parse', '--short', 'HEAD']).strip()
     dirty = run(['git', '-C', REPO, 'status', '--porcelain', '--untracked-files=no']).strip()
     open(os.path.join(E, 'version.txt'), 'w').write(a.version + '\n')

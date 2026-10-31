@@ -168,6 +168,8 @@ void settings_defaults(Settings *s) {
     s->audio_offset = 0;
     s->hd_textures[0] = 0;
     s->hd_on = 1;
+    s->upscaler = 1;             /* FSR 1 where the picture is enlarged */
+    s->sharpness = 2;            /* 0.2 stops: AMD's usual setting */
 }
 
 /* ------------------------------------------------------------------ values as text */
@@ -189,6 +191,8 @@ static void value_of(const Settings *s, const char *key, char *out, size_t n) {
     else if (!strcmp(key, "hd_textures")) snprintf(out, n, "%s", s->hd_textures);
     else if (!strcmp(key, "hd")) snprintf(out, n, "%s", s->hd_on ? "on" : "off");
     else if (!strcmp(key, "aspect")) snprintf(out, n, "%s", s->wide ? "wide" : "4:3");
+    else if (!strcmp(key, "upscaler")) snprintf(out, n, "%s", s->upscaler ? "fsr" : "bilinear");
+    else if (!strcmp(key, "sharpness")) snprintf(out, n, "%d.%d", s->sharpness / 10, s->sharpness % 10);
     else if (!strncmp(key, "kb.", 3)) {
         for (int i = 0; i < PB_N; i++) if (!strcmp(key + 3, pb_key[i])) snprintf(out, n, "%s", settings_key_name(s->kb[i]));
     } else if (!strncmp(key, "pad.", 4)) {
@@ -248,6 +252,12 @@ static int apply_to(Settings *s, const char *key, const char *v, int swap) {
         if (!strcasecmp(v, "off") || !strcmp(v, "0")) { s->hd_on = 0; return 1; }
         return 0;
     }
+    if (!strcmp(key, "upscaler")) {
+        if (!strcasecmp(v, "fsr") || !strcmp(v, "1")) { s->upscaler = 1; return 1; }
+        if (!strcasecmp(v, "bilinear") || !strcmp(v, "0")) { s->upscaler = 0; return 1; }
+        return 0;
+    }
+    if (!strcmp(key, "sharpness")) { char *e; const double d = strtod(v, &e); if (e == v || *e || d < 0 || d > 2) return 0; s->sharpness = (int)(d * 10 + 0.5); return 1; }
     if (!strcmp(key, "aspect")) {
         if (!strcasecmp(v, "wide") || !strcmp(v, "1")) { s->wide = 1; return 1; }
         if (!strcmp(v, "4:3") || !strcmp(v, "0")) { s->wide = 0; return 1; }
@@ -277,7 +287,7 @@ static int apply_to(Settings *s, const char *key, const char *v, int swap) {
 typedef struct { const char *env, *key; } EnvMap;
 static const EnvMap envmap[] = {
     { "HG_GSVK", "renderer" }, { "HG_GSVK_SCALE", "resolution" }, { "HG_GSVK_INTERP", "fps" },
-    { "HG_VSYNC", "vsync" }, { "HG_SCALE", "window_scale" }, { "HG_FULLSCREEN", "fullscreen" }, { "HG_WIDE", "aspect" },
+    { "HG_VSYNC", "vsync" }, { "HG_SCALE", "window_scale" }, { "HG_FULLSCREEN", "fullscreen" }, { "HG_WIDE", "aspect" }, { "HG_FSR", "upscaler" },
 };
 #define NENV (int)(sizeof envmap / sizeof envmap[0])
 static int env_set[NENV];
@@ -350,7 +360,9 @@ void settings_save(void) {
     fprintf(f, "fullscreen = %d\n", file.fullscreen);
     fprintf(f, "vsync = %s       # on (smooth: locked to the display, default) | mailbox (exact 59.94 Hz, no tearing) | off (may tear)\n", vsync_name(file.vsync));
     fprintf(f, "window_scale = %d      # the window's size at start, times 640 x 448\n", file.window_scale);
-    fprintf(f, "aspect = %s           # 4:3 (the original picture) | wide (fills the display, up to 21:9; menus stay 4:3)\n\n", file.wide ? "wide" : "4:3");
+    fprintf(f, "aspect = %s           # 4:3 (the original picture) | wide (fills the display, up to 21:9; menus stay 4:3)\n", file.wide ? "wide" : "4:3");
+    fprintf(f, "upscaler = %s         # fsr (AMD FSR 1: sharper when the picture is enlarged to the window) | bilinear\n", file.upscaler ? "fsr" : "bilinear");
+    fprintf(f, "sharpness = %d.%d        # FSR's sharpening: 0.0 (sharpest) .. 2.0 (softest)\n\n", file.sharpness / 10, file.sharpness % 10);
     fprintf(f, "# keyboard: SDL key names (\"none\" for no key)\n");
     for (int i = 0; i < PB_N; i++) fprintf(f, "kb.%s = %s\n", pb_key[i], settings_key_name(file.kb[i]));
     fprintf(f, "\n# controller: a b x y back guide start leftstick rightstick leftshoulder rightshoulder dpup dpdown dpleft\n");
@@ -378,8 +390,8 @@ static void log_line(const char *what) {
     char res[16];
     if (eff.scale == 0) snprintf(res, sizeof res, "auto"); else if (eff.scale == 1) snprintf(res, sizeof res, "native"); else snprintf(res, sizeof res, "x%d", eff.scale);
     char envs[256] = ""; for (int i = 0; i < NENV; i++) if (env_set[i]) { strcat(envs, " "); strcat(envs, envmap[i].env); }
-    L("settings%s: renderer %s, resolution %s, %d fps, %s, %s, vsync %s, window x%d, vibration %s, light bar %s, dead zone %d%% (file: %s%s; environment:%s)\n", what,
-      eff.renderer ? "gpu" : "software", res, eff.fps, eff.fullscreen ? "full screen" : "window", eff.wide ? "widescreen" : "4:3", vsync_name(eff.vsync), eff.window_scale,
+    L("settings%s: renderer %s, resolution %s, %d fps, %s, %s, %s, vsync %s, window x%d, vibration %s, light bar %s, dead zone %d%% (file: %s%s; environment:%s)\n", what,
+      eff.renderer ? "gpu" : "software", res, eff.fps, eff.fullscreen ? "full screen" : "window", eff.wide ? "widescreen" : "4:3", eff.upscaler ? "FSR" : "bilinear", vsync_name(eff.vsync), eff.window_scale,
       settings_vibration_name(eff.vibration), settings_lightbar_name(eff.lightbar), eff.deadzone,
       ini_off ? "off" : ini_path, loaded ? "" : ", none", envs[0] ? envs : " none");
 }
@@ -425,6 +437,7 @@ double settings_display_aspect(void) {
     const double a = w > 0 && h > 0 ? (double)w / h : 16.0 / 9.0;
     return a < a43 ? a43 : a > 2.4 ? 2.4 : a;
 }
+int settings_ui_upscaler(float *sharpness) { if (sharpness) *sharpness = eff.sharpness / 10.0f; return eff.upscaler; }   /* (ints the game thread writes: a stale value lasts a picture) */
 float settings_wide_factor(void) { return (float)(640.0 / 448.0 / settings_display_aspect()); }
 
 /* ------------------------------------------------------------------ changes */
@@ -454,13 +467,13 @@ int settings_set(const char *key, const char *value, const char *why) {
 void settings_reset(const char *group, const char *why) {
     Settings d, t = eff;
     settings_defaults(&d);
-    if (!strcmp(group, "display")) { t.scale = d.scale; t.fps = d.fps; t.fullscreen = d.fullscreen; t.vsync = d.vsync; t.hd_on = d.hd_on; t.wide = d.wide; }
+    if (!strcmp(group, "display")) { t.scale = d.scale; t.fps = d.fps; t.fullscreen = d.fullscreen; t.vsync = d.vsync; t.hd_on = d.hd_on; t.wide = d.wide; t.upscaler = d.upscaler; t.sharpness = d.sharpness; }
     else if (!strcmp(group, "keyboard")) memcpy(t.kb, d.kb, sizeof t.kb);
     else if (!strcmp(group, "controller")) { memcpy(t.pad, d.pad, sizeof t.pad); t.vibration = d.vibration; t.lightbar = d.lightbar; }
     else return;
     if (!memcmp(&t, &eff, sizeof t)) return;
     eff = t;
-    if (!strcmp(group, "display")) { file.scale = d.scale; file.fps = d.fps; file.fullscreen = d.fullscreen; file.vsync = d.vsync; file.hd_on = d.hd_on; file.wide = d.wide; }
+    if (!strcmp(group, "display")) { file.scale = d.scale; file.fps = d.fps; file.fullscreen = d.fullscreen; file.vsync = d.vsync; file.hd_on = d.hd_on; file.wide = d.wide; file.upscaler = d.upscaler; file.sharpness = d.sharpness; }
     else if (!strcmp(group, "keyboard")) memcpy(file.kb, d.kb, sizeof file.kb);
     else { memcpy(file.pad, d.pad, sizeof file.pad); file.vibration = d.vibration; file.lightbar = d.lightbar; }
     L("settings: %s back to the defaults (%s)\n", group, why);

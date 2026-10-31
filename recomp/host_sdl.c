@@ -747,12 +747,20 @@ static void log_scanouts(void) {
 }
 /* The refresh period from the times presents reached the screen: each interval is a whole number of refreshes (one,
    unless a refresh was missed), so the period is the time over the refreshes counted. The single intervals jitter
-   (in a window, where the compositor shows them, +-1.5 ms), the sum over 10 s does not. */
+   (in a window, where the compositor shows them, +-1.5 ms), the sum over 10 s does not. An interval far between whole
+   refreshes (a present returned late, the window's thread held up) has no sure count: counted as one refresh, a few of
+   them in a short sample made 120 Hz look like 117.5 (Windows playtest of 0.2), so they are left out, unless that
+   would leave out most of the sample (the guess itself wrong). */
 enum { NIVL = 1200 };
 static double period_of(const double *v, int n, double guess, int *irregular) {
-    double t = 0, k = 0; int bad = 0;
-    for (int i = 0; i < n; i++) { double r = v[i] / guess; const double kk = r < 1.5 ? 1 : (double)(int)(r + 0.5); t += v[i]; k += kk; if (kk > 1 || r < 0.6) bad++; }
+    double t = 0, k = 0, ts = 0, ks = 0; int bad = 0;
+    for (int i = 0; i < n; i++) {
+        const double r = v[i] / guess, kk = r < 1.5 ? 1 : (double)(int)(r + 0.5);
+        t += v[i]; k += kk; if (kk > 1 || r < 0.6) bad++;
+        if (fabs(r - kk) <= 0.3) { ts += v[i]; ks += kk; }
+    }
     *irregular = bad * 50 > n;   /* more than 2 % missed refreshes or doubled presents */
+    if (ks * 2 > k) return ts / ks;
     return k > 0 ? t / k : guess;
 }
 /* one refresh of the display-locked way (vsync on): returns 0 if the window cannot be presented this way now */
@@ -877,17 +885,29 @@ static int ui_refresh(int x2) {
         t_last = t;
     } else t_last = 0;   /* (no present wait: FIFO's blocking paces the loop; the period stays the display mode's) */
     if (nivl >= 120 && rc % 120 == 0) {   /* the refresh period, and whether it locks (with a margin once locked) */
-        int irr; double r = period_of(ivl, nivl, rp, &irr);
-        const double rd = gsvk_present_refresh(); if (rd > 0 && fabs(rd / r - 1) < 0.02) r = rd;   /* the period the swapchain reports, when there is one */
-        rp = r;
+        int irr; double r = period_of(ivl, nivl, rp, &irr); const double rm = r;
+        /* the period the swapchain reports, when it confirms the measurement (within 0.5 %, as tight as the lock: with
+           2 % a measurement already 2 % off could be "confirmed"; 0.2 on Windows lost the lock at 117.5 Hz for good) */
+        const double rd = gsvk_present_refresh(); if (rd > 0 && fabs(rd / r - 1) < 0.005) r = rd;
         const double hz = 1.0 / r; const int n = (int)(hz / 59.94 + 0.5);
         const int ok = !irr && n >= 1 && fabs(hz / n / 59.94 - 1) <= (locked ? 0.006 : 0.005) && n % m == 0 && !(getenv("HG_LOCK") && !atoi(getenv("HG_LOCK")));
-        if (ok != locked || (ok && n != N) || irr != irregular) {
-            if (ok) L("host: display %.3f Hz: locked, each picture held %d refresh%s, emulation at %.3f VBlanks a second\n", hz, n / m, n / m > 1 ? "es" : "", hz / n);
-            else if (irr) L("host: display %.3f Hz: refreshes missed or present times irregular: not locked\n", hz);
-            else L("host: display %.3f Hz: not a whole multiple of 59.94 Hz%s: pictures at 59.94 Hz, each on the refresh nearest its time\n", hz, n % m ? " for this frame rate" : "");
-            locked = ok; N = n; hold = n / m; irregular = irr; rc = 0; sched = t;
-            if (!locked) lock_set(0, 0, 0, 0, 0);
+        {   /* not locked, or the swapchain's period not used: every 10 s what was measured and reported (why) */
+            static double t_nl; static int nl;
+            if ((!ok || (rd > 0 && r != rd)) && t - t_nl >= 10 && nl < 60) { t_nl = t; nl++;
+                L("host pacing: measured %.3f Hz over %d presents%s, the swapchain reports %.3f Hz%s\n", 1 / rm, nivl, irr ? " (irregular)" : "",
+                  rd > 0 ? 1 / rd : 0.0, rd > 0 && r != rd ? " (not used: it disagrees)" : ""); }
+        }
+        if (locked && !ok && !irr && nivl < NIVL / 2) {   /* a short sample (a new swapchain, a movie starting) does not end a lock: measuring on */
+            static int nl; if (nl++ < 20) L("host: display measured %.3f Hz over only %d presents: still locked at %.3f Hz, measuring on\n", hz, nivl, 1 / rp);
+        } else {
+            rp = r;
+            if (ok != locked || (ok && n != N) || irr != irregular) {
+                if (ok) L("host: display %.3f Hz: locked, each picture held %d refresh%s, emulation at %.3f VBlanks a second\n", hz, n / m, n / m > 1 ? "es" : "", hz / n);
+                else if (irr) L("host: display %.3f Hz: refreshes missed or present times irregular: not locked\n", hz);
+                else L("host: display %.3f Hz: not a whole multiple of 59.94 Hz%s: pictures at 59.94 Hz, each on the refresh nearest its time\n", hz, n % m ? " for this frame rate" : "");
+                locked = ok; N = n; hold = n / m; irregular = irr; rc = 0; sched = t;
+                if (!locked) lock_set(0, 0, 0, 0, 0);
+            }
         }
     }
     return 1;

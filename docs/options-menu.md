@@ -272,3 +272,42 @@ HG_GSVK=1`). Then:
 11. The game's own options (vibration, sound, volume, screen position, controller type) still change and save as
     before; `hg.ini` holds only ours.
 12. `replay.bat` of the session shows the same pages and values.
+
+## 12. Keyboard keys in the game's text (2026-10-31, for 0.2)
+
+`recomp/game/keycaps.c`. Where a message names a button with a PlayStation glyph, a player on the keyboard sees the
+bound key as a drawn keycap: the Options page's Controller Type block (`Enter: Pause`), the footers (`[X]:Select
+[S]:Back [Z]:Reset Defaults`), the pause and movie prompts, the tutorials ("press the [C] button") and the gallery's
+control lists. Rebinding a key in Options > Keyboard changes the prompts at once. The Controller page shows the key
+next to the controller button (button, controller, key); the Keyboard page is as before.
+
+- **Which device**: the UI thread marks the device that gave input last (`settings_set_device_live`, host_sdl.c:
+  a mapped key held, or a controller button or stick) and the game thread takes it at the next VBlank as a host
+  change like the controller type: recorded in the input recording (`set VB device=1`, `# set device=` in the
+  header), applied from there on replay, so a replay draws the same prompts; never in hg.ini. Headless runs and the
+  gates have no keyboard input: nothing changes (G1 and G2 identical, see section 9). Tests force it with
+  `HG_HOSTEV=100:device=1`.
+- **How the text is changed without changing the layout code**: the glyph escape is `0x03 c g 0x04` (glyph g 0xc0
+  Circle .. 0xc9 Start in colour c); tutorials reach a button's glyph through `0x13 n`, a call into the short
+  strings the game builds per controller type at 0x1991f50. Three hooks: `0x382d30` (draws a line) and `0x382730`
+  (a line's width: centring, the window's size) hand the game's own function a copy of the string flattened the way
+  its parser (0x3821f0) walks it (calls and returns included), with every glyph replaced by `0x05 key 0x06`
+  (two codes the parsers step over), in a frame on the guest stack, the text object pointed at the copy for the
+  call only; the count of elements shown so far (the typewriter effect, obj+0x2c) is mapped onto the copy. The
+  game then lays the key's letters out itself: advances, centring, window sizes and wrapping are its own. `0x381bb0`
+  (one character) draws the keycap when it meets the first letter after 0x05: four untextured sprites (a frame with
+  the corners cut, a fill; light on dark for message text, which is drawn additively, dark on light for the menus'
+  subtractive text) in one packet of the text's display list, PRIM switched to untextured and back inside it. A
+  short text that is a glyph with a colon ("(O):", the Controller Type block) is remembered, and the text that
+  follows on the same row within 40 px is moved right by what the keycap is wider than the glyph's cell (`0x384650`
+  hook). No guest memory outside the stack is written; with a controller the hooks return at once.
+- **Key names** (`settings_key_label`): SDL's names shortened to what a keycap holds: Return -> Enter, Right Shift
+  -> RShift, Left Ctrl -> Ctrl, Keypad 5 -> Num5, Escape -> Esc; letters and digits as they are; "-" when unbound
+  (then the glyph stays). The font has no arrow glyphs: Up/Down/Left/Right stay words.
+- **At 4K**: the letters are the font (HD sheets apply), the frame is flat geometry, crisp at any scale (the chamfer
+  is one game pixel). `HG_KEYCAPLOG=1` logs every text call with its string and the shift applied.
+- **Messages with glyphs on the disc** (scan of the PAC banks and SUBSCR/MSG_*.BIN): 20 strings use the escape
+  directly (menu footers, "START : Unpause game", "(^) : Skip", the DUALSHOCK notice, the gallery's control
+  lists, the slot machine's "Press (X) button to stop reel"); the tutorials ("Evasion Points", "Additional
+  Actions", "Crouch Evasion", "... Button: Run") use `0x13 n`. The longest footer, 65 characters at size 16 with
+  one-letter keys, stays inside its window; the tutorials' windows size themselves from the width hook.

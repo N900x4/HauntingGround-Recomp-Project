@@ -36,6 +36,10 @@ enum { VSYNC_MAILBOX = 0, VSYNC_ON = 1, VSYNC_OFF = 2 };   /* 0: mailbox, exact 
 /* the kind of controller that names the buttons (recorded as "padtype") */
 enum { PADKIND_NONE = 0, PADKIND_XBOX = 1, PADKIND_PS = 2 /* DualShock 3/4 */, PADKIND_PS5 = 3 /* DualSense */ };
 
+/* the device the player used last (recorded as "device"): the keyboard's keys stand in for the button glyphs in the
+   game's text while it is the keyboard (game/keycaps.c) */
+enum { DEV_PAD = 0, DEV_KEYBOARD = 1 };
+
 /* vibration strength: the game's DualShock 2 motors on the controller, scaled */
 enum { VIB_OFF = 0, VIB_LOW = 1, VIB_MEDIUM = 2, VIB_HIGH = 3 };
 
@@ -103,6 +107,9 @@ int settings_ui_upscaler(float *sharpness);   /* UI thread: 1 FSR (and its sharp
 double settings_display_aspect(void);    /* any thread: the picture's shape on the display, width / height (640 / 448, or wider) */
 float settings_wide_factor(void);        /* any thread: horizontal scale of the camera and of menus and text (1: the 4:3 picture) */
 void settings_set_pad_type_live(int t);  /* UI thread: a controller came or went (recorded as an event) */
+int settings_device(void);               /* DEV_*: the device used last (as recorded) */
+void settings_set_device_live(int d);    /* UI thread: input came from this device (recorded as an event when it changes) */
+const char *settings_key_label(int sc);  /* a short name for a keycap: "RShift", "Enter", "E" ("-" for none) */
 
 /* "press a key" / "press a button" (the mapping pages): the game thread names the target (kind 0 keyboard, 1
    controller; pb < 0: none); the UI thread turns the next key or button into a host request ("kb.<b>=<key>",

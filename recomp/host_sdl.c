@@ -297,6 +297,7 @@ static void ui_input(void) {
     if (KEY(PB_LS_UP)) an[3] = 0x00;
     if (KEY(PB_LS_DOWN)) an[3] = 0xFF;
 #undef KEY
+    if (held || an[2] != 0x80 || an[3] != 0x80) settings_set_device_live(DEV_KEYBOARD);   /* (the keys stand in for the glyphs in the text) */
     if (pad) {
         int touch_mapped = 0;
         for (int b = 0; b < PB_BUTTONS; b++) {
@@ -313,6 +314,7 @@ static void ui_input(void) {
         Sint16 rx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX), ry = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY);
         if ((long)lx * lx + (long)ly * ly > dz * dz) { an[2] = axis8(lx); an[3] = axis8(ly); }
         if ((long)rx * rx + (long)ry * ry > dz * dz) { an[0] = axis8(rx); an[1] = axis8(ry); }
+        if (held || an[0] != 0x80 || an[1] != 0x80 || an[2] != 0x80 || an[3] != 0x80) settings_set_device_live(DEV_PAD);   /* (a key and a button together: the controller) */
     }
     SDL_AtomicSet(&in_held, held); SDL_AtomicSet(&in_an, (int)((uint32_t)an[0] | (uint32_t)an[1] << 8 | (uint32_t)an[2] << 16 | (uint32_t)an[3] << 24));
 }

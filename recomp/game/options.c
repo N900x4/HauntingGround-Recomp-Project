@@ -410,17 +410,21 @@ static void draw_map_page(Draw *d, const Opt *o) {
         }
         const int pb = map_order[i];
         const char *glyph = pb == PB_CROSS ? G_CROSS : pb == PB_CIRCLE ? G_CIRCLE : pb == PB_SQUARE ? G_SQUARE : pb == PB_TRIANGLE ? G_TRIANGLE : 0;
-        if (glyph) {   /* the game's own glyph, then the name (drawn apart: a glyph sets its own colour) */
-            d_text(d, x, y, COL_NORMAL, glyph, 14);
+        if (glyph) {   /* the game's own glyph, then the name (drawn apart: a glyph sets its own colour); the glyph
+                          stands for the button, not for its key: no keycap here (game/keycaps.c) */
+            extern void keycaps_enable(int on);
+            keycaps_enable(0); d_text(d, x, y, COL_NORMAL, glyph, 14); keycaps_enable(1);
             d_text(d, x + 18, y, colour, settings_button_label(pb), 14);
         } else d_text(d, x, y, colour, settings_button_label(pb), 14);
+        const int vx = kb ? x + 118 : x + 92;   /* the controller page has a third column: the key that does the same */
         if (sel && o->capturing) {
             snprintf(val, sizeof val, "%s", kb ? "Press a key" : "Press a button");
-            d_text(d, x + 118, y, blink_alpha(d->obj) > 64 ? COL_EDIT : COL_NORMAL, val, 14);
+            d_text(d, vx, y, blink_alpha(d->obj) > 64 ? COL_EDIT : COL_NORMAL, val, 14);
         } else {
             snprintf(val, sizeof val, "%s", kb ? settings_key_name(s->kb[pb]) : settings_pad_name(s->pad[pb], kind));
-            d_text(d, x + 118, y, colour, val, 14);
+            d_text(d, vx, y, colour, val, 14);
         }
+        if (!kb && !(sel && o->capturing)) d_text(d, x + 170, y, colour, settings_key_label(s->kb[pb]), 14);
     }
 }
 static void draw_page(Draw *d, const Opt *o) {

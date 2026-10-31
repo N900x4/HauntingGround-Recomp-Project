@@ -923,6 +923,9 @@ static int ui_main(void *arg) {
             x2 = gs_interp_now() >= 2; rate = 59.94 * (x2 ? 2 : 1); period = 1.0 / rate;
             L("host: presenting at %.2f Hz\n", rate);
         }
+        if (vkmode == 2 && gsvk_lost()) {   /* the GPU stopped: the software GS's pictures through SDL from now on (gs.c) */
+            gsvk_present_drop(); vkmode = 0; lock_set(0, 0, 0, 0, 0); sdl_renderer(); L("host: the GPU stopped: presenting with SDL (native resolution)\n");
+        }
         if (vkmode == 2 && ui_vsync == VSYNC_ON && ui_refresh(x2)) { next = host_now(); continue; }
         lock_set(0, 0, 0, 0, 0);
 #endif

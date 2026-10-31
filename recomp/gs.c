@@ -2465,11 +2465,11 @@ static void gsw_issue(const Draw *d, int prim, const Vtx *w) {
     if (atomic_load(&gsw_sleepers)) { pthread_mutex_lock(&gsw_mx); pthread_cond_broadcast(&gsw_cv_work); pthread_mutex_unlock(&gsw_mx); }
     n_gsw_issued++;
 }
-static void gsw_init(void) {
+static void gsw_init(int fallback) {   /* fallback: the GPU stopped during the game (the software GS from now on) */
     const char *e = getenv("HG_GSTHREADS"); int n = e ? atoi(e) : host_ncpus() / 2;
     if (!e && n > 8) n = 8;
     if (n > GS_MAXW) n = GS_MAXW;
-    if (getenv("HG_PIXWATCH") || getenv("HG_SPRLOG") || getenv("HG_SPRSTAT") || getenv("HG_GSVKCHECK") || settings()->renderer) n = 0;   /* per-pixel debugging, or the GPU: no workers */
+    if (getenv("HG_PIXWATCH") || getenv("HG_SPRLOG") || getenv("HG_SPRSTAT") || getenv("HG_GSVKCHECK") || (settings()->renderer && !fallback)) n = 0;   /* per-pixel debugging, or the GPU: no workers */
     if (n < 1 || !(gsq = calloc(GSQ, sizeof *gsq))) { L("GS: drawing on the GS thread (HG_GSTHREADS=0)\n"); return; }
     gsw_n = n;
     for (int k = 0; k < n; k++) if (pthread_create(&gsw_thr[k], 0, gsw_main, (void *)(intptr_t)k)) { L("GS: worker %d failed to start\n", k); exit(1); }
@@ -2480,7 +2480,7 @@ static void gsw_drain(void) {}
 static void gsw_wait_seq(uint64_t seq) { (void)seq; }
 static void gsw_access(const uint64_t pages[8], int write) { (void)pages; (void)write; }
 static void gsw_issue(const Draw *d, int prim, const Vtx *w) { rasterize(d, prim, w); }
-static void gsw_init(void) {}
+static void gsw_init(int fallback) { (void)fallback; }
 static void mark_pages(uint64_t pages[8], uint32_t bp, uint32_t bw, int psm, int x0, int y0, int x1, int y1) { (void)pages; (void)bp; (void)bw; (void)psm; (void)x0; (void)y0; (void)x1; (void)y1; }
 #endif
 
@@ -3332,6 +3332,19 @@ static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg) {
     gsw_drain();   /* the display and frame dumps read local memory */
     { const uint32_t kb = (uint32_t)(cfg >> 32); memcpy(&wide_k_gs, &kb, 4); }
 #ifdef HAVE_VULKAN
+    {   /* the GPU stopped (gsvk_lost: the device was lost, or a wait or a submission failed): the software GS from here on
+           (bug report #2: a black window after a driver reset, the game running behind it). What only the GPU held, the
+           pages it drew since the CPU last read them, is gone; the CPU's copy stands (a moment of stale picture where the
+           GPU had drawn, until the game draws again). HG_GSVK_LOSE=VB tests it. */
+        static long lose_vb = -2; if (lose_vb == -2) lose_vb = getenv("HG_GSVK_LOSE") ? atol(getenv("HG_GSVK_LOSE")) : -1;
+        if (vk_live && lose_vb >= 0 && (long)vb == lose_vb) gsvk_debug_lose();
+        if (vk_live && gsvk_lost()) {
+            vk_live = 0; vk_interp = 0; vkb_mode = 0; memset(pg_gpu, 0, sizeof pg_gpu); memset(pg_cpu, 0, sizeof pg_cpu);
+            if (!gsw_n) gsw_init(1);   /* the drawing threads the software GS has (alone, the GS thread made 0.71x real time) */
+            for (int j = 0; j < 3; j++) { vi_drop(j); vi_pw[j] = 0; }
+            L("GSVK: the GPU stopped at VBlank %llu: the software GS draws from now on (native resolution)\n", (unsigned long long)vb);
+        }
+    }
     vk_reconfigure(vb, (int)(cfg & 0xFF), (int)(cfg >> 8 & 0xFF));
     if (hd_live > 0) hdtex_vblank();
 #else
@@ -3438,7 +3451,7 @@ void gs_init(uint8_t *priv) {
 #if defined(__x86_64__)
     have_avx2 = cpu_avx2() && !(getenv("HG_GSSIMD") && !strcmp(getenv("HG_GSSIMD"), "0"));
 #endif
-    gsw_init();
+    gsw_init(0);
 }
 void gs_dump_stats(void) {
     gs_sync();

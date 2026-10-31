@@ -61,7 +61,10 @@ void gsvk_stats(uint64_t *submits, uint64_t *dispatches, double *gpu_ms, double 
    same five for the replays of frame interpolation */
 void gsvk_phase_stats(double ms[10]);
 /* presenting the window from video memory (the window's pictures never leave the GPU) */
-int gsvk_ready(void);                                    /* any thread: 1 set up, 0 not yet, -1 unavailable */
+int gsvk_ready(void);
+int gsvk_lost(void);            /* any thread: the GPU stopped (device lost, a failed wait or submission) */
+void gsvk_present_drop(void);   /* UI thread: the window's swapchain away after the GPU stopped */
+void gsvk_debug_lose(void);     /* HG_GSVK_LOSE */                                    /* any thread: 1 set up, 0 not yet, -1 unavailable */
 int gsvk_present_ready(void);                            /* any thread: gsvk_present_init() succeeded */
 int gsvk_pic(const GsVkSprite *s, uint64_t *id);         /* GS thread: as gsvk_compose, into a picture image: its index (or -1), the submission */
 void gsvk_pic_release(int k);                            /* any thread: picture image k is not needed (dropped unseen) */

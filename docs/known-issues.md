@@ -32,6 +32,10 @@ welcome, especially with a recording (see the README, "Reporting bugs").
   by moving each triangle halfway between two real frames. Fast camera moves, objects appearing or vanishing, and
   repeated textures (floor tiles) can show small glitches in the in-between pictures. After a camera cut the real
   picture is shown twice instead. 60 and 120 fps add about 17 ms of input delay.
+- **If the GPU stops** (the graphics driver resets it, e.g. Windows' 2-second watchdog; 0.1 then showed a black screen
+  with the game running behind it, bug report #2), 0.2 switches to the software renderer and carries on at native
+  resolution; the log says "the GPU stopped". Restart the game to get the GPU renderer back, and please report it with
+  the logs: the cause of that reset is still being looked into.
 - **Speed limits at high settings** (measured on an RTX 5090, 0.2): x4 with 60 fps has room to spare everywhere tested;
   x6 with 60 fps in widescreen runs at full speed with little to spare (1.03-1.56x in the heaviest stretches tested). The
   renderer reproduces the PS2's graphics chip exactly for every sample (36 per pixel at x6), so its cost grows with the

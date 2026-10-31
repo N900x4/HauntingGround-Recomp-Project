@@ -58,6 +58,11 @@ enum { PRIM_MAX = 65536, CLUT_MAX = 8192, UP_BYTES = 64 << 20, AUX_MAX = 4 << 20
    wait, as before, left the GPU idle while the GS thread recorded the next work). */
 static int rh, clut_ok; static uint64_t half_id[2];
 static int state;   /* 0 untried, 1 ready, -1 unavailable */
+/* lost: the GPU stopped during the game (VK_ERROR_DEVICE_LOST: a driver reset, e.g. Windows' 2 s watchdog; or a wait or
+   submission failed): gs.c falls back to the software GS, the UI thread to SDL, instead of a black window that the game
+   runs on behind (the user's bug report #2, 2026-10-31: "window submit failed (-4)" at a cutscene) */
+static _Atomic int lost;
+int gsvk_lost(void) { return atomic_load(&lost); }
 /* presenting from video memory (the end of this file): the UI thread's queue (the family's second, or the same one
    under qmx), the timeline semaphore every GS submission signals with its id */
 static VkQueue uqueue; static int shared_q, can_present; static pthread_mutex_t qmx = PTHREAD_MUTEX_INITIALIZER; static VkSemaphore tl;
@@ -392,7 +397,8 @@ static void barrier(void) {   /* everything before (transfers, dispatches) is vi
 static void slot_wait(int k) {   /* the submission in command buffer k is done; its GPU time counted */
     if (!busy[k]) return;
     struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
-    if (vkWaitForFences(dev, 1, &fences[k], VK_TRUE, 10000000000ull)) { L("GSVK: wait failed\n"); state = -1; }
+    { const VkResult r = vkWaitForFences(dev, 1, &fences[k], VK_TRUE, 10000000000ull);
+      if (r) { if (!atomic_exchange(&lost, 1)) L("GSVK: wait failed (%d): the GPU stopped\n", (int)r); state = -1; } }
     clock_gettime(CLOCK_MONOTONIC, &t1); { const double ms = (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6; wait_ms_all += ms; wait_site_ms[wsite] += ms; }
     static uint64_t ts[QPER]; const int nq = qcnt[k];
     if (nq >= 2 && !vkGetQueryPoolResults(dev, qpool, QPER * k, (uint32_t)nq, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT)) {
@@ -504,7 +510,7 @@ static uint64_t submit(int wait) {
         if (shared_q) pthread_mutex_lock(&qmx);
         const VkResult r = vkQueueSubmit(queue, 1, &si, fences[ci]);
         if (shared_q) pthread_mutex_unlock(&qmx);
-        if (r) { L("GSVK: submit failed\n"); state = -1; return 0; }
+        if (r) { if (!atomic_exchange(&lost, 1)) L("GSVK: submit failed (%d): the GPU stopped\n", (int)r); state = -1; return 0; }
         busy[ci] = 1; sub_id[ci] = id; n_sub_id = id; n_submits++;
     }
     if (wait) { const int w = wsite; wsite = 2; for (int k = 0; k < NCMD; k++) slot_wait(k); wsite = w; nprim = nclut = 0; upoff = 0; nbin = 0; naux = 0; rh = 0; clut_ok = 0; }
@@ -1191,7 +1197,7 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, int ovw, int ovh, 
     const double p5 = host_now();
     gsvk_present_ms[0] = (p1 - p0) * 1e3; gsvk_present_ms[1] = (p2 - p1) * 1e3; gsvk_present_ms[2] = (p3 - p2) * 1e3; gsvk_present_ms[3] = (p4 - p3) * 1e3; gsvk_present_ms[4] = (p5 - p4) * 1e3;
     if (shared_q) pthread_mutex_unlock(&qmx);
-    if (r) { L("GSVK: window submit failed (%d)\n", (int)r); atomic_store(&pres_ok, 0); return 0; }
+    if (r) { L("GSVK: window submit failed (%d)\n", (int)r); atomic_store(&pres_ok, 0); if (r == VK_ERROR_DEVICE_LOST) atomic_store(&lost, 1); return 0; }
     if (fsr_dump_buf.b) {   /* (HG_FSRDUMP) */
         vkWaitForFences(dev, 1, &ufence[f], VK_TRUE, UINT64_MAX);
         FILE *df = fopen(fsr_dump_fn, "wb");
@@ -1257,6 +1263,16 @@ int gsvk_present_can_wait(void) { return can_wait; }
 int gsvk_present_gen(void) { return atomic_load(&sc_gen); }   /* any thread: swapchains made so far (a new one: the display may have changed) */
 int gsvk_present_fifo(void) { return sc && pmode == VK_PRESENT_MODE_FIFO_KHR; }   /* UI thread: the swapchain waits for the display */
 /* UI thread, before the process ends: nothing more is presented, the GPU is done with the window */
+/* UI thread, after the GPU stopped: the window's swapchain and surface away (no waiting: the device is gone), so SDL can
+   draw into the window */
+void gsvk_present_drop(void) {
+    atomic_store(&pres_ok, 0);
+    if (sc) vkDestroySwapchainKHR(dev, sc, 0);
+    if (surf) vkDestroySurfaceKHR(inst, surf, 0);
+    sc = 0; surf = 0;
+}
+/* HG_GSVK_LOSE=VB (testing): behave from that VBlank on as if the device were lost (gs.c) */
+void gsvk_debug_lose(void) { L("GSVK: HG_GSVK_LOSE: the GPU taken as stopped\n"); atomic_store(&lost, 1); state = -1; atomic_store(&pres_ok, 0); }
 void gsvk_present_shutdown(void) {
     if (!atomic_load(&pres_ok)) return;
     atomic_store(&pres_ok, 0);

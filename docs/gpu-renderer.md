@@ -255,6 +255,17 @@ shown for two VBlanks (`docs/frame-timing.md`). With `HG_GSVK_INTERP=1`:
   gamescope, VB 18,600-25,200 (the entrance, the movie, the chase): hitches 249 -> 0, in-between pictures left out
   243 -> 0, not ready 2 -> 0, sound underruns 2 -> 0. (The split between triangles moved as matched and carried by
   neighbours varies a little from run to run, as before: the matching's input, not its result.)
+- **The release build's compiler (2026-10-31, the user's playtest of the 0.2 test build).** The hallway still stuttered
+  in the release build (gcc 13, bundled) and not in the development build (gcc 16): the "slow" rule at VB 18,126 and
+  19,366, 418 in-between pictures left out in 6 minutes. gcc 13 expands every fixed-size block copy as `rep movsq`
+  (gcc 16 calls `memcpy`): slow on the user's Ryzen 9800X3D, most of all into the rings (video memory over the bus),
+  so a frame's replay took 4.4 ms instead of 1.6 and VU1 was slower too. Now every ring write goes through `ring_put`
+  (`gsvk.c`, the library's `memcpy` through a volatile pointer) and the release build compiles everything with
+  `-mstringop-strategy=libcall` (`tools/release/hgbuild.py`). Headless, unpaced, x4 + 60, the user's recording
+  `20261031-125903`: the two heaviest moments 1.04-1.10x and 0.93-1.09x real time -> 1.27-1.30x and 1.26-1.31x (as the
+  development build; the goal is 1.25x, 20 % to spare); in real time in gamescope, 4:3 and widescreen: 0 pictures left
+  out, 0 not ready, 0 underruns from VB 16,500 (widescreen 7,000) to 19,700. G1/G2 identical, G10 24/24 (x5 + 60,
+  native 60), with the release build.
 - **Shape check (2026-10-25, the user's report: a glitch in the loading screen's spinning globe).** Only the in-between
   pictures had it: long cyan shards across the armillary rings. The rings repeat one part, so a piece culled in one
   frame was paired (as the only one with its identity) with its twin across the ring, and drawn halfway between the

@@ -21,6 +21,11 @@ RTFLAGS = ['-O1', '-g', '-Wall', '-Wno-unused', '-fno-strict-aliasing']
 SDL = ['-Dmain=SDL_main', '-DHAVE_SDL']          # plus -I<include>/SDL2
 VK = ['-DHAVE_VULKAN']
 O2FP = ['-O2', '-ffp-contract=off']
+# Block copies through the C library's memcpy/memset, never expanded inline as `rep movs`/`rep stos`: gcc 13 (the Linux
+# release's) expands every fixed-size struct copy that way (gcc 16 calls memcpy), which is slow on AMD Ryzen CPUs and
+# made the 60 fps replays and VU1 of the 0.1/0.2-test release builds slower than the development build (the hallway
+# stutter of 2026-10-31). The generated code, the runtime and VU1 alike.
+STRINGOP = ['-mstringop-strategy=libcall']
 # runtime object -> (source relative to recomp/, extra flags after RTFLAGS); same order as the Makefile's link line
 RUNTIME = [
     ('runtime', 'runtime.c', []), ('hle', 'hle.c', []), ('interp', 'interp.c', []), ('iop_pad_mc', 'iop_pad_mc.c', []),
@@ -44,11 +49,11 @@ def plan(src, gen, obj, sdl_inc, sdl=None, extra_inc=()):
         name = os.path.splitext(os.path.basename(c))[0]; o = os.path.join(obj, name + '.o')
         if name.startswith('vu1_aot_'): flags = RTFLAGS + inc + O2FP + ['-g0']
         else: flags = GENFLAGS + inc
-        jobs.append((o, flags + ['-c', c, '-o', o]))
+        jobs.append((o, flags + STRINGOP + ['-c', c, '-o', o]))
     for name, rel, extra in RUNTIME + (LINUX_RUNTIME if sdl is not None else []):
         o = os.path.join(obj, name + '.o'); flags = list(RTFLAGS) + inc
         for e in extra: flags += ((sdl or SDL) + ['-I' + sdl_inc]) if e == 'SDL' else [e]
-        jobs.append((o, flags + ['-c', os.path.join(src, rel), '-o', o]))
+        jobs.append((o, flags + STRINGOP + ['-c', os.path.join(src, rel), '-o', o]))
     return jobs
 
 def main():

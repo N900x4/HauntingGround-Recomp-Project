@@ -44,7 +44,9 @@ welcome, especially with a recording (see the README, "Reporting bugs").
   a brief hitch at x4, then 30 fps for a second or two. Fixed in 0.2 (the renderer no longer waits for the in-between
   pictures, and matching them is faster): replayed in real time at x4 + 60 fps, that whole stretch has no hitch, no
   picture left out and no sound underrun. If the renderer still cannot keep up on a slower PC, the in-between pictures
-  are switched off for a moment instead of slowing the game and its sound (the F3 overlay's SKIP).
+  are switched off for a moment instead of slowing the game and its sound (the F3 overlay's SKIP). The first 0.2 test
+  build still stuttered there: its compiler made the copies to the graphics card slow on AMD CPUs (fixed: the hallway
+  now runs with 25 % to spare on the test PC).
 - **Pacing.** With V-Sync "On (smooth)" (the default) the game follows the display when its refresh rate is a
   multiple of 60 Hz (60, 120, 240): every picture stays up for the same number of refreshes, the game runs up to
   0.5 % faster than a PS2 (0.1 % at 60/120 Hz) and the sound is resampled to match. About 1 picture in 300 is still held

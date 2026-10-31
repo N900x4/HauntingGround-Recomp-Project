@@ -41,6 +41,12 @@ static int tim_on, cur_ph; static int qcnt[NCMD]; static int8_t qseg[NCMD][QPER]
    replays and snapshot, for the adaptive policy in gs.c) */
 static int tag_cur, tag_of[NCMD]; static double gpu_ms_tag;
 typedef struct { VkBuffer b; VkDeviceMemory m; void *p; VkDeviceSize n; } Buf;
+/* Every write into a ring (video memory mapped over the bus, write-combined) goes through the C library's memcpy, never
+   one the compiler expands inline: gcc 13 (the Linux release's) turns the fixed-size copies (a primitive, a CLUT) into
+   `rep movsq`, several times slower into such memory on the user's Ryzen. The interpolation replays then took 4.4 ms a
+   frame instead of 1.6 and the hallway (Debilitas' entrance) stuttered in the release but not in the development build
+   (gcc 16 calls memcpy). Through a volatile pointer no compiler can expand it. */
+static void *(*volatile ring_put)(void *, const void *, size_t) = memcpy;
 static Buf vram, dvram, xoffb, tabb, primb, clutb, upb, hrb, binb, auxb;   /* auxb: masked uploads (word, value, mask) */   /* hrb: the upscaled display read back; binb: bins of the copies' batches */
 static VkDeviceSize outbase, outbytes;   /* in dvram, after the copies */
 enum { PRIM_MAX = 65536, CLUT_MAX = 8192, UP_BYTES = 64 << 20, AUX_MAX = 4 << 20, BIN_MAX = 8 << 20, BIN = 16, BIN_MIN = 48 };
@@ -429,7 +435,7 @@ static void close_batch(void) {
                                 if (a1 >= bw) a1 = bw - 1; if (b1 >= bh) b1 = bh - 1;
                                 for (int y = b0; y <= b1; y++) for (int x = a0; x <= a1; x++) bscratch[(uint32_t)(y * bw + x) * nw + (j >> 5)] |= 1u << (j & 31);
                             }
-                            memcpy((uint32_t *)binb.p + nbin, bscratch, (size_t)words * 4);
+                            ring_put((uint32_t *)binb.p + nbin, bscratch, (size_t)words * 4);
                             pcc[5] = (int32_t)nbin; pcc[6] = bw; pcc[7] = bh; nbin += words; n_binned++;
                         }
                     }
@@ -522,7 +528,7 @@ int gsvk_hd_upload(int slot, int w, int h, int levels, const uint8_t *pix, int b
         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, (uint32_t)levels, 0, 1 } };
     if (vkCreateImageView(dev, &vi, 0, &hd_view[slot]) || !mkbuf(&st, total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
         vkDestroyImage(dev, hd_img[slot], 0); vkFreeMemory(dev, hd_mem[slot], 0); hd_img[slot] = 0; free_buf(&st); return 0; }
-    memcpy(st.p, pix, (size_t)total);
+    ring_put(st.p, pix, (size_t)total);
     close_batch(); rec_open(); phase(PH_XFER);
     VkImageMemoryBarrier b = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = 0, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
         .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -551,7 +557,7 @@ void gsvk_upload(uint32_t w, uint32_t n, const uint32_t *src) {
     if (state <= 0 || !n) return;
     close_batch();
     if (upoff + n * 4 > (uint32_t)(rh + 1) * (UP_BYTES / 2)) ring_switch();
-    memcpy((uint8_t *)upb.p + upoff, src, (size_t)n * 4);
+    ring_put((uint8_t *)upb.p + upoff, src, (size_t)n * 4);
     rec_open(); barrier(); phase(PH_XFER);
     VkBufferCopy c0 = { upoff, (VkDeviceSize)up_first * (1u << 22) + (VkDeviceSize)w * 4, (VkDeviceSize)n * 4 };
     vkCmdCopyBuffer(cmd, upb.b, dvram.b, 1, &c0);   /* over the bus once, into the set's first copy... */
@@ -575,7 +581,7 @@ void gsvk_upload_masked(const uint32_t *trip, uint32_t n) {
         return;
     }
     if (naux + words > (uint32_t)(rh + 1) * (AUX_MAX / 2)) ring_switch();
-    memcpy((uint32_t *)auxb.p + naux, trip, (size_t)n * 12);
+    ring_put((uint32_t *)auxb.p + naux, trip, (size_t)n * 12);
     GsVkSprite s; memset(&s, 0, sizeof s);
     s.prim = 5; s.px0 = 0; s.px1 = 1024; s.py0 = 0; s.py1 = (int32_t)((n + 1023) / 1024); s.z = naux; s.ly1 = (int32_t)n; s.lx0 = (int32_t)up_first; s.ln = (int32_t)up_count;
     naux += words;
@@ -588,9 +594,9 @@ void gsvk_prim(const GsVkSprite *s, const uint32_t *clut, int alone) {
     if (state <= 0) return;
     if (s->mbase == 0 && (nprim + up_count > (uint32_t)(rh + 1) * (PRIM_MAX / 2) || nclut == (uint32_t)(rh + 1) * (CLUT_MAX / 2))) ring_switch();   /* a primitive's copies stay together */
     static uint32_t last[256];   /* the ring may be video memory mapped over the bus: never read it back */
-    if (!clut_ok || memcmp(last, clut, 1024)) { memcpy(last, clut, 1024); memcpy((uint32_t *)clutb.p + nclut++ * 256, clut, 1024); clut_ok = 1; }
+    if (!clut_ok || memcmp(last, clut, 1024)) { memcpy(last, clut, 1024); ring_put((uint32_t *)clutb.p + nclut++ * 256, clut, 1024); clut_ok = 1; }
     GsVkSprite r = *s; r.clutoff = (nclut - 1) * 256; r.mbase += mbase_add;
-    ((GsVkSprite *)primb.p)[nprim] = r;   /* written once: the ring may be video memory over the bus, never read it */
+    ring_put((GsVkSprite *)primb.p + nprim, &r, sizeof r);   /* written once: the ring may be video memory over the bus, never read it */
     if (alone && skip_exact && !(s->mbase >> 20) && s->prim < 4) { nprim++; return; }   /* the set's exact copy is not drawn */
     if (alone) {
         close_batch(); rec_open(); barrier(); phase(s->prim == 4 ? PH_COMPOSE : s->prim == 5 ? PH_XFER : PH_SINGLE); use(pipe1);
@@ -995,7 +1001,7 @@ uint64_t gsvk_present(int k, uint64_t id, const uint32_t *ov, int ovw, int ovh, 
         vkCmdBlitImage(cb, pic[ucur].img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &b, VK_FILTER_LINEAR);
     }
     if (ov) {   /* the F3 overlay: 4 picture pixels from the corner, scaled with the picture */
-        memcpy((uint8_t *)ovbuf.p + (size_t)f * OVW * OVH * 4, ov, (size_t)ovw * ovh * 4);
+        ring_put((uint8_t *)ovbuf.p + (size_t)f * OVW * OVH * 4, ov, (size_t)ovw * ovh * 4);
         imgbar(cb, ovimg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         VkBufferImageCopy r2 = { .bufferOffset = (VkDeviceSize)f * OVW * OVH * 4, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { (uint32_t)ovw, (uint32_t)ovh, 1 } };
         vkCmdCopyBufferToImage(cb, ovbuf.b, ovimg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r2);

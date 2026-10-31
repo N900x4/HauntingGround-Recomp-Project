@@ -311,24 +311,18 @@ vec2 tri_uv(float px, float py) {   // a triangle's texture coordinates at (px, 
 #endif
 #ifdef COPIES
 // The copies' pictures of a render target together: copy 1 + ci + cj*N holds its texel (t, s) at the scene's (t + (ci +
-// 0.5) / N, s + (cj + 0.5) / N), so all of them are one image N times finer. Bilinear on that image at (g_hu, g_hv); each
-// tap read with texel() from its copy (wrap and clamp as the GS does).
+// 0.5) / N, s + (cj + 0.5) / N), so all of them are one image N times finer. The nearest sample of that image to (g_hu,
+// g_hv), read with texel() from its copy (wrap and clamp as the GS does): one read, as a copy's own nearest sample was;
+// bilinear on the fine image (four reads) cost the glow's full-screen passes so much that x6 outdoors went over the GPU
+// budget (60 fps pictures left out, the user's playtest), and the fine image is already smooth.
 int fdiv(int a, int n) { return a >= 0 ? a / n : -((-a + n - 1) / n); }
 uint sample_hr() {
-    const int N = PF(cn); const uint kb = va_b, ks = va_s, setb = prims[pi].mbase + (1u << 20) - 1u;
-    const float K = g_hu * float(N) - 0.5, L = g_hv * float(N) - 0.5;
-    const int k0 = int(floor(K)), l0 = int(floor(L)); const float fk = K - float(k0), fl = L - float(l0);
-    vec4 acc = vec4(0.0);
-    [[dont_unroll]] for (int q = 0; q < 4; q++) {
-        const int k = k0 + (q & 1), l = l0 + (q >> 1), t = fdiv(k, N), tv = fdiv(l, N);
-        va_b = setb + uint(1 + (k - t * N) + (l - tv * N) * N); va_s = uint(N * N);
-        const uint c = texel(t, tv);
-        const float w = ((q & 1) != 0 ? fk : 1.0 - fk) * ((q >> 1) != 0 ? fl : 1.0 - fl);
-        acc += w * vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u), float(c >> 24));
-    }
+    const int N = PF(cn); const uint kb = va_b, ks = va_s;
+    const int k = int(floor(g_hu * float(N))), l = int(floor(g_hv * float(N))), t = fdiv(k, N), tv = fdiv(l, N);
+    va_b = prims[pi].mbase + (1u << 20) + uint((k - t * N) + (l - tv * N) * N); va_s = uint(N * N);
+    const uint c = texel(t, tv);
     va_b = kb; va_s = ks;
-    const uvec4 r = uvec4(acc + 0.5);
-    return r.x | (r.y << 8u) | (r.z << 16u) | (r.w << 24u);
+    return c;
 }
 #endif
 uint shade(uint vcol, int u16, int v16, uint fog) {

@@ -290,7 +290,8 @@ resolution the same layer just looks soft). Now a sprite that enlarges a render 
 |dv| under 1) reads it in the copies as one image made of all of them: copy `1 + ci + cj*N` holds texel (t, s) at the
 scene's (t + (ci + 0.5) / N, s + (cj + 0.5) / N), so `sample_hr()` filters bilinearly on that N times finer grid at the
 pixel's position in the scene. The exact copy is untouched (G1/G2 identical). Brightness is the same (mean within 0.1
-level); the cost at x6 is about 6 % of the copies' time (the heaviest stretch of the opening 1.03 -> 1.00x unpaced).
+level). One nearest read on the fine grid (bilinear there, four reads, cost 6 % of the copies' time at x6 and put x6
+outdoors over the GPU budget in the user's playtest; one read costs what the coarse read did, and looks the same).
 Setting `softfocus = hires | original` (Options "Soft focus", `HG_HRFX=0` for original).
 
 ## FSR 1 for the window (2026-10-31)

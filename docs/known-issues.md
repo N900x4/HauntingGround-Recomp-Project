@@ -32,11 +32,14 @@ welcome, especially with a recording (see the README, "Reporting bugs").
   by moving each triangle halfway between two real frames. Fast camera moves, objects appearing or vanishing, and
   repeated textures (floor tiles) can show small glitches in the in-between pictures. After a camera cut the real
   picture is shown twice instead. 60 and 120 fps add about 17 ms of input delay.
-- **Speed limits at high settings** (measured on an RTX 5090): x4 with 60 fps has room to spare in every room tested
-  (7-10 ms of GPU work per 16.7 ms); x5 (about 4K) with 60 fps needs up to 14.7 ms in the heaviest rooms, where some
-  in-between pictures are left out (the F3 overlay's SKIP); x6 with 60 fps (77 %) and x5 with 120 fps (55 %) are too
-  slow. 120 fps is offered at native resolution only. Slower GPUs will reach
-  full speed at lower factors; pick a lower resolution if the F3 overlay shows less than 100 %.
+- **Speed limits at high settings** (measured on an RTX 5090, 0.2): x4 with 60 fps has room to spare everywhere tested;
+  x6 with 60 fps in widescreen runs at full speed with little to spare (1.03-1.56x in the heaviest stretches tested). The
+  renderer reproduces the PS2's graphics chip exactly for every sample (36 per pixel at x6), so its cost grows with the
+  square of the factor. Estimated Resolution for 60 fps on a 4K display (scaled from the RTX 5090, not yet measured on
+  the other cards): fast GPUs (RTX 4080/5080 class and up) x4-x6;
+  mid-range (RTX 3060 Ti-4070 class) x2-x3; older or integrated GPUs native or x2. Upscaling "FSR" (the default) enlarges
+  a lower factor to the display sharply, so x3 with FSR looks close to a higher factor. Pick a lower resolution if the
+  F3 overlay shows less than 100 % or SKIP. 120 fps is offered at native resolution only.
 - **HD textures** replace the game's textures in the upscaled picture (stage textures, characters, menu panels): AI
   upscales of the originals, so small details can differ from the PS2's look. Text (the fonts) and effects stay at
   the original resolution. The first time a texture is needed its HD version may appear a moment after the original.

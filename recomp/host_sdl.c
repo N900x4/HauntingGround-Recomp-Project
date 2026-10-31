@@ -770,8 +770,9 @@ static int ui_refresh(int x2) {
     static int minrd_win = 99;
     static int timed_ok = -1; static double slack;
     static int capped, cap_n, cap_blk;   /* the driver holding presents back (a frame-rate cap below the refresh), see below */
-    static int cap_rel = -1; static double cap_early;   /* capped: HG_PRESENT_REL=0 no target time for the driver; HG_PRESENT_EARLY refreshes before (0.8) */
-    if (cap_rel < 0) { cap_rel = !getenv("HG_PRESENT_REL") || atoi(getenv("HG_PRESENT_REL")); cap_early = getenv("HG_PRESENT_EARLY") ? atof(getenv("HG_PRESENT_EARLY")) : 0.8; if (cap_early < 0.1) cap_early = 0.1; if (cap_early > 0.95) cap_early = 0.95; }
+    static int cap_rel = -1; static double cap_early;   /* capped: HG_PRESENT_REL=0 no target time for the driver; HG_PRESENT_EARLY_MS how long before its refresh a picture is presented (6.7) */
+    if (cap_rel < 0) { cap_rel = !getenv("HG_PRESENT_REL") || atoi(getenv("HG_PRESENT_REL")); cap_early = (getenv("HG_PRESENT_EARLY_MS") ? atof(getenv("HG_PRESENT_EARLY_MS")) : 10.0) / 1000; if (cap_early < 0.0005) cap_early = 0.0005; if (cap_early > 0.03) cap_early = 0.03; }
+    static double vgrid;   /* capped, not locked: a refresh time, following the refreshes the presents reach */
     if (depth < 0) { depth = getenv("HG_PRESENT_DEPTH") ? atoi(getenv("HG_PRESENT_DEPTH")) : 1; if (depth < 1) depth = 1; if (depth > 3) depth = 3; }
     if (timed_ok < 0) { timed_ok = getenv("HG_PRESENT_TIMED") && atoi(getenv("HG_PRESENT_TIMED"));   /* (opt-in: not yet measured long enough) */ slack = (getenv("HG_PRESENT_SLACK") ? atof(getenv("HG_PRESENT_SLACK")) : 10.0) / 1000; }
     const int m = x2 ? 2 : 1;
@@ -782,18 +783,32 @@ static int ui_refresh(int x2) {
        Capped: a frame-rate cap in the driver below the refresh (NVIDIA's Max Frame Rate 117 on 120 Hz, common with
        frame generation and G-Sync; the 0.2 Windows playtest) lets only ~117 presents a second through, so a present at
        every refresh misses one refresh in ~40 and the game cannot follow the display. Then each picture is presented
-       once, 0.8 refresh before its refresh (FIFO shows it there; with relative target times the driver is told too):
-       60 presents a second, under any such cap. The driver still holds some present calls for 5-8 ms, so the margin
-       is on the late side: 90 s at x6 widescreen with the 117 cap held 2 refreshes 99.51 % at 0.6 refresh early,
-       99.84 % at 0.8 (99.82 % without the target time). */
+       once, 10 ms before its refresh (HG_PRESENT_EARLY_MS; FIFO shows it there; with relative target times the driver
+       is told too): 60 presents a second, under any such cap. The driver still holds some present calls for 5-8 ms, so
+       the margin is on the late side: 90 s at x6 widescreen with the 117 cap held 2 refreshes 99.51 % at 5 ms early,
+       99.80-99.84 % at 6.7 ms, 99.98 % at 10 ms (none held 3; the driver holds a picture presented 1.2 refreshes early
+       to its target time). The margin is in time, not refreshes, so 240 Hz keeps it; at most 0.85 refresh unless the
+       driver is given the target time (FIFO alone shows a picture at the next refresh).
+       Capped and not locked (144 or 165 Hz: no whole number of refreshes per picture): a present only when a new
+       picture is due, the same margin before the refresh nearest its time on a steady grid of refreshes (from the
+       last shown one, its jitter of a millisecond flipped pictures between 1 and 3 refreshes), instead of a present at
+       every refresh that the cap holds back. Neither without present waits (no time a picture reached the screen). */
     const int timed = locked && (timed_ok || capped) && (capped || gsvk_present_timed()) && gen == gsvk_present_gen();
-    if (timed && t_last > 0) {
-        const double due = t_last + hold * rp - (capped ? cap_early * rp : slack);
+    const int sparse = capped && !locked && t_last > 0 && gen == gsvk_present_gen();
+    if ((timed || sparse) && t_last > 0) {
+        double lead = capped ? cap_early : slack;
+        if (capped) { const double lim = timed && cap_rel && gsvk_present_timed() ? (hold - 0.25) * rp : 0.85 * rp; if (lead > lim) lead = lim; }
+        if (sparse) {   /* the grid follows the shown refreshes slowly; started again when they are 0.3 refresh off it */
+            const double e = t_last - vgrid, k = floor(e / rp + 0.5), off = e - k * rp;
+            if (vgrid <= 0 || fabs(off) > 0.3 * rp) vgrid = t_last; else vgrid += k * rp + off * 0.05;
+        }
+        const double due = timed ? t_last + hold * rp - lead
+                                 : vgrid + floor((sched - vgrid) / rp + 0.5) * rp - lead;   /* (the refresh nearest the next picture's time) */
         for (double tn = host_now(); tn < due; tn = host_now()) { if (due - tn > 0.002) SDL_Delay((Uint32)((due - tn - 0.0015) * 1000)); }
     }
     const double now = host_now();
     if (gsvk_present_gen() != gen) {   /* a new swapchain (start, resize, full screen, another display): measure again */
-        gen = gsvk_present_gen(); nivl = ivl_i = 0; t_last = 0; locked = 0; rc = 0; sched = now; irregular = 0; cap_n = cap_blk = 0;
+        gen = gsvk_present_gen(); nivl = ivl_i = 0; t_last = 0; locked = 0; rc = 0; sched = now; irregular = 0; cap_n = cap_blk = 0; vgrid = 0;
         sm_last_t = 0; sm_scan_seen = -1;
         SDL_DisplayMode dm; const int d = SDL_GetWindowDisplayIndex(win);
         rp = 1.0 / 60; if (d >= 0 && !SDL_GetDesktopDisplayMode(d, &dm) && dm.refresh_rate > 0) rp = 1.0 / dm.refresh_rate;
@@ -905,7 +920,7 @@ static int ui_refresh(int x2) {
            measured one is the same or longer (a cap can only slow the presents down), and the presents become timed */
         int via_cap = 0;
         if (!timed && cap_n >= 600) {
-            if (!capped && cap_blk * 200 > cap_n) { capped = 1; L("host: display: %d of %d presents held in the driver over half a refresh (a frame-rate cap below the refresh?): one present per picture from now on\n", cap_blk, cap_n); }
+            if (!capped && cap_blk * 200 > cap_n && gsvk_present_can_wait()) { capped = 1; L("host: display: %d of %d presents held in the driver over half a refresh (a frame-rate cap below the refresh?): one present per picture from now on\n", cap_blk, cap_n); }
             cap_n = cap_blk = 0;
         }
         if (capped && !locked) {

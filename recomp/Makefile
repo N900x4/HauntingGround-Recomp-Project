@@ -1,6 +1,8 @@
 # bootgate build: generated code (gen/) compiled once; runtime/HLE rebuilt on change. Use make -j2 at most.
 CC ?= gcc
-GENFLAGS = -O1 -w -fno-strict-aliasing -I. -Igen
+# block copies through memcpy, never inline rep movs (as tools/release/hgbuild.py: gcc 13 made them slow on AMD CPUs)
+STRINGOP = -mstringop-strategy=libcall
+GENFLAGS = -O1 -w -fno-strict-aliasing $(STRINGOP) -I. -Igen
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
 SDL_LIBS := $(shell pkg-config --libs sdl2 2>/dev/null)
 # objects per OS (obj, obj-linux), so a drive shared by Windows and Linux keeps both builds
@@ -25,7 +27,7 @@ ifneq ($(VK_LIBS),)
 VK_CFLAGS = -DHAVE_VULKAN
 VK_OBJ = $(O)/gsvk.o
 endif
-RTFLAGS = -O1 -g -Wall -Wno-unused -fno-strict-aliasing -I. -Igen
+RTFLAGS = -O1 -g -Wall -Wno-unused -fno-strict-aliasing $(STRINGOP) -I. -Igen
 GENSRC = $(wildcard gen/part*.c) gen/table.c $(wildcard gen/vu1_aot_*.c)
 GENOBJ = $(patsubst gen/%.c,$(O)/%.o,$(GENSRC))
 all: $(EXE)

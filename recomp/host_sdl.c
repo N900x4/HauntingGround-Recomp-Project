@@ -769,21 +769,28 @@ static int ui_refresh(int x2) {
     static double rp, ivl[NIVL], t_last, sched, win_t0, calm_until, ph, q_rd, q_qd, q_n; static uint64_t rc, ticks, miss_win, take_win, misses;
     static int minrd_win = 99;
     static int timed_ok = -1; static double slack;
+    static int capped, cap_n, cap_blk;   /* the driver holding presents back (a frame-rate cap below the refresh), see below */
     if (depth < 0) { depth = getenv("HG_PRESENT_DEPTH") ? atoi(getenv("HG_PRESENT_DEPTH")) : 1; if (depth < 1) depth = 1; if (depth > 3) depth = 3; }
     if (timed_ok < 0) { timed_ok = getenv("HG_PRESENT_TIMED") && atoi(getenv("HG_PRESENT_TIMED"));   /* (opt-in: not yet measured long enough) */ slack = (getenv("HG_PRESENT_SLACK") ? atof(getenv("HG_PRESENT_SLACK")) : 10.0) / 1000; }
     const int m = x2 ? 2 : 1;
     /* Timed (VK_EXT_present_timing, relative to the previous present): each picture is presented once, to be shown
        exactly `hold` refreshes after the one before it; it is taken `slack` before that (HG_PRESENT_SLACK, 10 ms), so
        the window does not present at every refresh. HG_PRESENT_TIMED=1 turns it on: so far it was measured for a
-       minute only (1 picture in 323 held 3 refreshes, like the present-every-refresh way's 1 in 300). */
-    const int timed = locked && timed_ok && gsvk_present_timed() && gen == gsvk_present_gen();
+       minute only (1 picture in 323 held 3 refreshes, like the present-every-refresh way's 1 in 300).
+       Capped: a frame-rate cap in the driver below the refresh (NVIDIA's Max Frame Rate 117 on 120 Hz, common with
+       frame generation and G-Sync; the 0.2 Windows playtest) lets only ~117 presents a second through, so a present at
+       every refresh misses one refresh in ~40 and the game cannot follow the display. Then each picture is presented
+       once, 0.6 refresh before its refresh (FIFO shows it there; the margin is larger on the late side, where the blit
+       and the compositor need time; with relative target times the driver is told too): 60 presents a second, under
+       any such cap. */
+    const int timed = locked && (timed_ok || capped) && (capped || gsvk_present_timed()) && gen == gsvk_present_gen();
     if (timed && t_last > 0) {
-        const double due = t_last + hold * rp - slack;
+        const double due = t_last + hold * rp - (capped ? 0.6 * rp : slack);
         for (double tn = host_now(); tn < due; tn = host_now()) { if (due - tn > 0.002) SDL_Delay((Uint32)((due - tn - 0.0015) * 1000)); }
     }
     const double now = host_now();
     if (gsvk_present_gen() != gen) {   /* a new swapchain (start, resize, full screen, another display): measure again */
-        gen = gsvk_present_gen(); nivl = ivl_i = 0; t_last = 0; locked = 0; rc = 0; sched = now; irregular = 0;
+        gen = gsvk_present_gen(); nivl = ivl_i = 0; t_last = 0; locked = 0; rc = 0; sched = now; irregular = 0; cap_n = cap_blk = 0;
         sm_last_t = 0; sm_scan_seen = -1;
         SDL_DisplayMode dm; const int d = SDL_GetWindowDisplayIndex(win);
         rp = 1.0 / 60; if (d >= 0 && !SDL_GetDesktopDisplayMode(d, &dm) && dm.refresh_rate > 0) rp = 1.0 / dm.refresh_rate;
@@ -843,6 +850,7 @@ static int ui_refresh(int x2) {
     int ow = 0, oh = 0; const uint32_t *ov = ov_build(&ow, &oh);
     const uint64_t pid = gsvk_present(s, id, ov, ow, oh, timed ? (uint64_t)(hold * rp * 1e9 + 0.5) : 0);
     const double t_pr = host_now();
+    if (pid && !timed) { cap_n++; if (t_pr - t_pc > rp / 2) cap_blk++; }   /* (a present call held over half a refresh: the driver limiting the rate) */
     if (!pid) { if (s >= 0) { } SDL_Delay(8); t_last = 0; lock_set(0, 0, 0, 0, 0); locked = 0; return 1; }   /* (minimized, the swapchain being made again) */
     note_present(pid, tag, kind[0] == 'n');
     if (plog > 0) plog_line("PRESENT", host_now(), tag, 0);
@@ -889,6 +897,19 @@ static int ui_refresh(int x2) {
         /* the period the swapchain reports, when it confirms the measurement (within 0.5 %, as tight as the lock: with
            2 % a measurement already 2 % off could be "confirmed"; 0.2 on Windows lost the lock at 117.5 Hz for good) */
         const double rd = gsvk_present_refresh(); if (rd > 0 && fabs(rd / r - 1) < 0.005) r = rd;
+        /* capped (see `timed`): more than 0.5 % of the present calls held in the driver over half a refresh. The
+           measurement then shows the cap, not the display: the period is the swapchain's (or the display mode's), if the
+           measured one is the same or longer (a cap can only slow the presents down), and the presents become timed */
+        int via_cap = 0;
+        if (!timed && cap_n >= 600) {
+            if (!capped && cap_blk * 200 > cap_n) { capped = 1; L("host: display: %d of %d presents held in the driver over half a refresh (a frame-rate cap below the refresh?): one present per picture from now on\n", cap_blk, cap_n); }
+            cap_n = cap_blk = 0;
+        }
+        if (capped && !locked) {
+            double rcap = rd;
+            if (!(rcap > 0)) { SDL_DisplayMode dm; const int d = SDL_GetWindowDisplayIndex(win); if (d >= 0 && !SDL_GetDesktopDisplayMode(d, &dm) && dm.refresh_rate > 0) rcap = 1.0 / dm.refresh_rate; }
+            if (rcap > 0 && rm >= rcap * 0.995 && rm <= rcap * 1.05) { r = rcap; irr = 0; via_cap = 1; }
+        }
         const double hz = 1.0 / r; const int n = (int)(hz / 59.94 + 0.5);
         const int ok = !irr && n >= 1 && fabs(hz / n / 59.94 - 1) <= (locked ? 0.006 : 0.005) && n % m == 0 && !(getenv("HG_LOCK") && !atoi(getenv("HG_LOCK")));
         {   /* not locked, or the swapchain's period not used: every 10 s what was measured and reported (why) */
@@ -902,11 +923,13 @@ static int ui_refresh(int x2) {
         } else {
             rp = r;
             if (ok != locked || (ok && n != N) || irr != irregular) {
-                if (ok) L("host: display %.3f Hz: locked, each picture held %d refresh%s, emulation at %.3f VBlanks a second\n", hz, n / m, n / m > 1 ? "es" : "", hz / n);
+                if (ok) L("host: display %.3f Hz: locked, each picture held %d refresh%s, emulation at %.3f VBlanks a second%s\n", hz, n / m, n / m > 1 ? "es" : "", hz / n,
+                          capped ? " (one present per picture, timed: the driver caps the presents)" : "");
                 else if (irr) L("host: display %.3f Hz: refreshes missed or present times irregular: not locked\n", hz);
                 else L("host: display %.3f Hz: not a whole multiple of 59.94 Hz%s: pictures at 59.94 Hz, each on the refresh nearest its time\n", hz, n % m ? " for this frame rate" : "");
                 locked = ok; N = n; hold = n / m; irregular = irr; rc = 0; sched = t;
                 if (!locked) lock_set(0, 0, 0, 0, 0);
+                if (locked && via_cap) { nivl = ivl_i = 0; t_last = 0; }   /* (measured again from the timed presents, not the capped ones) */
             }
         }
     }

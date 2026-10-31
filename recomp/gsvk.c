@@ -912,7 +912,8 @@ static int mk_swapchain(void) {
             if (dm[i] == VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR) { pt_dom = di[i]; sc_ptim = 1; pt_qpc = 1; }
             else if (!sc_ptim) { pt_dom = di[i]; sc_ptim = 1; }   /* (a local clock in ns: the intervals, not the host's time) */
         }
-        static int nl; if (nl++ < 4) L("GSVK: present timing %s (time domains%s)\n", sc_ptim ? pt_qpc ? "on (first pixel out, QueryPerformanceCounter)" : "on (first pixel out, a local clock)" : "off", dl);
+        static int nl; if (nl++ < 4) L("GSVK: present timing %s (time domains%s)%s\n", sc_ptim ? pt_qpc ? "on (first pixel out, QueryPerformanceCounter)" : "on (first pixel out, a local clock)" : "off", dl,
+                                      sc_ptim ? sc_prel ? " (relative target times: yes)" : " (relative target times: no)" : "");
     }
     if (sc) vkDestroySwapchainKHR(dev, sc, 0);
     for (uint32_t i = 0; i < scn; i++) vkDestroySemaphore(dev, scdone[i], 0);

@@ -45,6 +45,8 @@ $(O)/overrides.o: overrides.c ee_runtime.h hle.h settings.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/options.o: game/options.c game/guest.h ee_runtime.h hle.h settings.h hdtex.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
+$(O)/keycaps.o: game/keycaps.c game/guest.h ee_runtime.h hle.h settings.h
+	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/gs.o: gs.c ee_runtime.h hle.h compat.h gsvk.h settings.h hdtex.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) $(VK_CFLAGS) -O2 -ffp-contract=off -c $< -o $@
 gen/gs_sprite_spv.h: vk/gs_sprite.comp
@@ -85,7 +87,7 @@ $(O)/compat.o: compat.c compat.h ee_runtime.h hle.h
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
 $(O)/glibc23.o: glibc23.c
 	@mkdir -p $(O); $(CC) $(RTFLAGS) -c $< -o $@
-$(EXE): $(GENOBJ) $(O)/runtime.o $(O)/hle.o $(O)/interp.o $(O)/iop_pad_mc.o $(O)/overrides.o $(O)/options.o $(O)/settings.o $(O)/gs.o $(O)/dmac.o $(O)/host_sdl.o $(O)/vu1.o $(O)/vu1_ref.o $(O)/ipu.o $(O)/iop_cpu.o $(O)/iop_kernel.o $(O)/spu2.o $(O)/compat.o $(O)/hdtex.o $(VK_OBJ) $(OS_OBJ)
+$(EXE): $(GENOBJ) $(O)/runtime.o $(O)/hle.o $(O)/interp.o $(O)/iop_pad_mc.o $(O)/overrides.o $(O)/options.o $(O)/keycaps.o $(O)/settings.o $(O)/gs.o $(O)/dmac.o $(O)/host_sdl.o $(O)/vu1.o $(O)/vu1_ref.o $(O)/ipu.o $(O)/iop_cpu.o $(O)/iop_kernel.o $(O)/spu2.o $(O)/compat.o $(O)/hdtex.o $(VK_OBJ) $(OS_OBJ)
 	$(CC) $(LDFLAGS_OS) -o $@ $^ -lm -lpthread $(SDL_LIBS) $(VK_LIBS)
 clean:
 	rm -rf $(O) $(EXE)

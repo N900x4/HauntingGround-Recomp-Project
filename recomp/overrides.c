@@ -87,6 +87,7 @@ void overrides_init(void) {
     set_hook(0x10e2b8, ov_view_screen);
     { extern FILE *hle_prof(void); if (hle_prof()) { set_hook(0x1b86a0, ov_frame_begin); set_hook(0x1b8750, ov_frame_end); set_hook(0x2700e8, ov_rpc_call); } }
     extern void options_init(void); options_init();
+    extern void keycaps_init(void); keycaps_init();
     const char *m = getenv("HG_MOVIES");
     movie_skip = m && !strcmp(m, "skip");   /* movies play (IPU emulation); HG_MOVIES=skip skips them */
     if (getenv("HG_MOVIES_UNTIL")) skip_until = atol(getenv("HG_MOVIES_UNTIL"));

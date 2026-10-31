@@ -25,6 +25,8 @@ static _Atomic uint32_t gen = 1;
 static _Atomic int auto_scale = 0;     /* "auto" resolved by the UI thread from the display (0: not known) */
 static _Atomic int pad_type_live = 0;  /* the UI thread's view */
 static int pad_type_rec;               /* the game-visible one (recorded) */
+static _Atomic int device_live = 0;    /* the device the UI thread saw input from last */
+static int device_rec;                 /* the game-visible one (recorded): DEV_* */
 static uint32_t capture_count;         /* key or button captures (and cancels) applied so far */
 
 /* ------------------------------------------------------------------ names */
@@ -101,6 +103,26 @@ const char *settings_key_name(int sc) {
     if (n && *n) return n;
 #endif
     static char b[4][16]; static int k; char *o = b[k++ & 3]; snprintf(o, 16, "sc%d", sc); return o;
+}
+/* keycap labels: SDL's names shortened to what fits a key drawn in the text (game/keycaps.c), ASCII only (the
+   game's font): "Right Shift" -> "RShift", "Left Ctrl" -> "Ctrl", "Return" -> "Enter", "Keypad 5" -> "Num5" */
+const char *settings_key_label(int sc) {
+    static const struct { const char *sdl, *label; } tab[] = {
+        { "Return", "Enter" }, { "Escape", "Esc" }, { "Backspace", "BkSp" }, { "CapsLock", "Caps" }, { "Insert", "Ins" },
+        { "Delete", "Del" }, { "PageUp", "PgUp" }, { "PageDown", "PgDn" }, { "Left Ctrl", "Ctrl" }, { "Right Ctrl", "RCtrl" },
+        { "Left Shift", "LShift" }, { "Right Shift", "RShift" }, { "Left Alt", "Alt" }, { "Right Alt", "RAlt" },
+        { "Left GUI", "Win" }, { "Right GUI", "RWin" }, { "Keypad Enter", "NumEnt" }, { "Keypad +", "Num+" }, { "Keypad -", "Num-" },
+        { "Keypad *", "Num*" }, { "Keypad /", "Num/" }, { "Keypad .", "Num." }, { "PrintScreen", "PrtSc" }, { "ScrollLock", "ScrLk" },
+        { "Numlock", "NumLk" }, { "Application", "Menu" },
+    };
+    const char *n = settings_key_name(sc);
+    if (sc <= 0) return "-";
+    for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++) if (!strcmp(n, tab[i].sdl)) return tab[i].label;
+    static char b[4][16]; static int k; char *o = b[k++ & 3];
+    if (!strncmp(n, "Keypad ", 7)) snprintf(o, 16, "Num%s", n + 7);
+    else { int j = 0; for (const char *p = n; *p && j < 15; p++) if ((unsigned char)*p >= 0x20 && (unsigned char)*p < 0x7f && *p != ' ') o[j++] = *p; o[j] = 0; }
+    if (!o[0]) snprintf(o, 16, "sc%d", sc);
+    return o;
 }
 static int key_parse(const char *s, int *out) {
     if (!strcasecmp(s, "none") || !strcmp(s, "-")) { *out = 0; return 1; }
@@ -280,6 +302,7 @@ static int apply_to(Settings *s, const char *key, const char *v, int swap) {
         return 0;
     }
     if (!strcmp(key, "padtype")) { const int t = atoi(v); if (t < 0 || t > 3) return 0; pad_type_rec = t; return 1; }
+    if (!strcmp(key, "device")) { const int t = atoi(v); if (t < 0 || t > 1) return 0; device_rec = t; return 1; }
     return 0;
 }
 
@@ -426,6 +449,7 @@ void settings_ui_auto_scale(int h) {
 }
 uint32_t settings_generation(void) { return atomic_load(&gen); }
 int settings_pad_type(void) { return pad_type_rec; }
+int settings_device(void) { return device_rec; }
 /* widescreen (eff.wide): the shape the picture is shown in, width / height. 4:3 is the console's 640 x 448 on a TV;
    wide follows the window (the UI thread reports its size), from that up to 2.4 (3440 x 1440); with no window, 16:9. */
 static _Atomic int win_w, win_h;
@@ -490,6 +514,7 @@ void settings_write_header(FILE *f) {
     for (int i = 0; i < PB_N; i++) fprintf(f, "# set kb.%s=%s\n", pb_key[i], settings_key_name(eff.kb[i]));
     for (int i = 0; i < PB_BUTTONS; i++) fprintf(f, "# set pad.%s=%s\n", pb_key[i], settings_pad_ini(eff.pad[i]));
     fprintf(f, "# set padtype=%d\n", pad_type_rec);
+    fprintf(f, "# set device=%d\n", device_rec);
 }
 void settings_replay_header(const char *key, const char *value) {
     replaying = 1;
@@ -522,12 +547,20 @@ void settings_set_pad_type_live(int t) {
     if (atomic_exchange(&pad_type_live, t) == t) return;
     char v[8]; snprintf(v, sizeof v, "%d", t); settings_host_request("padtype", v);
 }
+void settings_set_device_live(int d) {
+    if (atomic_exchange(&device_live, d) == d) return;
+    char v[8]; snprintf(v, sizeof v, "%d", d); settings_host_request("device", v);
+}
 static void host_change(uint64_t vb, FILE *rec, const char *key, const char *value) {
     if (!strcmp(key, "capture")) { capture_count++; L("settings: key capture cancelled\n"); }
     else if (!strcmp(key, "padtype")) {
         if (pad_type_rec == atoi(value)) return;
         apply_to(&eff, key, value, 0); atomic_fetch_add(&gen, 1);
         L("settings: controller type for the names: %s\n", pad_type_rec == PADKIND_PS5 ? "DualSense" : pad_type_rec == PADKIND_PS ? "PlayStation" : pad_type_rec == PADKIND_XBOX ? "Xbox" : "none");
+    } else if (!strcmp(key, "device")) {   /* (host state like padtype: not a setting, never in hg.ini) */
+        if (device_rec == atoi(value)) return;
+        apply_to(&eff, key, value, 0); atomic_fetch_add(&gen, 1);
+        L("settings: the %s is in use: button prompts show %s\n", device_rec == DEV_KEYBOARD ? "keyboard" : "controller", device_rec == DEV_KEYBOARD ? "keys" : "the game's glyphs");
     } else {
         settings_set(key, value, "host");
         if (!strncmp(key, "kb.", 3) || !strncmp(key, "pad.", 4)) capture_count++;
@@ -539,7 +572,7 @@ void settings_vblank(uint64_t vb, int rr_mode, FILE *rec) {
         while (rev_i < rev_n && rev[rev_i].vb <= vb) {
             const SetEv *e = &rev[rev_i++];
             if (!strcmp(e->key, "capture")) { capture_count++; continue; }
-            if (!strcmp(e->key, "padtype")) { apply_to(&eff, e->key, e->value, 0); atomic_fetch_add(&gen, 1); continue; }
+            if (!strcmp(e->key, "padtype") || !strcmp(e->key, "device")) { apply_to(&eff, e->key, e->value, 0); atomic_fetch_add(&gen, 1); continue; }
             if (apply_to(&eff, e->key, e->value, 1)) {
                 L("settings: %s -> %s (recorded at VBlank %llu)\n", e->key, e->value, (unsigned long long)e->vb);
                 atomic_fetch_add(&gen, 1);

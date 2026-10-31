@@ -2527,7 +2527,13 @@ static void wide_2d(const Draw *d, int prim, Vtx *w, float k) {
         }
     }
     marked:
-    if (prim != 6) {
+    /* 2D triangles as well (2026-10-31, the user's report: a see-through box behind the examine text): the message
+       window's band is a sprite but its fading ends are triangle strips and fans (GIF path 2), so the sprite came in
+       towards the middle and the ends stayed, with gaps between that showed the scene undarkened. A triangle counts as
+       2D when it is not VU1's (the 3D models) and lies at the far end of the depth range like the game's 2D (z all
+       0xFFFFFFFF), so effects in the scene, which have depths, keep the wide camera's places. */
+    const int tri2d = prim >= 3 && prim <= 5 && gif_cur_path != 1 && w[0].z == 0xFFFFFFFFu && w[1].z == 0xFFFFFFFFu && w[2].z == 0xFFFFFFFFu;
+    if (prim != 6 && !tri2d) {
         if (wide_log_from >= 0 && (long)cur_vb >= wide_log_from && (long)cur_vb <= wide_log_to && gif_cur_path != 1 && (d->fbp == wide_disp[0] || d->fbp == wide_disp[1] || d->fbp == wide_comp)) {
             int x0 = w[0].x, x1 = w[0].x; const int nv = prim >= 3 && prim <= 5 ? 3 : prim ? 2 : 1;
             for (int i = 1; i < nv; i++) { if (w[i].x < x0) x0 = w[i].x; if (w[i].x > x1) x1 = w[i].x; }
@@ -2536,21 +2542,22 @@ static void wide_2d(const Draw *d, int prim, Vtx *w, float k) {
         }
         return;
     }
-    char cls = 's';
+    char cls = 's'; const int nv = prim == 6 ? 2 : 3;
+    int vx0 = w[0].x, vx1 = w[0].x; for (int i = 1; i < nv; i++) { if (w[i].x < vx0) vx0 = w[i].x; if (w[i].x > vx1) vx1 = w[i].x; }
     const int shown = d->fbp == wide_disp[0] || d->fbp == wide_disp[1];
     if (shown && d->tme && d->tex.tbp != d->fbp) wide_comp = d->tex.tbp;   /* a copy into the shown buffer: its source is the picture too */
     if (!shown && d->fbp != wide_comp) cls = 'o';
     else if (d->tme) {
         uint64_t tp[8] = {0}; mark_pages(tp, d->tex.tbp, d->tex.tbw, d->tex.psm, 0, 0, (int)d->tex.tw - 1, (int)d->tex.th - 1);
         for (int i = 0; i < 8; i++) if (tp[i] & (wide_rt[0][i] | wide_rt[1][i])) { cls = 'r'; break; }
-    } else if ((abs(w[1].x - w[0].x) >> 4) * 8 >= (d->scx1 - d->scx0 + 1) * 7) cls = 'f';
+    } else if (((vx1 - vx0) >> 4) * 8 >= (d->scx1 - d->scx0 + 1) * 7) cls = 'f';
     if (wide_log_from == -2) { const char *e = getenv("HG_WIDELOG"); wide_log_from = -1; if (e) { wide_log_from = atol(e); const char *c = strchr(e, ':'); wide_log_to = c ? atol(c + 1) : wide_log_from + 1; } }
     if (wide_log_from >= 0 && (long)cur_vb >= wide_log_from && (long)cur_vb <= wide_log_to)
-        L("WIDE VB %llu %c: x %d-%d y %d-%d fbp %u scissor %d-%d tme %d tbp %u tbw %u psm %02x %dx%d zte %d:%d z %u abe %d rgba %08x (shown %u %u, composed in %u)\n", (unsigned long long)cur_vb, cls,
-          w[0].x >> 4, w[1].x >> 4, w[0].y >> 4, w[1].y >> 4, d->fbp, d->scx0, d->scx1, d->tme, d->tex.tbp, d->tex.tbw, d->tex.psm, (int)d->tex.tw, (int)d->tex.th, d->zte, d->ztst, w[0].z, d->abe, w[0].rgba, wide_disp[0], wide_disp[1], wide_comp);
+        L("WIDE VB %llu %c%s: x %d-%d y %d-%d fbp %u scissor %d-%d tme %d tbp %u tbw %u psm %02x %dx%d zte %d:%d z %u abe %d rgba %08x (shown %u %u, composed in %u)\n", (unsigned long long)cur_vb, cls, prim == 6 ? "" : " (triangle)",
+          vx0 >> 4, vx1 >> 4, w[0].y >> 4, w[1].y >> 4, d->fbp, d->scx0, d->scx1, d->tme, d->tex.tbp, d->tex.tbw, d->tex.psm, (int)d->tex.tw, (int)d->tex.th, d->zte, d->ztst, w[0].z, d->abe, w[0].rgba, wide_disp[0], wide_disp[1], wide_comp);
     if (cls != 's') return;
     const int cx = wide_disp_w * 8;   /* the display's middle, 1/16 pixel */
-    for (int i = 0; i < 2; i++) w[i].x = cx + (int)lroundf((float)(w[i].x - cx) * k);
+    for (int i = 0; i < nv; i++) w[i].x = cx + (int)lroundf((float)(w[i].x - cx) * k);
 }
 static void vertex_kick(Vtx v, int draw) {
     Draw d; int prim = BITS(r_prim, 0, 3);
@@ -3179,6 +3186,14 @@ int gs_display_gpu(int *slot, uint64_t *id) { return gs_display_gpu_q(slot, id, 
 static void gs_vblank_exec(uint64_t vb, const uint8_t *priv, uint64_t cfg);
 static void *gs_main(void *arg) {
     (void)arg; host_prof_thread("gs"); host_thread_boost();
+#ifdef HAVE_VULKAN
+    {   /* the GPU renderer set up now, while the game boots, not at its first picture (VB ~470, the Capcom logo): its
+           set-up held the GS thread, the game waited for it, the sound underran and the window switched over with a
+           visible hitch at every start (the user's report, 2026-10-31) */
+        const double t0 = host_now(); gsvk_setup();
+        if (vk_live) L("GSVK: set up in %.0f ms, before the game's first picture\n", (host_now() - t0) * 1e3);
+    }
+#endif
     for (;;) {
         uint64_t t = atomic_load_explicit(&r_tail, memory_order_relaxed), h = atomic_load_explicit(&r_head, memory_order_acquire);
         if (t == h) {

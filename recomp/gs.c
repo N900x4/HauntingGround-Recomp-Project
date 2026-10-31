@@ -2522,6 +2522,10 @@ static void wide_2d(const Draw *d, int prim, Vtx *w, float k) {
         for (int i = 1; i < nv; i++) { if (w[i].x < x0) x0 = w[i].x; if (w[i].x > x1) x1 = w[i].x; if (w[i].y < y0) y0 = w[i].y; if (w[i].y > y1) y1 = w[i].y; }
         x0 >>= 4; x1 >>= 4; y0 >>= 4; y1 >>= 4;
         if (x0 < d->scx0) x0 = d->scx0; if (x1 > d->scx1) x1 = d->scx1; if (y0 < d->scy0) y0 = d->scy0; if (y1 > d->scy1) y1 = d->scy1;
+        /* a fill without texture across 7/8 of the scissor box or more (a clear, a fade's darkening) does not make the
+           buffer an effect pass's: a skipped movie fades out by darkening the composed frame (8704) once a frame, and
+           its copy to the display then came out unsqueezed, the movie stretched wide for a second (2026-11-01) */
+        if (prim == 6 && !d->tme && (x1 - x0 + 1) * 8 >= (d->scx1 - d->scx0 + 1) * 7) goto marked;
         if (x0 <= x1 && y0 <= y1) {
             if (!wide_rt_keyok || memcmp(key, wide_rt_key, sizeof key)) { memcpy(wide_rt_key, key, sizeof key); wide_rt_keyok = 1; wide_rt_box[0] = x0; wide_rt_box[1] = x1; wide_rt_box[2] = y0; wide_rt_box[3] = y1; }
             else if (x0 >= wide_rt_box[0] && x1 <= wide_rt_box[1] && y0 >= wide_rt_box[2] && y1 <= wide_rt_box[3]) goto marked;

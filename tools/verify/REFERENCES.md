@@ -17,6 +17,11 @@ out identical in mode 2 (not re-frozen).
 G10's picture references were re-made the same day (`scratch/pic_ref_x5i`, `pic_ref_n60`; two sets 24/24 within the
 gate; the old sets kept as `pic_ref_*_20261024_noiopsync`). In mode 2 (2026-10-26) two new sets of each pass against these references (24/24) and each
 other, so they were kept.
+G10's x5 + 60 reference was re-made on 2026-10-31 (the user's decision; `scratch/pic_ref_x5i` from the build of
+`efab3c5`, the old set kept as `pic_ref_x5i_20261031_beforestrict`): the upscaling copies compute with `precise` now (their
+pictures were not reproducible before; now two runs are bit-identical, 24/24) and draw the game's glow at the upscaled
+resolution (`sample_hr`). Against the old reference about 0.03 % of the samples moved (isolated edge samples) and the
+glow's pixels changed by a few levels; the native 60 reference is unchanged.
 
 The New Game route uses `HG_MOVIES=skip` and a fixed `HG_PAD` timeline; LOAD GAME needs the user's card in
 `../memcards/port0` (save 01) and the recording needs `../recordings/20261014-200745` (neither is in the repository).

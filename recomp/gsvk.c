@@ -192,12 +192,13 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     /* presenting needs the swapchain extension and timeline semaphores (Vulkan 1.2) */
     VkPhysicalDeviceTimelineSemaphoreFeatures tsf = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES };
     VkPhysicalDeviceFeatures2 f2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &tsf }; vkGetPhysicalDeviceFeatures2(phys, &f2);
-    int has_pid = 0, has_pwait = 0, has_gprio = 0, has_ptim = 0, has_cal = 0, has_fse = 0;
+    int has_pid = 0, has_pwait = 0, has_gprio = 0, has_ptim = 0, has_cal = 0, has_fse = 0, has_pexe = 0;
     { uint32_t ne = 0; vkEnumerateDeviceExtensionProperties(phys, 0, &ne, 0); VkExtensionProperties *ep = calloc(ne + 1, sizeof *ep); int sw = 0;
       if (ep) { vkEnumerateDeviceExtensionProperties(phys, 0, &ne, ep);
                 for (uint32_t i = 0; i < ne; i++) { sw |= !strcmp(ep[i].extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
                     has_pid |= !strcmp(ep[i].extensionName, "VK_KHR_present_id"); has_pwait |= !strcmp(ep[i].extensionName, "VK_KHR_present_wait");
                     has_gprio |= !strcmp(ep[i].extensionName, "VK_EXT_global_priority");
+                    has_pexe |= !strcmp(ep[i].extensionName, "VK_KHR_pipeline_executable_properties");
                     has_ptim |= !strcmp(ep[i].extensionName, "VK_EXT_present_timing");
                     has_cal |= !strcmp(ep[i].extensionName, "VK_KHR_calibrated_timestamps");
                     has_fse |= !strcmp(ep[i].extensionName, "VK_EXT_full_screen_exclusive"); }
@@ -233,7 +234,7 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
         want.textureCompressionBC = hd_bc7 ? VK_TRUE : VK_FALSE;
     }
     VkPhysicalDeviceTimelineSemaphoreFeatures tsw = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES, .timelineSemaphore = VK_TRUE };
-    const char *dext[7] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_present_id", "VK_KHR_present_wait", "VK_EXT_present_timing", "VK_EXT_global_priority", "VK_KHR_calibrated_timestamps", "VK_EXT_full_screen_exclusive" };
+    const char *dext[8] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_present_id", "VK_KHR_present_wait", "VK_EXT_present_timing", "VK_EXT_global_priority", "VK_KHR_calibrated_timestamps", "VK_EXT_full_screen_exclusive" };
     if (can_wait) { pif.presentId = VK_TRUE; pwf.presentWait = VK_TRUE; pwf.pNext = 0; tsw.pNext = &pif; }
     if (can_ptim) { can_prel = ptf.presentAtRelativeTime && !(getenv("HG_PRESENTREL") && !atoi(getenv("HG_PRESENTREL"))); ptf.presentAtAbsoluteTime = VK_FALSE; ptf.presentAtRelativeTime = can_prel ? VK_TRUE : VK_FALSE; ptf.pNext = 0; pwf.pNext = &ptf; }
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = can_present ? &tsw : 0, .queueCreateInfoCount = ufam != qfam ? 2 : 1, .pQueueCreateInfos = qcis,
@@ -250,6 +251,10 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
     if (has_fse && can_present && have_caps2 && getenv("HG_FSE") && atoi(getenv("HG_FSE"))) { dext[dci.enabledExtensionCount] = "VK_EXT_full_screen_exclusive"; dci.enabledExtensionCount++; use_fse = 1; }
     if (has_cal && can_present && getenv("HG_PACEDBG")) { dext[dci.enabledExtensionCount] = "VK_KHR_calibrated_timestamps"; dci.enabledExtensionCount++; use_cal = 1; }
     if (hd_ok) { difw.pNext = (void *)dci.pNext; dci.pNext = &difw; }
+    /* HG_GSVK_PSTATS=1: the driver's statistics of the three pipelines (registers, spills, ...; VK_KHR_pipeline_executable_properties) */
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pexf = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, .pipelineExecutableInfo = VK_TRUE };
+    const int pstats = has_pexe && getenv("HG_GSVK_PSTATS") && atoi(getenv("HG_GSVK_PSTATS"));
+    if (pstats) { dext[dci.enabledExtensionCount] = "VK_KHR_pipeline_executable_properties"; dci.enabledExtensionCount++; pexf.pNext = (void *)dci.pNext; dci.pNext = &pexf; }
     if (vkCreateDevice(phys, &dci, 0, &dev)) { L("GSVK: no device\n"); return 0; }
     if (use_cal && !(get_cal = (PFN_vkGetCalibratedTimestampsKHR)vkGetDeviceProcAddr(dev, "vkGetCalibratedTimestampsKHR"))) use_cal = 0;
     if (use_fse && !(fse_acquire = (VkResult (VKAPI_PTR *)(VkDevice, VkSwapchainKHR))vkGetDeviceProcAddr(dev, "vkAcquireFullScreenExclusiveModeEXT"))) use_fse = 0;
@@ -294,9 +299,26 @@ static int init_(const uint32_t *xoff32, const uint32_t *xoff32z, const int32_t 
                                          .pCode = k == 2 ? gs_batchc_spv : k ? gs_batch_spv : gs_sprite_spv };
         VkShaderModule sm;
         if (vkCreateShaderModule(dev, &smi, 0, &sm)) { L("GSVK: shader failed\n"); return 0; }
-        VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = pl,
+        VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = pl, .flags = pstats ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0,
             .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm, .pName = "main" } };
         if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, 0, k == 2 ? &pipebc : k ? &pipeb : &pipe1)) { L("GSVK: pipeline failed\n"); return 0; }
+        if (pstats) {
+            PFN_vkGetPipelineExecutablePropertiesKHR gpe = (PFN_vkGetPipelineExecutablePropertiesKHR)vkGetDeviceProcAddr(dev, "vkGetPipelineExecutablePropertiesKHR");
+            PFN_vkGetPipelineExecutableStatisticsKHR gps = (PFN_vkGetPipelineExecutableStatisticsKHR)vkGetDeviceProcAddr(dev, "vkGetPipelineExecutableStatisticsKHR");
+            VkPipelineInfoKHR pinf = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR, .pipeline = k == 2 ? pipebc : k ? pipeb : pipe1 };
+            uint32_t ne = 0; if (gpe && gps && !gpe(dev, &pinf, &ne, 0)) for (uint32_t e = 0; e < ne; e++) {
+                VkPipelineExecutableInfoKHR ei = { .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR, .pipeline = pinf.pipeline, .executableIndex = e };
+                VkPipelineExecutableStatisticKHR st[64]; uint32_t ns = 64;
+                for (uint32_t i = 0; i < 64; i++) st[i] = (VkPipelineExecutableStatisticKHR){ .sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR };
+                if (gps(dev, &ei, &ns, st) < 0) continue;
+                for (uint32_t i = 0; i < ns; i++) {
+                    const VkPipelineExecutableStatisticKHR *t = &st[i];
+                    if (t->format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR) L("GSVK pstats %s: %s = %llu\n", k == 2 ? "copies" : k ? "batch" : "single", t->name, (unsigned long long)t->value.u64);
+                    else if (t->format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR) L("GSVK pstats %s: %s = %lld\n", k == 2 ? "copies" : k ? "batch" : "single", t->name, (long long)t->value.i64);
+                    else if (t->format == VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR) L("GSVK pstats %s: %s = %g\n", k == 2 ? "copies" : k ? "batch" : "single", t->name, t->value.f64);
+                }
+            }
+        }
     }
     VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7 }, { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, HD_MAX } };
     VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 2, .pPoolSizes = ps,
@@ -560,15 +582,16 @@ void gsvk_upload(uint32_t w, uint32_t n, const uint32_t *src) {
     ring_put((uint8_t *)upb.p + upoff, src, (size_t)n * 4);
     rec_open(); barrier(); phase(PH_XFER);
     VkBufferCopy c0 = { upoff, (VkDeviceSize)up_first * (1u << 22) + (VkDeviceSize)w * 4, (VkDeviceSize)n * 4 };
-    vkCmdCopyBuffer(cmd, upb.b, dvram.b, 1, &c0);   /* over the bus once, into the set's first copy... */
-    if (up_count > 1) {   /* ...then from there into the others, in video memory */
-        VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT };
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, 0, 0, 0);
-        VkBufferCopy c[64]; uint32_t nc = 0;
-        for (uint32_t k = 1; k < up_count && nc < 64; k++) c[nc++] = (VkBufferCopy){ c0.dstOffset, (VkDeviceSize)(up_first + k) * (1u << 22) + (VkDeviceSize)w * 4, (VkDeviceSize)n * 4 };
-        vkCmdCopyBuffer(cmd, dvram.b, dvram.b, nc, c);
-    }
+    vkCmdCopyBuffer(cmd, upb.b, dvram.b, 1, &c0);   /* over the bus once, into the set's exact copy... */
     upoff += (n * 4 + 255) & ~255u;
+    if (up_count > 1) {   /* ...then spread from there into its interleaved copies, in video memory (prim 6, set_va) */
+        GsVkSprite s; memset(&s, 0, sizeof s);
+        const uint32_t total = n * (up_count - 1);
+        s.prim = 6; s.px0 = 0; s.px1 = 1024; s.py0 = 0; s.py1 = (int32_t)((total + 1023) / 1024); s.z = w; s.ly1 = (int32_t)n; s.lx0 = (int32_t)up_first;
+        const uint32_t keep = mbase_add; mbase_add = 0;
+        static const uint32_t noclut[256];
+        gsvk_prim(&s, noclut, 1); mbase_add = keep;
+    }
 }
 /* n (word, value, mask) triples: those bits of those words become the values', in each copy of the set (gs.c xm_flush) */
 void gsvk_upload_masked(const uint32_t *trip, uint32_t n) {
@@ -599,8 +622,8 @@ void gsvk_prim(const GsVkSprite *s, const uint32_t *clut, int alone) {
     ring_put((GsVkSprite *)primb.p + nprim, &r, sizeof r);   /* written once: the ring may be video memory over the bus, never read it */
     if (alone && skip_exact && !(s->mbase >> 20) && s->prim < 4) { nprim++; return; }   /* the set's exact copy is not drawn */
     if (alone) {
-        close_batch(); rec_open(); barrier(); phase(s->prim == 4 ? PH_COMPOSE : s->prim == 5 ? PH_XFER : PH_SINGLE); use(pipe1);
-        int32_t pc[5] = { (int32_t)nprim, 0, 0, 0, (int32_t)ncopy };
+        close_batch(); rec_open(); barrier(); phase(s->prim == 4 ? PH_COMPOSE : s->prim >= 5 ? PH_XFER : PH_SINGLE); use(pipe1);
+        int32_t pc[5] = { (int32_t)nprim, 0, 0, 0, (int32_t)up_count };   /* the copies in a set (the shader's set_va) */
         vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
         if (s->serial) vkCmdDispatch(cmd, 1, 1, 1);
         else vkCmdDispatch(cmd, (uint32_t)(s->px1 - s->px0 + 7) / 8, (uint32_t)(s->py1 - s->py0 + 7) / 8, 1);

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_control_flow_attributes : require
 #ifdef COPIES
 #extension GL_EXT_nonuniform_qualifier : require
 #endif
@@ -201,26 +202,37 @@ uint addr4(uint bp, uint bw, int x, int y) {            // nibble index
     uint page = uint((x >> 7) + (y >> 7) * int((bw + 1u) >> 1));
     return ((bp + page * 32u + uint(tab[BT4 + ((y >> 4) & 7) * 4 + ((x >> 5) & 3)])) * 512u + uint(tab[CT4 + (y & 15) * 32 + (x & 31)])) & 0x7FFFFFu;
 }
-uint rd16(uint h) { return (vm[PF(mbase) + (h >> 1)] >> ((h & 1u) * 16u)) & 0xFFFFu; }
-void wr16(uint h, uint v) { uint sh = (h & 1u) * 16u; atomicAnd(vm[PF(mbase) + (h >> 1)], ~(0xFFFFu << sh)); atomicOr(vm[PF(mbase) + (h >> 1)], (v & 0xFFFFu) << sh); }
+// Where word a of copy k (mbase = k << 20) lives (the layout rework, 2026-10-31): a set of pc.ncopy copies (its exact
+// copy and the N*N upscaling ones) takes pc.ncopy * 4 MB from word (k - k % pc.ncopy) << 20. Its exact copy is its first
+// 4 MB, as before; the upscaling copies follow interleaved, word a of copy c (1 .. N*N) at a * N*N + c - 1, so the copies
+// of a word lie side by side and the invocations of a workgroup (one small area in all copies) read and write them
+// together. A full-screen pass in scratch/perf/layoutbench: x4 0.115 -> 0.051 ms, x6 0.558 -> 0.125 ms (RTX 5090).
+uint va_b, va_s;
+void set_va(uint mbase) {
+    uint nc = uint(pc.ncopy), k = mbase >> 20, c = k % nc, sb = (k - c) << 20;
+    if (c == 0u) { va_b = sb; va_s = 1u; } else { va_b = sb + (1u << 20) + c - 1u; va_s = nc - 1u; }
+}
+#define VM(a) vm[va_b + uint(a) * va_s]
+uint rd16(uint h) { return (VM(h >> 1) >> ((h & 1u) * 16u)) & 0xFFFFu; }
+void wr16(uint h, uint v) { uint sh = (h & 1u) * 16u; atomicAnd(VM(h >> 1), ~(0xFFFFu << sh)); atomicOr(VM(h >> 1), (v & 0xFFFFu) << sh); }
 int bt16of(int psm) { return psm == CT16S ? BT16S : (psm == Z16 || psm == Z16S) ? BT16Z : BT16; }
 // read_px()/write_px() of gs.c for the formats used here
 uint read_px(uint bp, uint bw, int psm, int x, int y) {
-    if (psm == CT32 || psm == CT24) return vm[PF(mbase) + (addr32(bp, bw, x, y, 0u))];
-    if (psm == Z32 || psm == Z24) return vm[PF(mbase) + (addr32(bp, bw, x, y, 33u * 2048u))];
+    if (psm == CT32 || psm == CT24) return VM(addr32(bp, bw, x, y, 0u));
+    if (psm == Z32 || psm == Z24) return VM(addr32(bp, bw, x, y, 33u * 2048u));
     if (psm == CT16x || psm == CT16S || psm == Z16 || psm == Z16S) return rd16(addr16(bp, bw, x, y, bt16of(psm)));
-    if (psm == T8) { uint a = addr8(bp, bw, x, y); return (vm[PF(mbase) + (a >> 2)] >> ((a & 3u) * 8u)) & 255u; }
-    if (psm == T4) { uint a = addr4(bp, bw, x, y); return (vm[PF(mbase) + (a >> 3)] >> ((a & 7u) * 4u)) & 15u; }
-    if (psm == T8H) return vm[PF(mbase) + (addr32(bp, bw, x, y, 0u))] >> 24;
-    if (psm == T4HL) return (vm[PF(mbase) + (addr32(bp, bw, x, y, 0u))] >> 24) & 15u;
-    if (psm == T4HH) return vm[PF(mbase) + (addr32(bp, bw, x, y, 0u))] >> 28;
-    return vm[PF(mbase) + (addr32(bp, bw, x, y, 0u))];
+    if (psm == T8) { uint a = addr8(bp, bw, x, y); return (VM(a >> 2) >> ((a & 3u) * 8u)) & 255u; }
+    if (psm == T4) { uint a = addr4(bp, bw, x, y); return (VM(a >> 3) >> ((a & 7u) * 4u)) & 15u; }
+    if (psm == T8H) return VM(addr32(bp, bw, x, y, 0u)) >> 24;
+    if (psm == T4HL) return (VM(addr32(bp, bw, x, y, 0u)) >> 24) & 15u;
+    if (psm == T4HH) return VM(addr32(bp, bw, x, y, 0u)) >> 28;
+    return VM(addr32(bp, bw, x, y, 0u));
 }
 void write_px(uint bp, uint bw, int psm, int x, int y, uint v) {   // frame and Z formats
-    if (psm == CT32) vm[PF(mbase) + (addr32(bp, bw, x, y, 0u))] = v;
-    else if (psm == CT24) { uint a = addr32(bp, bw, x, y, 0u); vm[PF(mbase) + (a)] = (vm[PF(mbase) + (a)] & 0xFF000000u) | (v & 0xFFFFFFu); }
-    else if (psm == Z32) vm[PF(mbase) + (addr32(bp, bw, x, y, 33u * 2048u))] = v;
-    else if (psm == Z24) { uint a = addr32(bp, bw, x, y, 33u * 2048u); vm[PF(mbase) + (a)] = (vm[PF(mbase) + (a)] & 0xFF000000u) | (v & 0xFFFFFFu); }
+    if (psm == CT32) VM(addr32(bp, bw, x, y, 0u)) = v;
+    else if (psm == CT24) { uint a = addr32(bp, bw, x, y, 0u); VM(a) = (VM(a) & 0xFF000000u) | (v & 0xFFFFFFu); }
+    else if (psm == Z32) VM(addr32(bp, bw, x, y, 33u * 2048u)) = v;
+    else if (psm == Z24) { uint a = addr32(bp, bw, x, y, 33u * 2048u); VM(a) = (VM(a) & 0xFF000000u) | (v & 0xFFFFFFu); }
     else wr16(addr16(bp, bw, x, y, bt16of(psm)), v);
 }
 uint c16to32(uint c, int aem, uint ta0, uint ta1) {
@@ -238,21 +250,31 @@ int wrapc(int v, int size, int mode, int mn, int mx) {
 uint texel(int u, int v) {
     u = wrapc(u, PF(tw), PF(wms), PF(minu), PF(maxu)); v = wrapc(v, PF(th), PF(wmt), PF(minv), PF(maxv));
     uint bp = uint(PF(tbp)), bw = uint(PF(tbw)); int psm = PF(tpsm);
-    if (psm == CT32 || psm == Z32) return read_px(bp, bw, psm, u, v);
-    if (psm == CT24 || psm == Z24) { uint c = read_px(bp, bw, psm == CT24 ? CT32 : Z32, u, v) & 0xFFFFFFu; return c | (uint((PF(aem) != 0 && c == 0u) ? 0 : PF(ta0)) << 24); }
-    if (psm == CT16x || psm == CT16S || psm == Z16 || psm == Z16S) return c16to32(read_px(bp, bw, psm, u, v), PF(aem), uint(PF(ta0)), uint(PF(ta1)));
-    if (psm == T8 || psm == T8H) return clut[PF(clutoff) + (read_px(bp, bw, psm, u, v) & 255u)];
-    if (psm == T4 || psm == T4HL || psm == T4HH) return clut[PF(clutoff) + ((uint((PF(cpsm) == CT32 ? (PF(csa) & 15) : PF(csa)) * 16) + read_px(bp, bw, psm, u, v)) & 255u)];
-    return read_px(bp, bw, CT32, u, v);
+    // one read_px for every format (the code is inlined at each call: six calls made the shader far larger, 2026-10-31)
+    const bool c16 = psm == CT16x || psm == CT16S || psm == Z16 || psm == Z16S, p8 = psm == T8 || psm == T8H, p4 = psm == T4 || psm == T4HL || psm == T4HH;
+    const int rp = psm == CT24 ? CT32 : psm == Z24 ? Z32 : (psm == CT32 || psm == Z32 || c16 || p8 || p4) ? psm : CT32;
+    const uint r = read_px(bp, bw, rp, u, v);
+    if (psm == CT24 || psm == Z24) { uint c = r & 0xFFFFFFu; return c | (uint((PF(aem) != 0 && c == 0u) ? 0 : PF(ta0)) << 24); }
+    if (c16) return c16to32(r, PF(aem), uint(PF(ta0)), uint(PF(ta1)));
+    if (p8) return clut[PF(clutoff) + (r & 255u)];
+    if (p4) return clut[PF(clutoff) + ((uint((PF(cpsm) == CT32 ? (PF(csa) & 15) : PF(csa)) * 16) + r) & 255u)];
+    return r;
 }
 uint sample_(int u16, int v16) {
-    if (PF(bilinear) == 0) return texel(u16 >> 4, v16 >> 4);
-    int u = u16 - 8, v = v16 - 8, fu = u & 15, fv = v & 15; u >>= 4; v >>= 4;
-    if (fu == 0 && fv == 0) return texel(u, v);
-    uint c00 = texel(u, v), c10 = fu != 0 ? texel(u + 1, v) : 0u, c01 = fv != 0 ? texel(u, v + 1) : 0u, c11 = (fu != 0 && fv != 0) ? texel(u + 1, v + 1) : 0u;
-    uint w00 = uint((16 - fu) * (16 - fv)), w10 = uint(fu * (16 - fv)), w01 = uint((16 - fu) * fv), w11 = uint(fu * fv);
-    uint rb = ((c00 & 0xFF00FFu) * w00 + (c10 & 0xFF00FFu) * w10 + (c01 & 0xFF00FFu) * w01 + (c11 & 0xFF00FFu) * w11) >> 8;
-    uint ag = (((c00 >> 8) & 0xFF00FFu) * w00 + ((c10 >> 8) & 0xFF00FFu) * w10 + ((c01 >> 8) & 0xFF00FFu) * w01 + ((c11 >> 8) & 0xFF00FFu) * w11) >> 8;
+    // the taps in a loop that is not unrolled, so texel() is inlined once (four times before); the same integer sums
+    int u, v, fu = 0, fv = 0;
+    if (PF(bilinear) == 0) { u = u16 >> 4; v = v16 >> 4; } else { u = u16 - 8; v = v16 - 8; fu = u & 15; fv = v & 15; u >>= 4; v >>= 4; }
+    uint first = 0u, rb = 0u, ag = 0u;
+    [[dont_unroll]] for (int k = 0; k < 4; k++) {
+        const int du = k & 1, dv = k >> 1;
+        if ((du != 0 && fu == 0) || (dv != 0 && fv == 0)) continue;
+        const uint t = texel(u + du, v + dv);
+        if (k == 0) first = t;
+        const uint w = uint((du != 0 ? fu : 16 - fu) * (dv != 0 ? fv : 16 - fv));
+        rb += (t & 0xFF00FFu) * w; ag += ((t >> 8) & 0xFF00FFu) * w;
+    }
+    if (fu == 0 && fv == 0) return first;
+    rb >>= 8; ag >>= 8;
     return (rb & 0xFF00FFu) | ((ag & 0xFF00FFu) << 8);
 }
 #ifdef COPIES
@@ -366,56 +388,57 @@ void pixel(int x, int y, uint zv, uint col) {
         if (PF(fba) != 0) o |= 0x80000000u;
         if (rgb_only) o = (o & 0xFFFFFFu) | (dst32 & 0xFF000000u);
         if (PF(fb16) != 0) { uint o16 = c32to16(o); o16 = (o16 & ~PF(fbmsk)) | (dst & PF(fbmsk) & 0xFFFFu); write_px(PF(fbp), PF(fbw), int(PF(fpsm)), x, y, o16); }
-        else if (int(PF(fpsm)) == CT24 || int(PF(fpsm)) == Z24) { uint a = addr32(PF(fbp), PF(fbw), x, y, int(PF(fpsm)) == Z24 ? 33u * 2048u : 0u); vm[PF(mbase) + (a)] = (dst & 0xFF000000u) | (((o & ~PF(fbmsk)) | (dst & PF(fbmsk))) & 0xFFFFFFu); }
-        else vm[PF(mbase) + (addr32(PF(fbp), PF(fbw), x, y, int(PF(fpsm)) == Z32 ? 33u * 2048u : 0u))] = (o & ~PF(fbmsk)) | (dst & PF(fbmsk));
+        else if (int(PF(fpsm)) == CT24 || int(PF(fpsm)) == Z24) { uint a = addr32(PF(fbp), PF(fbw), x, y, int(PF(fpsm)) == Z24 ? 33u * 2048u : 0u); VM(a) = (dst & 0xFF000000u) | (((o & ~PF(fbmsk)) | (dst & PF(fbmsk))) & 0xFFFFFFu); }
+        else VM(addr32(PF(fbp), PF(fbw), x, y, int(PF(fpsm)) == Z32 ? 33u * 2048u : 0u)) = (o & ~PF(fbmsk)) | (dst & PF(fbmsk));
     }
     if (z_ok && PF(zmsk) == 0) write_px(PF(zbp), PF(fbw), PF(zpsm), x, y, zv);
 }
 // one pixel of a sprite, triangle or point, at (x, y) inside its rectangle
 void draw_at(int x, int y) {
+    // each kind sets the vertex colour, texture coordinates, depth and fog; then one shade() and one pixel() (they are
+    // inlined at every call: three calls made the shader far larger, 2026-10-31)
 #ifdef COPIES
     hd_use = false; hd_box = false;
 #endif
-    if (PF(prim) == 3) { pixel(x, y, PF(z), shade(PF(rgba), PF(x0), PF(y0), PF(fog))); return; }
-    if (PF(prim) == 0) {
+    uint zv, vcol, fogv; int u16 = 0, v16 = 0;
+    if (PF(prim) == 3) { zv = PF(z); vcol = PF(rgba); u16 = PF(x0); v16 = PF(y0); fogv = PF(fog); }
+    else if (PF(prim) == 0) {
         precise float uu = PF(u0) + float((x << 4) - PF(x0)) * PF(du);
         precise float vv = PF(v0) + float((y << 4) - PF(y0)) * PF(dv);
 #ifdef COPIES
         if (prims[pi].hd != 0) { hd_use = true; hd_uv = vec2(uu, vv) / 16.0; hd_gx = vec2(PF(du), 0.0); hd_gy = vec2(0.0, PF(dv));
                                  hd_box = true; hd_lo = vec2(min(PF(su0), PF(su1)), min(PF(sv0), PF(sv1))) / 16.0; hd_hi = vec2(max(PF(su0), PF(su1)), max(PF(sv0), PF(sv1))) / 16.0; }
 #endif
-        pixel(x, y, PF(z), shade(PF(rgba), cvt(uu), cvt(vv), PF(fog)));
-        return;
-    }
-    // draw_triangle()
-    float px = float(x), py = float(y);
-    precise float w0 = ((PF(tx1) - px) * (PF(ty2) - py) - (PF(tx2) - px) * (PF(ty1) - py)) * PF(tinv);
-    precise float w1 = ((PF(tx2) - px) * (PF(ty0) - py) - (PF(tx0) - px) * (PF(ty2) - py)) * PF(tinv);
-    precise float w2 = 1.0 - w0 - w1;
-    if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) return;
-    uint col;
-    if (PF(iip) != 0) {
-        col = 0u;
-        for (int s = 0; s < 32; s += 8) {
-            precise float c = float((PF(tc0) >> s) & 255u) * w0 + float((PF(tc1) >> s) & 255u) * w1 + float((PF(tc2) >> s) & 255u) * w2;
-            precise float c5 = c + 0.5;
-            int ci = cvt(c5); col |= uint(ci < 0 ? 0 : ci > 255 ? 255 : ci) << s;
-        }
-    } else col = PF(tc2);
-    precise double zf = double(PF(tz0)) * double(w0) + double(PF(tz1)) * double(w1) + double(PF(tz2)) * double(w2);
-    uint zv = zf <= 0.0lf ? 0u : zf >= 4294967295.0lf ? 0xFFFFFFFFu : uint(zf);
-    int u16 = 0, v16 = 0;
-    if (PF(tme) != 0) {
-        precise float q = PF(tq0) * w0 + PF(tq1) * w1 + PF(tq2) * w2;
-        precise float uu = PF(tu0) * w0 + PF(tu1) * w1 + PF(tu2) * w2, vv = PF(tv0) * w0 + PF(tv1) * w1 + PF(tv2) * w2;
-        if (PF(fst) == 0 && q != 0.0) { uu = divx(uu, q); vv = divx(vv, q); }
-        u16 = cvt(uu); v16 = cvt(vv);
+        zv = PF(z); vcol = PF(rgba); u16 = cvt(uu); v16 = cvt(vv); fogv = PF(fog);
+    } else {   // draw_triangle()
+        float px = float(x), py = float(y);
+        precise float w0 = ((PF(tx1) - px) * (PF(ty2) - py) - (PF(tx2) - px) * (PF(ty1) - py)) * PF(tinv);
+        precise float w1 = ((PF(tx2) - px) * (PF(ty0) - py) - (PF(tx0) - px) * (PF(ty2) - py)) * PF(tinv);
+        precise float w2 = 1.0 - w0 - w1;
+        if (w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6) return;
+        if (PF(iip) != 0) {
+            vcol = 0u;
+            for (int s = 0; s < 32; s += 8) {
+                precise float c = float((PF(tc0) >> s) & 255u) * w0 + float((PF(tc1) >> s) & 255u) * w1 + float((PF(tc2) >> s) & 255u) * w2;
+                precise float c5 = c + 0.5;
+                int ci = cvt(c5); vcol |= uint(ci < 0 ? 0 : ci > 255 ? 255 : ci) << s;
+            }
+        } else vcol = PF(tc2);
+        precise double zf = double(PF(tz0)) * double(w0) + double(PF(tz1)) * double(w1) + double(PF(tz2)) * double(w2);
+        zv = zf <= 0.0lf ? 0u : zf >= 4294967295.0lf ? 0xFFFFFFFFu : uint(zf);
+        if (PF(tme) != 0) {
+            precise float q = PF(tq0) * w0 + PF(tq1) * w1 + PF(tq2) * w2;
+            precise float uu = PF(tu0) * w0 + PF(tu1) * w1 + PF(tu2) * w2, vv = PF(tv0) * w0 + PF(tv1) * w1 + PF(tv2) * w2;
+            if (PF(fst) == 0 && q != 0.0) { uu = divx(uu, q); vv = divx(vv, q); }
+            u16 = cvt(uu); v16 = cvt(vv);
 #ifdef COPIES
-        if (prims[pi].hd != 0) { hd_use = true; hd_uv = vec2(uu, vv) / 16.0; hd_gx = tri_uv(px + 1.0, py) - hd_uv; hd_gy = tri_uv(px, py + 1.0) - hd_uv; }
+            if (prims[pi].hd != 0) { hd_use = true; hd_uv = vec2(uu, vv) / 16.0; hd_gx = tri_uv(px + 1.0, py) - hd_uv; hd_gy = tri_uv(px, py + 1.0) - hd_uv; }
 #endif
+        }
+        precise float ff = float(PF(tf0)) * w0 + float(PF(tf1)) * w1 + float(PF(tf2)) * w2;
+        fogv = uint(cvt(ff));
     }
-    precise float ff = float(PF(tf0)) * w0 + float(PF(tf1)) * w1 + float(PF(tf2)) * w2;
-    pixel(x, y, zv, shade(col, u16, v16, uint(cvt(ff))));
+    pixel(x, y, zv, shade(vcol, u16, v16, fogv));
 }
 #ifdef BATCH
 // The workgroup's 8x8 tile first marks, 256 primitives at a time, those whose rectangle meets it (one bit each, so
@@ -427,9 +450,10 @@ shared uint hits[8];
 // primitive that textures from a render target reads at its coordinates minus the offset too). cn = N.
 void apply_copy(int z) {
     load_mod();
-    if (z == 0 || PF(gcopy) == 0) return;
+    if (z == 0 || PF(gcopy) == 0) { set_va(PF(mbase)); return; }
     int N = PF(cn), ci = (z - 1) % N, cj = (z - 1) / N;
     float ox = float(2 * ci + 1) * 0.5 / float(N) - 0.5, oy = float(2 * cj + 1) * 0.5 / float(N) - 0.5;
+    va_b = PF(mbase) + (1u << 20) + uint(z) - 1u; va_s = uint(N * N);   // (the set's copy z: set_va without the division)
     PF(mbase) += uint(z) << 20;
     if (PF(prim) == 1) {
         PF(tx0) -= ox; PF(tx1) -= ox; PF(tx2) -= ox; PF(ty0) -= oy; PF(ty1) -= oy; PF(ty2) -= oy;
@@ -535,7 +559,7 @@ void main() {
 #ifdef COPIES
                 pi = i;
 #else
-                p = prims[i];
+                p = prims[i]; set_va(p.mbase);
 #endif
 #ifdef COPIES
                 apply_copy(zc);
@@ -554,12 +578,19 @@ void line_step(int i) {   // draw_line()
     pixel(PF(lx0) + lround_(fx), PF(ly0) + lround_(fy), PF(z), shade(PF(rgba), 0, 0, PF(fog)));
 }
 void main() {
-    p = prims[pc.n];
+    p = prims[pc.n]; set_va(p.mbase);
+    if (PF(prim) == 6) {   // an upload spread from the set's exact copy (first copy lx0) into its N*N copies: words z .. z + ly1 - 1
+        uint t = gl_GlobalInvocationID.y * 1024u + gl_GlobalInvocationID.x, nn = uint(pc.ncopy) - 1u;
+        if (gl_GlobalInvocationID.x >= 1024u || t >= uint(PF(ly1)) * nn) return;
+        uint sb = uint(PF(lx0)) << 20;   // invocation t: copy t % nn of word z + t / nn, so the writes are contiguous
+        vm[sb + (1u << 20) + PF(z) * nn + t] = vm[sb + PF(z) + t / nn];
+        return;
+    }
     if (PF(prim) == 4) {   // display: picture pixel (X, Y) is pixel (X/N, Y/N) of copy ly1 + X%N + (Y%N)*N
         int X = int(gl_GlobalInvocationID.x), Y = int(gl_GlobalInvocationID.y), N = PF(ln);   // as display_from() in gs.c
         if (X >= PF(px1) || Y >= PF(py1)) return;
         uint outw = PF(z) + uint(Y * PF(px1) + X);
-        PF(mbase) = uint(PF(ly1) + X % N + (Y % N) * N) << 20;
+        PF(mbase) = uint(PF(ly1) + X % N + (Y % N) * N) << 20; set_va(PF(mbase));
         bool is16 = PF(fpsm) == 2u || PF(fpsm) == 10u;
         uint c = read_px(PF(fbp), PF(fbw), is16 ? int(PF(fpsm)) : CT32, PF(lx0) + X / N, PF(ly0) + Y / N);
         if (is16) c = c16to32(c, 0, 0u, 0x80u);
@@ -570,7 +601,7 @@ void main() {
         uint i = gl_GlobalInvocationID.y * 1024u + gl_GlobalInvocationID.x;
         if (gl_GlobalInvocationID.x >= 1024u || i >= uint(PF(ly1))) return;
         uint w = aux[PF(z) + 3u * i], v = aux[PF(z) + 3u * i + 1u], m = aux[PF(z) + 3u * i + 2u];
-        for (int k = 0; k < PF(ln); k++) { uint a = (uint(PF(lx0) + k) << 20) + w; vm[a] = (vm[a] & ~m) | v; }
+        for (int k = 0; k < PF(ln); k++) { set_va(uint(PF(lx0) + k) << 20); VM(w) = (VM(w) & ~m) | v; }
         return;
     }
     if (PF(serial) != 0) {   // primitives that read what they write: the CPU's order, rows then columns

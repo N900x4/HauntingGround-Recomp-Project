@@ -88,10 +88,16 @@ static void decode_dds(Ent *e) {   /* DDS with the DX10 header, DXGI_FORMAT_BC7_
     if (f) fclose(f);
     const uint32_t fmt = b ? rd32le(b + 128) : 0;
     if (!b || memcmp(b, "DDS ", 4) || memcmp(b + 84, "DX10", 4) || (fmt != 98 && fmt != 99)) { L("HD textures: %s is not a BC7 .dds\n", e->path); free(b); atomic_store(&e->state, -1); return; }
-    const int h = (int)rd32le(b + 12), w = (int)rd32le(b + 16); int lv = (int)rd32le(b + 28); if (lv < 1) lv = 1;
+    const int h = (int)rd32le(b + 12), w = (int)rd32le(b + 16); int lv = (int)rd32le(b + 28);
+    if (w < 1 || h < 1 || w > 16384 || h > 16384) { L("HD textures: %s has a bad size\n", e->path); free(b); atomic_store(&e->state, -1); return; }
+    {   /* at most the full chain, log2(max(w, h)) + 1 levels: a file claiming more (up to 2^32) looped that long here and
+           asked Vulkan for an impossible image (the pre-launch security audit) */
+        int full = 1; for (int m = w > h ? w : h; m > 1; m >>= 1) full++;
+        if (lv < 1) lv = 1; if (lv > full) lv = full;
+    }
     size_t need = 0; int l = 0;
     for (int lw = w, lh = h; l < lv; l++, lw = lw > 1 ? lw / 2 : 1, lh = lh > 1 ? lh / 2 : 1) need += (size_t)((lw + 3) / 4) * ((lh + 3) / 4) * 16;
-    if (w < 1 || h < 1 || w > 16384 || h > 16384 || need > (size_t)n - 148) { L("HD textures: %s is too short\n", e->path); free(b); atomic_store(&e->state, -1); return; }
+    if (need > (size_t)n - 148) { L("HD textures: %s is too short\n", e->path); free(b); atomic_store(&e->state, -1); return; }
     memmove(b, b + 148, need);
     e->w = w; e->h = h; e->levels = lv; e->pix = b;
     atomic_store(&e->state, 3);

@@ -3,7 +3,7 @@ export HG_INI=${HG_INI:-off}   # gates never read the user's hg.ini (set HG_INI=
 case $(uname -s) in MINGW*|MSYS*|CYGWIN*) HGEXE=hgboot.exe;; *) HGEXE=hgboot;; esac   # the runtime on this OS
 # Gates G1/G1g (and G2 with HG_ROUTE=cs): frame hashes of the software GS and the GPU modes against the frozen
 # reference (ref/hashA.md5, or ref/cs.md5 for the Castle Suite route). Runs two at a time.
-# usage: hashcheck.sh TAG            (from anywhere; outputs in $HG_SCRATCH, default D:/ps2-work/scratch)
+# usage: hashcheck.sh TAG            (from anywhere; outputs in $HG_SCRATCH, default ../scratch next to the repository)
 V=$(cd "$(dirname "$0")" && pwd); R=$(cd "$V/../.." && pwd); S=${HG_SCRATCH:-$(cd "$R/.." && pwd)/scratch}; export HG_SCRATCH=$S
 T=${1:-x}; cd $R/recomp
 if [ "$HG_ROUTE" = cs ]; then REF=$V/ref/cs.md5; VB=4200; else REF=$V/ref/hashA.md5; VB=4000; fi

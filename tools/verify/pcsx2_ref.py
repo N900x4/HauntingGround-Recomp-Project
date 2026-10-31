@@ -11,7 +11,7 @@ import glob, os, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pine, wincap
 EXE = os.environ.get("PCSX2_EXE", r"C:\Program Files\PCSX2\pcsx2-qt.exe")
-DATA = os.environ.get("PCSX2_DATA", r"D:\ps2-work\tools\pcsx2-data")
+DATA = os.environ.get("PCSX2_DATA", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "tools", "pcsx2-data"))   # (next to the repository)
 ISO = os.environ.get("HG_ISO", r"D:\PS2 Games\Haunting Ground (USA)\Haunting Ground (USA).iso")
 SNAPS = os.path.join(DATA, "PCSX2", "snaps")
 PIDFILE = os.path.join(DATA, "pcsx2.pid")

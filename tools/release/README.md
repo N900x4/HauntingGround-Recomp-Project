@@ -10,7 +10,7 @@ On the development PC (Windows, MSYS2 UCRT64 as in `docs/building.md`, the pytho
 development build in `recomp/`):
 
 ```
-python tools/release/mkrelease.py                       # D:/ps2-work/scratch/release-0.1/HauntingGround-Recomp-0.1 and the zip
+python tools/release/mkrelease.py                       # ../scratch/release-win/HauntingGround-Recomp-<version> next to the repository, and the zip
 python tools/release/mkrelease.py --out D:/elsewhere --version 0.1 [--no-zip]
 ```
 

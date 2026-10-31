@@ -11,7 +11,7 @@ rem colour (hg.ini: vibration, lightbar, deadzone, touchpad_select). Touchpad cl
 rem PlayStation controller support on and owns the pad, see docs\controller.md (Steam Input).
 rem Environment variables set before starting override hg.ini, e.g.:
 rem   set HG_SCALE=3                     window size at start (default 2; hg.ini: window_scale)
-rem   set HG_WAV=D:\ps2-work\session.wav  record the game's sound
+rem   set HG_WAV=%USERPROFILE%\session.wav  record the game's sound
 rem   set HG_MOVIES=skip                 skip the movies
 rem   set HG_GSVK=1                      draw with the GPU (Vulkan; new, same picture as the software renderer)
 rem   set HG_GSVK_SCALE=5                with HG_GSVK=1: 5 times the resolution, 3200x2240, for 4K screens (2..8; up to 5 at full speed)

@@ -40,8 +40,12 @@ def iso_files(f, size):
                    'a plain .iso first.')
     root = pvd[156:156 + 34]
     out = {}
+    seen = set()   # directories already read: a damaged or crafted image that lists one inside itself is read once
+    bad = Fail('The disc image looks damaged (its directories do not make sense). Please dump the disc again.')
     def walk(lba, sz, prefix, depth):
-        if depth > 8: return
+        if depth > 8 or lba in seen: return
+        if sz > (1 << 20) or len(out) > 100000: raise bad   # (Haunting Ground's directories are a few KB, about 1400 files)
+        seen.add(lba)
         data = rd(lba, sz); off = 0
         while off < len(data):
             l = data[off]
@@ -55,7 +59,8 @@ def iso_files(f, size):
                 out[(prefix + nm).upper()] = (elba, esz, bool(flags & 2))
                 if flags & 2: walk(elba, esz, prefix + nm + '/', depth + 1)
             off += l
-    walk(struct.unpack_from('<I', root, 2)[0], struct.unpack_from('<I', root, 10)[0], '', 0)
+    try: walk(struct.unpack_from('<I', root, 2)[0], struct.unpack_from('<I', root, 10)[0], '', 0)
+    except (MemoryError, struct.error): raise bad
     for p, (lba, sz, d) in out.items():
         if not d and lba * SECTOR + sz > size:
             raise Fail('The disc image is incomplete (it is %.2f GB, but its files reach further). The dump or the copy was '

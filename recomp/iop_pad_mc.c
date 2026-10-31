@@ -92,7 +92,21 @@ static void rr_touch(const char *path) { if (rr_mode || rr_fixed()) { struct uti
 static void rr_touch_parent(const char *path) {
     char p[1100]; snprintf(p, sizeof p, "%s", path); char *sl = strrchr(p, '/'); if (sl) { *sl = 0; rr_touch(p); }
 }
-static int copy_tree(const char *from, const char *to) {   /* files and directories; file times kept */
+/* A symbolic link (on Windows any reparse point: junctions too) is never followed when a card is copied or a replay's
+   old replay_card is removed: a received recording whose replay_card or card points elsewhere would otherwise make the
+   replay copy from, or delete, files outside the recording (the pre-launch security audit, 2026-10-27). */
+#ifdef _WIN32
+__declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *);
+__declspec(dllimport) int __stdcall RemoveDirectoryA(const char *);
+__declspec(dllimport) int __stdcall DeleteFileA(const char *);
+static int is_link(const char *p) { const unsigned long a = GetFileAttributesA(p); return a != 0xFFFFFFFFul && (a & 0x400ul); }   /* FILE_ATTRIBUTE_REPARSE_POINT */
+static void unlink_link(const char *p) { if (!RemoveDirectoryA(p)) DeleteFileA(p); }   /* the link itself (a directory junction, or a file link) */
+#else
+static int is_link(const char *p) { struct stat st; return !lstat(p, &st) && S_ISLNK(st.st_mode); }
+static void unlink_link(const char *p) { unlink(p); }
+#endif
+static int copy_tree(const char *from, const char *to) {   /* files and directories; file times kept; links not followed */
+    if (is_link(from)) { L("memory card copy: %s is a link: not followed\n", from); return -1; }
     struct stat st; if (stat(from, &st)) return -1;
     if (S_ISDIR(st.st_mode)) {
         host_mkdir(to);
@@ -113,7 +127,8 @@ static int copy_tree(const char *from, const char *to) {   /* files and director
     struct utimbuf t = { st.st_atime, st.st_mtime }; utime(to, &t);   /* a directory after its contents */
     return 0;
 }
-static void remove_tree(const char *p) {
+static void remove_tree(const char *p) {   /* a link: only the link goes, never what it points at */
+    if (is_link(p)) { unlink_link(p); return; }
     struct stat st; if (stat(p, &st)) return;
     if (S_ISDIR(st.st_mode)) {
         DIR *d = opendir(p); struct dirent *de;

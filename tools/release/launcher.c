@@ -64,7 +64,7 @@ static void message(const wchar_t *text, UINT icon) {
 /* ------------------------------------------------------------------ Vulkan probe (for the default renderer) */
 static int probe_vulkan(wchar_t *what, size_t n) {
     wchar_t dll[MAX_PATH]; P(dll, MAX_PATH, L"bin\\vulkan-1.dll");
-    HMODULE m = LoadLibraryW(dll); if (!m) m = LoadLibraryW(L"vulkan-1.dll");
+    HMODULE m = LoadLibraryW(dll); if (!m) m = LoadLibraryExW(L"vulkan-1.dll", 0, LOAD_LIBRARY_SEARCH_SYSTEM32);   /* Windows' own, never one from the current folder */
     if (!m) { _snwprintf(what, n, L"no Vulkan loader"); return 0; }
     PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)(void *)GetProcAddress(m, "vkGetInstanceProcAddr");
     if (!gipa) { _snwprintf(what, n, L"broken Vulkan loader"); return 0; }
@@ -140,7 +140,7 @@ static int start_game(void) {
     STARTUPINFOW si = { sizeof si }; PROCESS_INFORMATION pi;
     HANDLE nul = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, 0);
     si.dwFlags = STARTF_USESTDHANDLES; si.hStdInput = nul; si.hStdOutput = out; si.hStdError = out;
-    wchar_t cmd[MAX_PATH + 16]; _snwprintf(cmd, MAX_PATH + 16, L"\"%ls\" -q", exe);
+    wchar_t cmd[MAX_PATH + 16]; _snwprintf(cmd, MAX_PATH + 16, L"\"%ls\" -q", exe); cmd[MAX_PATH + 15] = 0;
     logw(L"starting the game: %ls", cmd);
     if (!CreateProcessW(exe, cmd, 0, 0, TRUE, CREATE_NO_WINDOW, 0, bin, &si, &pi)) {
         DWORD e = GetLastError(); if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
@@ -187,7 +187,8 @@ static HFONT font;
 
 static void ui_line(char *line) {   /* one line from setup.py (UTF-8, without the newline) */
     log_utf8(line);
-    wchar_t w[2048]; MultiByteToWideChar(CP_UTF8, 0, line, -1, w, 2048);
+    /* at most 2047 characters, always ended (a longer line made the conversion fail and left w unset: the security audit) */
+    wchar_t w[2048]; const int k = MultiByteToWideChar(CP_UTF8, 0, line, (int)strnlen(line, 2047), w, 2047); w[k > 0 ? k : 0] = 0;
     if (!wcsncmp(w, L"@progress ", 10)) { if (w_bar) SendMessageW(w_bar, PBM_SETPOS, _wtoi(w + 10), 0); return; }
     if (!wcsncmp(w, L"@stage ", 7)) { if (w_stage) SetWindowTextW(w_stage, w + 7); }
     else if (!wcsncmp(w, L"@error ", 7)) { wcsncpy(last_error, w + 7, 2047); }
@@ -223,15 +224,20 @@ static DWORD WINAPI reader(LPVOID arg) {   /* setup.py's output, line by line, t
     return code;
 }
 static int run_setup(const wchar_t *iso) {   /* starts setup.py; returns 0 when it could not start */
-    wchar_t py[MAX_PATH], script[MAX_PATH], tcbin[MAX_PATH], cmd[4 * MAX_PATH], sys32[MAX_PATH], path[3 * MAX_PATH];
+    wchar_t py[MAX_PATH], script[MAX_PATH], tcbin[MAX_PATH], cmd[6 * MAX_PATH + 64], sys32[MAX_PATH], path[3 * MAX_PATH];   /* (room for py, script, root and a 2 x MAX_PATH iso) */
     P(py, MAX_PATH, L"engine\\python\\python.exe"); P(script, MAX_PATH, L"engine\\src\\tools\\release\\setup.py");
     P(tcbin, MAX_PATH, L"engine\\ucrt64\\bin");
     if (!exists(py) || !exists(script)) {
         _snwprintf(last_error, 2048, L"Parts of the release are missing (%ls). Please unzip the whole release again.", exists(py) ? script : py);
         return 0;
     }
-    if (iso && *iso) _snwprintf(cmd, 4 * MAX_PATH, L"\"%ls\" -u -I \"%ls\" --root \"%ls\" --iso \"%ls\"", py, script, root, iso);
-    else _snwprintf(cmd, 4 * MAX_PATH, L"\"%ls\" -u -I \"%ls\" --root \"%ls\"", py, script, root);
+    const size_t nc = sizeof cmd / sizeof cmd[0];
+    const int r = iso && *iso ? _snwprintf(cmd, nc, L"\"%ls\" -u -I \"%ls\" --root \"%ls\" --iso \"%ls\"", py, script, root, iso)
+                              : _snwprintf(cmd, nc, L"\"%ls\" -u -I \"%ls\" --root \"%ls\"", py, script, root);
+    cmd[nc - 1] = 0;
+    if (r < 0 || (size_t)r >= nc) {   /* never run a command cut short */
+        _snwprintf(last_error, 2048, L"The game's folder or the disc image's path is too long. Please move them to a shorter path (e.g. C:\\Games)."); return 0;
+    }
     /* a known PATH: the bundled compiler first, then Windows; nothing else the PC has installed */
     GetSystemDirectoryW(sys32, MAX_PATH);
     wchar_t windir[MAX_PATH]; GetWindowsDirectoryW(windir, MAX_PATH);

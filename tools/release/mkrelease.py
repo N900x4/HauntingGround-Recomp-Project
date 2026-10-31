@@ -4,7 +4,7 @@ player's PC from their own disc image with a bundled compiler and Python, and th
 (--textures; the user's decision, 2026-10-25; the repository never holds it). tools/release/mkrelease_linux.py makes
 the Linux release.
 
-    python tools/release/mkrelease.py [--out DIR] [--version 0.1] [--msys C:/msys64] [--textures DIR] [--no-zip]
+    python tools/release/mkrelease.py [--out DIR] [--version 0.2] [--msys C:/msys64] [--textures DIR] [--no-zip]
     WINEPREFIX=DIR python3 tools/release/mkrelease.py --msys /mnt/win/msys64 --python /mnt/win/.../Python314 --objs DIR ...
 
 On Linux (the development PC since 2026-10-26) the MSYS2 tree and the python.org Python are read from the Windows
@@ -228,7 +228,7 @@ def stage_python(dst, P):
 # ------------------------------------------------------------------ main
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--out', default='D:/ps2-work/scratch/release-0.1'); ap.add_argument('--version', default='0.1')
+    ap.add_argument('--out', default=os.path.join(os.path.dirname(REPO), 'scratch', 'release-win')); ap.add_argument('--version', default='0.2')   # (out: next to the repository, as mkrelease_linux.py)
     ap.add_argument('--msys', default='C:/msys64'); ap.add_argument('--no-zip', action='store_true')
     ap.add_argument('--skip-rule-check', action='store_true'); ap.add_argument('--textures', default=None)
     ap.add_argument('--python', default=sys.base_prefix if WIN else None)   # the python.org Windows Python to bundle

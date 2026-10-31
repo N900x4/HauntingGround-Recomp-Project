@@ -106,7 +106,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--gcc', required=True); ap.add_argument('--gcc-licenses', required=True); ap.add_argument('--textures', required=True)
     ap.add_argument('--out', default=os.path.join(os.path.dirname(REPO), 'scratch', 'release-linux'))
-    ap.add_argument('--version', default='0.1'); ap.add_argument('--no-zip', action='store_true')   # (no archive)
+    ap.add_argument('--version', default='0.2'); ap.add_argument('--no-zip', action='store_true')   # (no archive)
     ap.add_argument('--skip-rule-check', action='store_true')
     a = ap.parse_args()
     out = os.path.abspath(a.out)

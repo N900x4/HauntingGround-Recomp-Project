@@ -1,4 +1,4 @@
-# Known issues (release 0.1)
+# Known issues (release 0.2)
 
 What is known not to work, not to be finished, or not to be tested yet. Reports about anything here are still
 welcome, especially with a recording (see the README, "Reporting bugs").
@@ -43,7 +43,8 @@ welcome, especially with a recording (see the README, "Reporting bugs").
   the other cards): fast GPUs (RTX 4080/5080 class and up) x4-x6;
   mid-range (RTX 3060 Ti-4070 class) x2-x3; older or integrated GPUs native or x2. Upscaling "FSR" (the default) enlarges
   a lower factor to the display sharply, so x3 with FSR looks close to a higher factor. Pick a lower resolution if the
-  F3 overlay shows less than 100 % or SKIP. 120 fps is offered at native resolution only.
+  F3 overlay shows less than 100 % or SKIP. 120 fps is offered at native resolution only. At x6 outdoors, Soft focus
+  "High-res" (the default) costs the most: if x6 is not quite at full speed there, choose Soft focus "Original".
 - **HD textures** replace the game's textures in the upscaled picture (stage textures, characters, menu panels): AI
   upscales of the originals, so small details can differ from the PS2's look. Text (the fonts) and effects stay at
   the original resolution. The first time a texture is needed its HD version may appear a moment after the original.
@@ -60,6 +61,13 @@ welcome, especially with a recording (see the README, "Reporting bugs").
   one refresh longer (the driver). 144 and 165 Hz displays have no whole multiple: pictures follow the PS2's 59.94 Hz
   and some stay up one refresh longer than others (choose 120 Hz in Windows for the smoothest picture). "Exact
   59.94 Hz" is the PS2's rate on the host clock. Variable refresh rate (G-Sync/FreeSync) is not used.
+- **Frame-rate caps** (NVIDIA's Max Frame Rate, often set a few fps below the refresh for G-Sync or frame
+  generation, e.g. 117 on 120 Hz; other limiters that hold presents the same way): 0.2 notices a cap after about
+  5 seconds (the first seconds may judder) and then presents each picture once, at its time, 60 a second under the
+  cap. Measured on a 120 Hz display with a 117 cap: 99.9 % of pictures held exactly 2 refreshes (0.1 and the first
+  0.2 build: 87 %, a constant judder). Tested on 120 Hz only; 240 Hz should behave the same, 144/165 Hz improve
+  but stay uneven as above. A cap below the game's own rate cannot be worked around: 60 fps needs a cap of at least
+  60 (on a 60 Hz display a cap of 57 means stutter; raise it for this game), 120 fps one of at least 120.
 - **Linux desktops**: once in a test session (KDE Plasma, Wayland) the desktop showed only every third refresh for a few
   seconds; the game now notices this at once and keeps its own pace (the screen stutters, the game and the sound keep
   running). Full screen avoids most of the desktop's work.

@@ -30,9 +30,14 @@ is built on your PC on the first start. Thank you to everyone who tested 0.1 and
 - **Keyboard prompts:** playing on the keyboard, the PlayStation button symbols in the game's text (menus, tutorials)
   become keycaps showing *your* keys, and follow your bindings. The Controller page lists the keyboard key for each
   button. Use a controller and the PlayStation symbols come back.
+- **Smooth with a frame-rate cap:** a cap a few fps below the refresh (NVIDIA's Max Frame Rate 117 on 120 Hz, a common
+  setting for G-Sync and frame generation) made 0.1 judder constantly: only 87 % of pictures stayed up evenly. 0.2
+  notices the cap after a few seconds and times each picture itself: 99.9 % on the test PC with a 117 cap. The
+  display's refresh rate is also measured more robustly (a few slow moments at the start can no longer cost the lock).
 - **If the GPU stops** (a driver reset), the game now carries on with the software renderer instead of a black screen.
-- Fixes: the see-through bar behind the examine text in widescreen; a hitch at every start before the Capcom logo;
-  the Linux release build's compiler made the 60 fps pictures slow on AMD CPUs.
+- Fixes: the see-through bar behind the examine text in widescreen; a skipped movie showed stretched wide for a second
+  in widescreen while it faded out; a hitch at every start before the Capcom logo; the Linux release build's compiler
+  made the 60 fps pictures slow on AMD CPUs.
 - Security hardening: replays never follow links in a recording's folders, damaged `.dds` textures and disc images
   are rejected cleanly, and the Windows launcher's buffers are checked.
 

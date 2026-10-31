@@ -61,9 +61,11 @@ attach anything from `game`, `bin`, `textures` or `crashes`, or your disc image.
 
 | File | For | Size | SHA-256 |
 |---|---|---|---|
-| `HauntingGround-Recomp-0.2-win64.zip` | Windows | | |
-| `HauntingGround-Recomp-0.2-linux-x64.tar.gz` | Linux | | |
-| `HauntingGround-Recomp-0.2-compiler-sources-win64.tar` | Source of the compiler in the Windows zip (not needed to play) | | |
-| `HauntingGround-Recomp-0.2-compiler-sources-linux-x64.tar` | Source of the compiler in the Linux archive (not needed to play) | | |
+| `HauntingGround-Recomp-0.2-win64.zip` | Windows | 1,592.5 MB | `dc27e11b36147025160401f8d79fd0dd34013a318f9b6675c2a5f310434a19e5` |
+| `HauntingGround-Recomp-0.2-linux-x64.tar.gz` | Linux | 1,651.4 MB | `261a7d9f53b40eabc5c319da606b1dd27874948d7c058730fed626f0c507ba5d` |
+| `HauntingGround-Recomp-0.2-compiler-sources-win64.tar` | Source of the compiler in the Windows zip (not needed to play) | 334.6 MB | `dabe5331537fb6838f0ad90c8496c999a05e770ed60adf1eec71335c429498d4` |
+| `HauntingGround-Recomp-0.2-compiler-sources-linux-x64.tar` | Source of the compiler in the Linux archive (not needed to play) | 263.1 MB | `2f01eba0da4814dc08564a3eb1c1223f4b4f4b5f68865ead09da8d2a740ae698` |
+
+Both downloads hold the sources of commit `6ef0327` (`engine/src/COMMIT.txt`); the compilers are the same as in 0.1.
 
 Third-party licences: `THIRD_PARTY_NOTICES.txt` in the download (new in 0.2: AMD FidelityFX Super Resolution 1, MIT).

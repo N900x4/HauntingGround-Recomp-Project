@@ -268,6 +268,10 @@ int main(int argc, char **argv) {
     if (getenv("HG_FPRZ") && atoi(getenv("HG_FPRZ"))) {   /* EE FPU and VU round toward zero and flush denormals (MXCSR RC=11, FTZ, DAZ) */
         unsigned m; __asm__ volatile("stmxcsr %0" : "=m"(m)); m |= 0x6000 | 0x8000 | 0x40; __asm__ volatile("ldmxcsr %0" : : "m"(m));
     }
+    /* with a window, the GS (its thread, the GPU renderer and the window's switch to it) starts now, while the game boots,
+       not at its first GS register write about 7.5 s in, just before the Capcom logo: a hitch at every start (the user's
+       report, 2026-10-31). Headless runs keep the old order. */
+    if (host_window_wanted()) { extern void hle_gs_start(uint8_t *gs); hle_gs_start(gspriv); }
     hle_run_main(0x100008);     /* never returns */
     return 0;
 }

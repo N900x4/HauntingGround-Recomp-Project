@@ -685,6 +685,7 @@ uint64_t hle_gs_read(uint32_t pa, uint64_t v, int size) {
     return v;
 }
 void hle_gs_write(uint32_t pa, uint64_t v, int size, uint8_t *gs) { (void)pa; (void)v; (void)size; if (!gs_ready++) gs_init(gs); }
+void hle_gs_start(uint8_t *gs) { if (!gs_ready++) gs_init(gs); }   /* (with a window: at the start, runtime.c) */
 
 void hle_dump(void) {
     L("EE timers: interrupts %llu/%llu/%llu/%llu; modes %x/%x/%x/%x comp %x/%x/%x/%x next %lld/%lld/%lld/%lld (now %llu)\n", (unsigned long long)n_timer_irq[0], (unsigned long long)n_timer_irq[1],
